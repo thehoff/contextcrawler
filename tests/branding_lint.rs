@@ -1190,3 +1190,401 @@ fn branding_lint_no_unrecognised_rtk_references_in_src() {
         );
     }
 }
+
+// =====================================================================
+// Clap-aware doc-comment leak gate — issue #75
+// =====================================================================
+//
+// The allowlist-style scan above ACCEPTS all `///` lines (see the
+// `rustdoc-comment mention (///)` rule), trading off catching ~100
+// legitimate project-name mentions in rustdoc against missing novel
+// `///` phrasings in clap doc comments that leak to `--help`. The
+// v0.1.8 cycle paid for that trade with 3 hotfix rounds for clap-help
+// leaks (`RTK savings`, `RTK adoption`, `RTK equivalent`, etc).
+//
+// This test closes the gap: `///` lines that sit immediately above a
+// clap macro (`#[arg(...)]`, `#[command(...)]`, `#[clap(...)]`,
+// `#[derive(... Parser|Subcommand|Args|ValueEnum ...)]`) or inside a
+// clap-derived struct/enum body are forbidden from containing
+// case-insensitive `\brtk\b` unless explicitly allowlisted with
+// `// branding-lint: allow legacy`. Failures point at the offending
+// line and explain that it leaks to `--help` output.
+//
+// Detection is two-pass:
+//   1. Scan the file for top-level struct/enum spans whose declaration
+//      carries a clap-derive attribute. Track `(start_line, end_line)`.
+//   2. For each `///` line containing `\brtk\b`, flag it if:
+//        a. It sits inside one of those spans (field-doc leak), OR
+//        b. The doc-comment block it belongs to immediately precedes a
+//           clap-derive line (struct top-level help-text leak), OR
+//        c. The next non-doc, non-blank, non-other-attribute line is
+//           `#[arg(`, `#[command(`, or `#[clap(` (field-attribute leak
+//           — catches fields whose enclosing struct lives across module
+//           boundaries from the test's brace-tracking).
+
+/// Marker keywords inside `#[derive(...)]` that indicate clap-derived
+/// types. Match is substring (after `derive(`) so `clap::Parser` and
+/// fully-qualified imports both hit.
+const CLAP_DERIVE_MARKERS: &[&str] =
+    &["Parser", "Subcommand", "Args", "ValueEnum"];
+
+/// Attribute prefixes whose presence on the next-non-doc-line indicates
+/// the preceding `///` block leaks to `--help` output.
+const CLAP_FIELD_ATTR_PREFIXES: &[&str] = &[
+    "#[arg(",
+    "#[arg]",
+    "#[command(",
+    "#[command]",
+    "#[clap(",
+    "#[clap]",
+];
+
+/// Does the line carry a `#[derive(...)]` that lists a clap marker?
+fn line_is_clap_derive(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("#[derive(") && !trimmed.starts_with("#[derive (") {
+        return false;
+    }
+    CLAP_DERIVE_MARKERS.iter().any(|m| trimmed.contains(m))
+}
+
+/// Compute the line ranges (1-indexed, inclusive) of top-level
+/// struct/enum bodies whose declaration carries a clap-derive
+/// attribute. The scan tracks `#[derive(...)]` markers attached to the
+/// next `struct`/`enum` declaration and brace depth from the opening
+/// `{` to its matching close.
+fn clap_derived_body_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut pending_clap_derive = false;
+
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+
+        if line_is_clap_derive(line) {
+            pending_clap_derive = true;
+            i += 1;
+            continue;
+        }
+
+        if trimmed.starts_with("#[")
+            || trimmed.starts_with("///")
+            || trimmed.starts_with("//!")
+            || trimmed.starts_with("//")
+            || trimmed.is_empty()
+        {
+            i += 1;
+            continue;
+        }
+
+        let is_struct_or_enum = trimmed.starts_with("struct ")
+            || trimmed.starts_with("pub struct ")
+            || trimmed.starts_with("pub(crate) struct ")
+            || trimmed.starts_with("enum ")
+            || trimmed.starts_with("pub enum ")
+            || trimmed.starts_with("pub(crate) enum ");
+
+        if !is_struct_or_enum {
+            pending_clap_derive = false;
+            i += 1;
+            continue;
+        }
+
+        if !pending_clap_derive {
+            i += 1;
+            continue;
+        }
+
+        let mut open_line = i;
+        while open_line < lines.len() && !lines[open_line].contains('{') {
+            open_line += 1;
+        }
+        if open_line >= lines.len() {
+            pending_clap_derive = false;
+            i += 1;
+            continue;
+        }
+
+        let body_start = open_line + 1;
+        let mut depth: i64 = 0;
+        let mut j = open_line;
+        let mut body_end: Option<usize> = None;
+        while j < lines.len() {
+            for c in lines[j].chars() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = Some(j);
+                        break;
+                    }
+                }
+            }
+            if body_end.is_some() {
+                break;
+            }
+            j += 1;
+        }
+
+        if let Some(end) = body_end {
+            ranges.push((body_start + 1, end + 1));
+        }
+
+        pending_clap_derive = false;
+        i = body_end.map(|e| e + 1).unwrap_or(i + 1);
+    }
+
+    ranges
+}
+
+/// Is the (1-indexed) line number inside any clap-derived body range?
+fn line_inside_ranges(lineno: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges.iter().any(|(s, e)| lineno >= *s && lineno <= *e)
+}
+
+/// Does the doc-comment block starting at `start_idx` (0-indexed)
+/// immediately precede a clap-derive line? Walks forward over blank
+/// lines, other `///` lines, and non-derive attributes; returns true if
+/// the first "real" line is a `#[derive(... clap ...)]`.
+fn doc_block_precedes_clap_derive(lines: &[&str], start_idx: usize) -> bool {
+    let mut probe = start_idx + 1;
+    let mut steps = 0;
+    while probe < lines.len() && steps < 20 {
+        let trimmed = lines[probe].trim_start();
+        if trimmed.is_empty()
+            || trimmed.starts_with("///")
+            || trimmed.starts_with("//!")
+            || trimmed.starts_with("//")
+        {
+            probe += 1;
+            continue;
+        }
+        if line_is_clap_derive(lines[probe]) {
+            return true;
+        }
+        if trimmed.starts_with("#[") {
+            probe += 1;
+            steps += 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+/// Does the doc-comment block starting at `start_idx` (0-indexed)
+/// immediately precede a clap-field attribute (`#[arg(...)]`,
+/// `#[command(...)]`, `#[clap(...)]`)?
+fn doc_block_precedes_clap_field_attr(lines: &[&str], start_idx: usize) -> bool {
+    let mut probe = start_idx + 1;
+    let mut steps = 0;
+    while probe < lines.len() && steps < 20 {
+        let trimmed = lines[probe].trim_start();
+        if trimmed.is_empty()
+            || trimmed.starts_with("///")
+            || trimmed.starts_with("//!")
+            || trimmed.starts_with("//")
+        {
+            probe += 1;
+            continue;
+        }
+        if CLAP_FIELD_ATTR_PREFIXES
+            .iter()
+            .any(|p| trimmed.starts_with(p))
+        {
+            return true;
+        }
+        if trimmed.starts_with("#[") {
+            probe += 1;
+            steps += 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+#[test]
+fn branding_lint_clap_doc_comments_fail_on_rtk() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src_dir = repo_root.join("src");
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for entry in WalkDir::new(&src_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|s| s == "rs")
+                .unwrap_or(false)
+        })
+    {
+        let rel = entry
+            .path()
+            .strip_prefix(&repo_root)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .into_owned();
+
+        if SKIPPED_PATHS.iter().any(|s| rel == *s) {
+            continue;
+        }
+
+        let content = fs::read_to_string(entry.path())
+            .unwrap_or_else(|e| panic!("Failed to read {}: {}", rel, e));
+        let lines: Vec<&str> = content.lines().collect();
+
+        let clap_body_ranges = clap_derived_body_ranges(&lines);
+
+        for (idx, line) in lines.iter().enumerate() {
+            let lineno = idx + 1;
+            let trimmed = line.trim_start();
+
+            if !trimmed.starts_with("///") {
+                continue;
+            }
+            if !RTK_WORD_RE.is_match(line) {
+                continue;
+            }
+            if line.contains(ALLOW_MARKER) {
+                continue;
+            }
+            // Coherence with the allowlist-style scan: if a `///` line
+            // matches one of the STRUCTURAL allowlist categories — a
+            // filesystem path like `.rtk/filters.toml` (PATH_NEEDLES),
+            // an upstream-attribution link, an env-var name, a hook-
+            // protocol literal, or an identifier-shaped token — don't
+            // flag it here either. Those references are intentional
+            // cross-cutting concerns that happen to appear in a clap
+            // doc-comment.
+            //
+            // We DO NOT honor the broad `rustdoc-comment mention (///)`
+            // catch-all rule — doing so would defeat this entire test.
+            // The whole point of the clap-doc gate is that the broad
+            // `///` rule allows leaks through that wouldn't otherwise
+            // pass any narrower category.
+            let exempt_by_structural_rule =
+                PATH_NEEDLES.iter().any(|n| line.contains(n))
+                    || RTK_ENVISH_RE.is_match(line)
+                    || ATTRIBUTION_NEEDLES.iter().any(|n| line.contains(n))
+                    || HOOK_PROTOCOL_NEEDLES.iter().any(|n| line.contains(n))
+                    || DOC_EXAMPLE_NEEDLES.iter().any(|n| line.contains(n));
+            if exempt_by_structural_rule {
+                continue;
+            }
+
+            let inside_clap_body = line_inside_ranges(lineno, &clap_body_ranges);
+            let precedes_derive = doc_block_precedes_clap_derive(&lines, idx);
+            let precedes_field_attr =
+                doc_block_precedes_clap_field_attr(&lines, idx);
+
+            let leak_class = if inside_clap_body {
+                Some("inside clap-derived struct/enum body (field-doc leak)")
+            } else if precedes_derive {
+                Some("doc block precedes #[derive(...clap...)] (struct top-level help leak)")
+            } else if precedes_field_attr {
+                Some("doc block precedes #[arg|command|clap(...)] (field-attribute help leak)")
+            } else {
+                None
+            };
+
+            if let Some(why) = leak_class {
+                failures.push(format!(
+                    "  {}:{}  `///` with `rtk` will leak to --help — {}\n      {}",
+                    rel,
+                    lineno,
+                    why,
+                    line.trim()
+                ));
+            }
+        }
+    }
+
+    // Sanity self-test: synthetic fixtures the detector MUST classify
+    // correctly. Catches the case where someone weakens the heuristic
+    // and re-opens the v0.1.8-class regression.
+    let synth_fixtures: &[(&str, bool)] = &[
+        // Should be flagged: clap-derive top-level docstring
+        (
+            "/// RTK savings dashboard.\n#[derive(Parser)]\npub struct Cli {}\n",
+            true,
+        ),
+        // Should be flagged: field-attribute precedes
+        (
+            "struct Foo {\n    /// Show RTK adoption stats\n    #[arg(long)]\n    pub flag: bool,\n}\n",
+            true,
+        ),
+        // Should be flagged: inside #[derive(Args)] body, field with no attribute
+        (
+            "#[derive(Args)]\npub struct A {\n    /// rtk thing\n    pub x: String,\n}\n",
+            true,
+        ),
+        // Should NOT be flagged: doc above pub fn (internal API docs)
+        (
+            "/// helper for rtk-shaped commands\npub fn foo() {}\n",
+            false,
+        ),
+        // Should NOT be flagged: doc above non-clap struct
+        (
+            "/// internal rtk wrapper\nstruct Internal;\n",
+            false,
+        ),
+    ];
+    for (i, (snippet, should_flag)) in synth_fixtures.iter().enumerate() {
+        let lines: Vec<&str> = snippet.lines().collect();
+        let ranges = clap_derived_body_ranges(&lines);
+        let mut flagged = false;
+        for (idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("///") {
+                continue;
+            }
+            if !RTK_WORD_RE.is_match(line) {
+                continue;
+            }
+            let lineno = idx + 1;
+            if line_inside_ranges(lineno, &ranges)
+                || doc_block_precedes_clap_derive(&lines, idx)
+                || doc_block_precedes_clap_field_attr(&lines, idx)
+            {
+                flagged = true;
+                break;
+            }
+        }
+        assert_eq!(
+            flagged, *should_flag,
+            "Clap-doc detector self-test #{} failed.\n\
+             Snippet:\n{}\nExpected flagged={}, got flagged={}.\n\
+             Detector logic has drifted — fix `clap_derived_body_ranges` / \
+             `doc_block_precedes_*` before this protection regresses.",
+            i, snippet, should_flag, flagged,
+        );
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "\n\n--- branding-lint (clap-doc) failures ---\n\
+             {} `///` doc-comment(s) with `rtk` references that will leak \
+             to --help output:\n\n{}\n\n\
+             These doc comments sit on clap-derived types and will appear \
+             verbatim in `contextcrawler --help` output.\n\n\
+             FIX OPTIONS:\n\
+             1. Rebrand the `rtk`/`RTK` token to `contextcrawler`/`ContextCrawler` \
+                (preferred — this is user-visible text).\n\
+             2. If the reference is intentional (e.g. legacy-compat docs), \
+                add `{}` to the end of the doc-comment line.\n\n\
+             This test exists to close the v0.1.8-cycle leak class \
+             (`RTK savings`, `RTK adoption`, etc) at the source instead of \
+             adding one FORBIDDEN_TOKENS row per discovered phrase. See #75.\n",
+            failures.len(),
+            failures.join("\n\n"),
+            ALLOW_MARKER,
+        );
+    }
+}
