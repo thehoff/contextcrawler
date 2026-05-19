@@ -145,7 +145,7 @@ pub fn run(_verbose: u8) -> Result<()> {
     }
 
     // Display table
-    let header = "RTK Session Overview (last 10)";
+    let header = "ContextCrawler Session Overview (last 10)";
     println!("{}", header);
     println!("{}", "-".repeat(70));
     println!(

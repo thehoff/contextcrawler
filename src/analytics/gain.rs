@@ -708,7 +708,7 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", styled("RTK Parse Failures", true));
+    println!("{}", styled("ContextCrawler Parse Failures", true));
     println!("{}", "═".repeat(60));
     println!();
 

@@ -110,7 +110,7 @@ impl DiscoverReport {
 pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> String {
     let mut out = String::with_capacity(2048);
 
-    out.push_str("RTK Discover -- Savings Opportunities\n");
+    out.push_str("ContextCrawler Discover -- Savings Opportunities\n");
     out.push_str(&"=".repeat(52));
     out.push('\n');
     out.push_str(&format!(
@@ -118,7 +118,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         report.sessions_scanned, report.since_days, report.total_commands
     ));
     out.push_str(&format!(
-        "Already using RTK: {} commands ({:.1}%)\n",
+        "Already using ContextCrawler: {} commands ({:.1}%)\n",
         report.already_rtk,
         if report.total_commands > 0 {
             report.already_rtk as f64 * 100.0 / report.total_commands as f64
@@ -128,14 +128,14 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     ));
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
-        out.push_str("\nNo missed savings found. RTK usage looks good!\n");
+        out.push_str("\nNo missed savings found. ContextCrawler usage looks good!\n");
         append_agent_notes(&mut out, report.agent_status);
         return out;
     }
 
     // Missed savings
     if !report.supported.is_empty() {
-        out.push_str("\nMISSED SAVINGS -- Commands RTK already handles\n");
+        out.push_str("\nMISSED SAVINGS -- Commands ContextCrawler already handles\n");
         out.push_str(&"-".repeat(72));
         out.push('\n');
         out.push_str(&format!(
@@ -215,11 +215,11 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
 fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
     if status.cursor_hook_installed {
-        out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+        out.push_str("\nNote: Cursor sessions are tracked via `contextcrawler gain` (discover scans Claude Code only)\n");
     }
 
     if status.hermes_plugin_installed {
-        out.push_str("\nNote: Hermes plugin is installed; Hermes sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+        out.push_str("\nNote: Hermes plugin is installed; Hermes sessions are tracked via `contextcrawler gain` (discover scans Claude Code only)\n");
     }
 }
 

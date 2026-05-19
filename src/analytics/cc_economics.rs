@@ -433,7 +433,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     let periods = merge_monthly(cc_monthly, rtk_monthly);
 
     if periods.is_empty() {
-        println!("No data available. Run some rtk commands to start tracking.");
+        println!("No data available. Run some contextcrawler commands to start tracking.");
         return Ok(());
     }
 
@@ -466,7 +466,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     );
     println!();
 
-    println!("  RTK commands:                 {}", totals.rtk_commands);
+    println!("  ContextCrawler commands:      {}", totals.rtk_commands);
     println!(
         "  Tokens saved:                 {}",
         format_tokens(totals.rtk_saved_tokens)
@@ -501,7 +501,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     println!();
 
     println!("  How it works:");
-    println!("  RTK compresses CLI outputs before they enter Claude's context.");
+    println!("  ContextCrawler compresses CLI outputs before they enter Claude's context.");
     println!("  Savings derived using API price ratios (out=5x, cache_w=1.25x, cache_r=0.1x).");
     println!();
 

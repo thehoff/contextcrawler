@@ -561,20 +561,11 @@ lazy_static! {
     /// This list is technical debt. See coordinator report for
     /// per-file leak-class breakdown.
     static ref KNOWN_UNBRANDED_TEXT_NEEDLES: Vec<&'static str> = vec![
-        // src/discover/report.rs — the `discover` report headlines.
-        "RTK Discover -- Savings Opportunities",
-        "Already using RTK:",
-        "RTK usage looks good!",
-        "MISSED SAVINGS -- Commands RTK already handles",
-        "\"RTK Equivalent\"",     // table header in format! string
-        // src/analytics/gain.rs — parse-failures report.
-        "RTK Parse Failures",
-        // src/analytics/session_cmd.rs — session overview table.
-        "RTK Session Overview",
-        // src/analytics/cc_economics.rs — gain dashboard.
-        "RTK commands:",
-        "RTK compresses CLI outputs",
-        "\"RTK Cmds\"",           // table column header
+        // src/discover/report.rs — `discover` report headlines (rebranded
+        // 2026-05-19, #76); only the short column header remains in this list.
+        "\"RTK Equivalent\"",     // table header in format! string (column width-constrained)
+        // src/analytics/cc_economics.rs — short column header where width matters.
+        "\"RTK Cmds\"",           // table column header (column width-constrained)
         // src/hooks/init.rs — uninstall flow messages.
         "RTK (Cursor):",
         "RTK (Gemini):",
@@ -582,7 +573,6 @@ lazy_static! {
         "would uninstall RTK",
         "RTK from CLAUDE.md",
         "RTK from AGENTS.md",
-        "RTK from Gemini settings.json",
         "RTK for Codex CLI",
         "RTK for Hermes CLI",
         "removed RTK plugin entry",
@@ -602,8 +592,6 @@ lazy_static! {
         // src/hooks/integrity.rs — verify/restore advice.
         "To restore:  rtk init -g",
         "To inspect:  rtk verify",
-        // src/discover/registry.rs — assertion message about rtk_cmd field.
-        "rtk_cmd '{}' must start with 'rtk '",
         // src/core/tracking.rs — assert message comparing rtk_cmd values.
         "r.rtk_cmd == ",
         // src/hooks/init.rs — fixture content & search-strings on hook scripts.
@@ -630,8 +618,6 @@ lazy_static! {
         // src/discover/provider.rs — project-filter fixture.
         "-Users-test-rtk",
         "Some(\"rtk\")",
-        // src/discover/report.rs — `rtk gain` self-reference in agent notes.
-        "tracked via `rtk gain`",
         // src/hooks/constants.rs — bundled hook script filenames are
         // also covered by PATH_NEEDLES but listed here for the comment.
         "rtk-rewrite.sh",
@@ -643,8 +629,6 @@ lazy_static! {
         "\"RTK-default limit",
         // src/analytics/session_cmd.rs — column header.
         "\"RTK\", \"Adoption\"",
-        // src/analytics/cc_economics.rs — passthrough informational text.
-        "Run some rtk commands to start tracking",
         // src/hooks/hook_cmd.rs — JSON fixture in json! macro.
         "\"command\": \"rtk git status\"",
     ];
