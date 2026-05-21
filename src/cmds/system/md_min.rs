@@ -123,9 +123,20 @@ fn strip_tier1(events: Vec<Event>) -> Vec<Event> {
     out
 }
 
-/// Tier 2 placeholder — implemented in a later task.
+/// Tier 2: drop emphasis/strong/strikethrough delimiters (inner text kept)
+/// and thematic breaks.
 fn strip_tier2(events: Vec<Event>) -> Vec<Event> {
     events
+        .into_iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough)
+                    | Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough)
+                    | Event::Rule
+            )
+        })
+        .collect()
 }
 
 /// Tier 3 placeholder — implemented in a later task.
@@ -179,6 +190,18 @@ mod tests {
         assert!(!out.contains("-->"));
         assert!(out.contains("Before."));
         assert!(out.contains("After."));
+    }
+
+    #[test]
+    fn tier2_strips_emphasis_keeps_text() {
+        let input = "A **bold** and _italic_ and ~~struck~~ word.\n\n---\n\nNext.\n";
+        let out = minify(input, Tier::Two);
+        assert!(out.contains("bold"), "emphasised text must survive");
+        assert!(out.contains("italic"));
+        assert!(out.contains("struck"));
+        assert!(!out.contains("**"), "bold markers must be gone");
+        assert!(!out.contains("~~"), "strikethrough markers must be gone");
+        assert!(!out.contains("---"), "horizontal rule must be gone");
     }
 
     #[test]
