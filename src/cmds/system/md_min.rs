@@ -344,6 +344,84 @@ mod tests {
         }
     }
 
+    // ── L2: flattened-text equivalence (Task 8) ───────────────────────────────
+
+    /// Flatten markdown to bare text: concatenate all Text/Code events, drop
+    /// all markup, collapse whitespace runs to single spaces.
+    ///
+    /// Normalisation note (Task 8, case (b)): an inline emphasis span splits a
+    /// text run in two at parse time — `**dramatically shorter**.` parses as
+    /// `Text("dramatically shorter")` + `Text(".")`, but with the markers
+    /// stripped (tier 2+) it re-parses as a single `Text("dramatically
+    /// shorter.")`. That moves a space relative to trailing punctuation but
+    /// drops/alters no word — a lossless serialiser artifact, not text loss.
+    /// To compare flattened text fairly we glue standalone leading punctuation
+    /// back onto the preceding word. This is purely a test-side equivalence
+    /// normalisation; the stripper itself is unchanged.
+    fn flatten_text(md: &str) -> String {
+        let mut buf = String::new();
+        for e in Parser::new_ext(md, parser_options()) {
+            match e {
+                Event::Text(s) | Event::Code(s) => {
+                    buf.push_str(&s);
+                    buf.push(' ');
+                }
+                Event::SoftBreak | Event::HardBreak => buf.push(' '),
+                _ => {}
+            }
+        }
+        let collapsed = buf.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Remove the space before a token that is *only* trailing punctuation,
+        // so an emphasis-split text run compares equal to its merged form.
+        let mut out = String::with_capacity(collapsed.len());
+        for tok in collapsed.split(' ') {
+            if !out.is_empty()
+                && !tok.is_empty()
+                && tok.chars().all(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'))
+            {
+                out.push_str(tok); // glue punctuation onto the previous word
+            } else {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(tok);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn l2_tiers_0_to_2_preserve_all_text() {
+        for fixture in [
+            include_str!("../../../tests/fixtures/md/prose.md"),
+            include_str!("../../../tests/fixtures/md/tables.md"),
+            include_str!("../../../tests/fixtures/md/nested_lists.md"),
+            include_str!("../../../tests/fixtures/md/code_heavy.md"),
+            include_str!("../../../tests/fixtures/md/mixed.md"),
+        ] {
+            let raw = flatten_text(fixture);
+            for t in [Tier::Zero, Tier::One, Tier::Two] {
+                assert_eq!(
+                    flatten_text(&minify(fixture, t)),
+                    raw,
+                    "L2: tier {t:?} must not change body text",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn l2_tier3_only_adds_urls() {
+        let fixture = include_str!("../../../tests/fixtures/md/prose.md");
+        let raw_words: std::collections::HashSet<String> =
+            flatten_text(fixture).split(' ').map(String::from).collect();
+        let t3_words: std::collections::HashSet<String> =
+            flatten_text(&minify(fixture, Tier::Three)).split(' ').map(String::from).collect();
+        for w in &raw_words {
+            assert!(t3_words.contains(w), "L2: tier 3 dropped body word {w:?}");
+        }
+    }
+
     #[test]
     fn hard_break_form_profiling() {
         // Spec cycle 1: do NOT assume "  \n" -> "\\\n" saves tokens. Measure.
