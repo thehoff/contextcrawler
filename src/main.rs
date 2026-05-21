@@ -417,6 +417,15 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Minify a markdown file (token-saving strip tiers 0-4)
+    MdMin {
+        /// Path to the markdown file
+        file: String,
+        /// Strip tier: 0 (baseline) .. 4 (most aggressive)
+        #[arg(long, default_value_t = 0)]
+        tier: u8,
+    },
+
     /// Show token savings summary and history
     Gain {
         /// Filter statistics to current project (current working directory) // added
@@ -3174,6 +3183,14 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::MdMin { file, tier } => {
+            let input = std::fs::read_to_string(&file)
+                .with_context(|| format!("md-min: cannot read {file}"))?;
+            let tier = crate::cmds::system::md_min::Tier::from_u8(tier)?;
+            print!("{}", crate::cmds::system::md_min::minify(&input, tier));
+            0
+        }
+
         Commands::Gain {
             project, // added
             graph,
@@ -3895,6 +3912,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Wc { .. }
+            | Commands::MdMin { .. }
     )
 }
 
