@@ -162,9 +162,22 @@ fn strip_tier3(events: Vec<Event>) -> Vec<Event> {
     out
 }
 
-/// Tier 4 placeholder — implemented in a later task.
+/// Tier 4: flatten list structure and strip the code-fence language tag.
 fn strip_tier4(events: Vec<Event>) -> Vec<Event> {
     events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Start(Tag::List(_)) | Event::End(TagEnd::List(_)) => None,
+            Event::Start(Tag::Item) => Some(Event::Start(Tag::Paragraph)),
+            Event::End(TagEnd::Item) => Some(Event::End(TagEnd::Paragraph)),
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+                Some(Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(
+                    CowStr::Borrowed(""),
+                ))))
+            }
+            other => Some(other),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -232,6 +245,16 @@ mod tests {
         assert!(out.contains("the docs"), "link text must survive");
         assert!(out.contains("https://example.com/d"), "URL must be kept — it is payload");
         assert!(!out.contains("](http"), "link markup must be gone");
+    }
+
+    #[test]
+    fn tier4_flattens_lists_and_drops_fence_lang() {
+        let input = "- one\n- two\n\n```rust\nfn x() {}\n```\n";
+        let out = minify(input, Tier::Four);
+        assert!(out.contains("one") && out.contains("two"), "item text survives");
+        assert!(!out.contains("- one"), "list markers must be gone");
+        assert!(out.contains("fn x() {}"), "code body survives verbatim");
+        assert!(!out.contains("```rust"), "fence language must be gone");
     }
 
     #[test]
