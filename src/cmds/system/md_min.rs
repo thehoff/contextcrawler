@@ -5,7 +5,7 @@
 //! `docs/superpowers/specs/2026-05-21-md-min-viability-design.md`.
 
 use anyhow::{Context, Result};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 
 /// Strip aggressiveness. Additive: tier N applies tier N-1 plus more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,9 +139,27 @@ fn strip_tier2(events: Vec<Event>) -> Vec<Event> {
         .collect()
 }
 
-/// Tier 3 placeholder — implemented in a later task.
+/// Tier 3: drop heading hashes and blockquote markers, and reduce links to
+/// `text url` plain text. The URL is always kept because it is payload.
 fn strip_tier3(events: Vec<Event>) -> Vec<Event> {
-    events
+    let mut out: Vec<Event> = Vec::with_capacity(events.len());
+    let mut link_urls: Vec<CowStr> = Vec::new();
+    for e in events {
+        match e {
+            Event::Start(Tag::Heading { .. }) => out.push(Event::Start(Tag::Paragraph)),
+            Event::End(TagEnd::Heading(_)) => out.push(Event::End(TagEnd::Paragraph)),
+            Event::Start(Tag::BlockQuote(_)) | Event::End(TagEnd::BlockQuote(_)) => {}
+            Event::Start(Tag::Link { dest_url, .. }) => link_urls.push(dest_url),
+            Event::End(TagEnd::Link) => {
+                if let Some(url) = link_urls.pop() {
+                    out.push(Event::Text(CowStr::Borrowed(" ")));
+                    out.push(Event::Text(url));
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Tier 4 placeholder — implemented in a later task.
@@ -202,6 +220,18 @@ mod tests {
         assert!(!out.contains("**"), "bold markers must be gone");
         assert!(!out.contains("~~"), "strikethrough markers must be gone");
         assert!(!out.contains("---"), "horizontal rule must be gone");
+    }
+
+    #[test]
+    fn tier3_strips_structure_markers_keeps_url() {
+        let input = "## Section\n\n> a quote\n\nSee [the docs](https://example.com/d).\n";
+        let out = minify(input, Tier::Three);
+        assert!(out.contains("Section"), "heading text must survive");
+        assert!(!out.contains("## "), "heading hashes must be gone");
+        assert!(out.contains("a quote"), "blockquote text must survive");
+        assert!(out.contains("the docs"), "link text must survive");
+        assert!(out.contains("https://example.com/d"), "URL must be kept — it is payload");
+        assert!(!out.contains("](http"), "link markup must be gone");
     }
 
     #[test]
