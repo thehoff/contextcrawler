@@ -103,11 +103,14 @@ tier the council still rates at zero quality impact.
    included as a representativeness check, since the eventual production
    use case is an agent reading project docs rather than encyclopedia
    articles; these are markdown-only (no HTML source).
-2. **QA generation** — one model generates approximately K=15 retrieval
-   question/answer pairs per document, derived from the **raw (tier-0)**
-   document. The set is frozen to `qa/<doc>.json` and committed. The QA
-   set is **identical across all tiers** — that is what makes the
-   comparison fair and reproducible. One-time step, human-reviewable.
+2. **QA generation** — one model generates, per document and derived from
+   the **raw (tier-0)** document, two question sets: approximately K=15
+   *retrieval* question/answer pairs (L3) and a smaller set of *adversarial
+   structure probes* (L4) targeting section hierarchy, list order /
+   membership / count, and emphasis-carried meaning. Both sets are frozen
+   to `qa/<doc>.json` and committed — **identical across all tiers and
+   formats**, which is what makes the comparison fair and reproducible.
+   One-time step, human-reviewable.
 3. **Strip** — run `contextcrawler md-min` over each document at each tier.
 4. **Council inference** — every (document, format, question) triple is
    sent to all three council members: `claude`, `codex`, `gemini`. The
@@ -123,13 +126,33 @@ tier the council still rates at zero quality impact.
    proxy. Exact per-model token counts vary; savings *ratios* are stable
    across tokenisers, and the ratio is the figure of merit.
 
-**Verdict rule:** a tier *passes* if its accuracy delta versus tier 0 is
-within noise — operationally, accuracy delta >= -1% on all three models,
-or no statistically significant drop given the per-tier sample of roughly
-180 questions per model. The benchmark's output is "the highest passing
-tier, and the token savings it delivers."
+### 4. Validation layer
 
-### 4. Report
+Losslessness is the entire point of the feature, so it is established by
+**six independent checks**, not one metric. A tier is declared lossless
+only if it passes *every* layer. The two deterministic layers run first
+and cost nothing — they catch gross stripper bugs before any council call
+is spent. The four behavioural layers attack comprehension loss from
+independent angles.
+
+| Layer | Method | Catches | Cost |
+|---|---|---|---|
+| **L1 — Structural AST equivalence** | Parse raw and stripped, compare normalised ASTs. Each tier *declares* the deletions it is permitted; anything else dropped is a hard fail. | Stripper bugs — accidental structure loss | deterministic |
+| **L2 — Content-set preservation** | Extract every atomic content token — body words, numbers, URLs, code identifiers, table cell values — from raw and stripped; assert no *content* token is lost (only markup removed). | A dropped number, a mangled identifier | deterministic |
+| **L3 — Retrieval QA accuracy** | Council answers random retrieval QA; accuracy delta versus tier 0. | General comprehension loss | council |
+| **L4 — Adversarial structure probes** | QA aimed specifically at what each tier endangers — section hierarchy, list order / membership / count, emphasis-carried meaning. | Subtle structural loss random QA misses | council |
+| **L5 — Free-recall divergence** | A model summarises raw versus stripped; the judge flags any fact present in the raw summary that is absent or altered in the stripped one. | Information loss never probed by QA | council + judge |
+| **L6 — Cross-model agreement** | Information loss widens model disagreement — measure inter-model answer agreement, raw versus stripped. A drop is a warning flag. | Ambiguity introduced by stripping | computed from L3/L4 |
+
+**Verdict rule:** a tier *passes* only if L1 and L2 are clean (hard,
+deterministic) **and** L3, L4, L5 show no statistically significant
+degradation versus tier 0 **and** L6 does not flag. "No significant
+degradation" is operationalised as accuracy delta within noise — accuracy
+delta >= -1% on all three models, or no statistically significant drop
+given the per-tier sample (~180 questions per model). The benchmark's
+output is "the highest passing tier, and the token savings it delivers."
+
+### 5. Report
 
 - **Location:** `harness/md-viability/reports/md-viability-YYYY-MM-DD.md`.
 - **Contents:** token savings and per-model accuracy for every rung of the
@@ -176,14 +199,14 @@ qa/*.json ───────────────────────�
 ## Testing
 
 - **Stripper:** snapshot tests (`insta`) per tier on real fixtures;
-  token-savings assertions; an explicit lossless-assertion for tier 1
-  (parse the stripped output, confirm the rendered HTML / normalised AST
-  matches the raw document).
+  token-savings assertions. Validation layers **L1 (AST equivalence)** and
+  **L2 (content-set preservation)** are implemented as deterministic Rust
+  tests over the corpus — they run in `cargo test`, per tier.
 - **Harness:** QA JSON schema validation; a single-document dry run that
   confirms all three CLIs respond and the judge scores; reproducibility
   check (frozen QA set produces identical inputs across runs).
 
-## Build sequence — five dev / review / test cycles
+## Build sequence — six dev / review / test cycles
 
 Each cycle gets its own dev → code-review → test loop and its own feature
 branch, per feature-branch discipline.
@@ -191,10 +214,11 @@ branch, per feature-branch discipline.
 | Cycle | Deliverable | Test gate |
 |---|---|---|
 | 1 | `md-min` stripper: tiers 0–1 | snapshot + token-savings tests; `cargo test` green |
-| 2 | tiers 2–4 added | per-tier snapshot tests; tier-1 lossless assertion |
-| 3 | harness scaffold: corpus fetch (Wikipedia REST API, pinned `oldid`, HTML + markdown) + QA generation + frozen QA set | corpus re-fetch is byte-stable; QA JSON validates |
-| 4 | council orchestration + scoring | dry run on one document; all three CLIs respond; judge scores |
-| 5 | report generation + full benchmark run | report emitted; verdict computed |
+| 2 | tiers 2–4 added | per-tier snapshot tests |
+| 3 | validation layers L1 (AST equivalence) + L2 (content-set preservation) as deterministic Rust tests | every tier passes L1/L2 with its declared deletions, or the failure is understood |
+| 4 | harness scaffold: corpus fetch (Wikipedia REST API, pinned `oldid`, HTML + markdown) + QA generation (retrieval + adversarial L4) + frozen QA set | corpus re-fetch is byte-stable; QA JSON validates |
+| 5 | council orchestration + scoring: L3 retrieval QA, L4 adversarial probes, L5 free-recall divergence, L6 agreement | dry run on one document; all three CLIs respond; judge scores |
+| 6 | report generation + full benchmark run | report emitted; verdict computed across all six layers |
 
 ## Success criteria
 
