@@ -88,21 +88,35 @@ tier the council still rates at zero quality impact.
 
 **Pipeline:**
 
-1. **Corpus** — `harness/md-viability/corpus/`: roughly 10–15 large, real
-   markdown documents, version-controlled, deliberately varied across
-   prose-heavy, table-heavy, list/nested-heavy, code-heavy, and mixed
-   structure. Sourced from real documents (long READMEs, `docs/` trees,
-   CHANGELOGs, technical specification documents).
+1. **Corpus** — `harness/md-viability/corpus/`: roughly 10–15 large
+   documents. The bulk are **Wikipedia articles** fetched via the
+   Wikipedia REST API (prior art: erictherobot/wikipedia-markdown-generator,
+   MIT). Wikipedia is chosen because articles are large, factual (clean,
+   verifiable QA ground truth), markup-dense (headings, tables, lists,
+   links, emphasis — the exact surface tier 3/4 stresses), license-clean
+   (CC BY-SA), and reproducible. Each article is **pinned to a specific
+   revision id** (`oldid`) so the corpus does not drift as Wikipedia is
+   edited. For each article the fetch step stores **both** the source
+   HTML and a markdown conversion. Article titles are chosen to span
+   prose-heavy, table-heavy, list/nested-heavy, and mixed structure.
+   2–3 real technical documents (long READMEs, `docs/` trees) are also
+   included as a representativeness check, since the eventual production
+   use case is an agent reading project docs rather than encyclopedia
+   articles; these are markdown-only (no HTML source).
 2. **QA generation** — one model generates approximately K=15 retrieval
    question/answer pairs per document, derived from the **raw (tier-0)**
    document. The set is frozen to `qa/<doc>.json` and committed. The QA
    set is **identical across all tiers** — that is what makes the
    comparison fair and reproducible. One-time step, human-reviewable.
 3. **Strip** — run `contextcrawler md-min` over each document at each tier.
-4. **Council inference** — every (document, tier) pair, with each question,
-   is sent to all three council members: `claude`, `codex`, `gemini`.
-   Order of magnitude: 3 models x ~12 documents x 5 tiers x ~15 questions
-   is roughly 2,700 calls per full run.
+4. **Council inference** — every (document, format, question) triple is
+   sent to all three council members: `claude`, `codex`, `gemini`. The
+   **format ladder** is: source HTML (Wikipedia articles only) → markdown
+   tier 0 → tiers 1–4. Source HTML sits above tier 0 as a baseline
+   ceiling — it quantifies the cost of HTML and confirms markdown
+   conversion is worthwhile at all; the headline comparison remains
+   tier 0 versus tiers 1–4. Order of magnitude: 3 models x ~12 documents
+   x ~6 formats x ~15 questions is roughly 3,200 calls per full run.
 5. **Scoring** — an LLM-as-judge grades each answer against the ground
    truth; accuracy is the percentage correct per (model, tier).
 6. **Token metric** — `tiktoken o200k_base` is the stable cross-model
@@ -118,27 +132,33 @@ tier, and the token savings it delivers."
 ### 4. Report
 
 - **Location:** `harness/md-viability/reports/md-viability-YYYY-MM-DD.md`.
-- **Contents:** per-tier token savings; per-model accuracy and delta versus
-  tier 0; the computed verdict; and a recommendation on what, if anything,
-  should be wired into the rewrite path.
+- **Contents:** token savings and per-model accuracy for every rung of the
+  format ladder (source HTML, markdown tiers 0–4), accuracy delta versus
+  tier 0, the source-HTML baseline for reference, the computed verdict,
+  and a recommendation on what, if anything, should be wired into the
+  rewrite path.
 - It is a first-class research deliverable — it is the artifact that gates
   the future in-path spec.
 
 ## Data flow
 
 ```
-corpus/*.md ──> QA generation (one model, raw doc) ──> qa/*.json  (frozen)
+Wikipedia REST API (pinned oldid) ──> corpus/*.html  +  corpus/*.md
+technical docs ──────────────────────────────────────> corpus/*.md
      │
-     └──> md-min --tier 0..4 ──> stripped variants ──┐
-                                                     │
-qa/*.json ──────────────────────────────────────────┤
-                                                     ▼
+     ├──> QA generation (one model, raw doc) ──> qa/*.json  (frozen)
+     │
+     └──> md-min --tier 0..4 ──> stripped variants ───┐
+                                  + source HTML ──────┤
+                                                      │
+qa/*.json ───────────────────────────────────────────┤
+                                                      ▼
                                     council inference (claude, codex, gemini)
-                                                     │
-                                                     ▼
+                                                      │
+                                                      ▼
                                     LLM-as-judge scoring  +  tiktoken counts
-                                                     │
-                                                     ▼
+                                                      │
+                                                      ▼
                               reports/md-viability-YYYY-MM-DD.md  (verdict)
 ```
 
@@ -172,7 +192,7 @@ branch, per feature-branch discipline.
 |---|---|---|
 | 1 | `md-min` stripper: tiers 0–1 | snapshot + token-savings tests; `cargo test` green |
 | 2 | tiers 2–4 added | per-tier snapshot tests; tier-1 lossless assertion |
-| 3 | harness scaffold: corpus + QA generation + frozen QA set | QA JSON validates; reproducible |
+| 3 | harness scaffold: corpus fetch (Wikipedia REST API, pinned `oldid`, HTML + markdown) + QA generation + frozen QA set | corpus re-fetch is byte-stable; QA JSON validates |
 | 4 | council orchestration + scoring | dry run on one document; all three CLIs respond; judge scores |
 | 5 | report generation + full benchmark run | report emitted; verdict computed |
 
