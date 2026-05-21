@@ -293,16 +293,18 @@ mod tests {
         s.split_whitespace().count()
     }
 
+    /// The five real-world markdown fixtures, used by every full-coverage test.
+    const ALL_FIXTURES: &[&str] = &[
+        include_str!("../../../tests/fixtures/md/prose.md"),
+        include_str!("../../../tests/fixtures/md/tables.md"),
+        include_str!("../../../tests/fixtures/md/nested_lists.md"),
+        include_str!("../../../tests/fixtures/md/code_heavy.md"),
+        include_str!("../../../tests/fixtures/md/mixed.md"),
+    ];
+
     #[test]
     fn every_tier_is_monotonically_smaller_or_equal() {
-        let fixtures: &[(&str, &str)] = &[
-            ("prose.md", include_str!("../../../tests/fixtures/md/prose.md")),
-            ("tables.md", include_str!("../../../tests/fixtures/md/tables.md")),
-            ("nested_lists.md", include_str!("../../../tests/fixtures/md/nested_lists.md")),
-            ("code_heavy.md", include_str!("../../../tests/fixtures/md/code_heavy.md")),
-            ("mixed.md", include_str!("../../../tests/fixtures/md/mixed.md")),
-        ];
-        for (name, input) in fixtures {
+        for (idx, input) in ALL_FIXTURES.iter().enumerate() {
             let sizes: Vec<usize> = [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four]
                 .iter()
                 .map(|t| count_tokens(&minify(input, *t)))
@@ -310,7 +312,7 @@ mod tests {
             for w in sizes.windows(2) {
                 assert!(
                     w[1] <= w[0],
-                    "{name}: each tier must be <= the previous: {sizes:?}"
+                    "fixture #{idx}: each tier must be <= the previous: {sizes:?}"
                 );
             }
         }
@@ -381,9 +383,7 @@ mod tests {
             {
                 out.push_str(tok); // glue punctuation onto the previous word
             } else {
-                if !out.is_empty() {
-                    out.push(' ');
-                }
+                if !out.is_empty() { out.push(' '); }
                 out.push_str(tok);
             }
         }
@@ -392,13 +392,7 @@ mod tests {
 
     #[test]
     fn l2_tiers_0_to_2_preserve_all_text() {
-        for fixture in [
-            include_str!("../../../tests/fixtures/md/prose.md"),
-            include_str!("../../../tests/fixtures/md/tables.md"),
-            include_str!("../../../tests/fixtures/md/nested_lists.md"),
-            include_str!("../../../tests/fixtures/md/code_heavy.md"),
-            include_str!("../../../tests/fixtures/md/mixed.md"),
-        ] {
+        for fixture in ALL_FIXTURES {
             let raw = flatten_text(fixture);
             for t in [Tier::Zero, Tier::One, Tier::Two] {
                 assert_eq!(
@@ -411,14 +405,25 @@ mod tests {
     }
 
     #[test]
-    fn l2_tier3_only_adds_urls() {
-        let fixture = include_str!("../../../tests/fixtures/md/prose.md");
-        let raw_words: std::collections::HashSet<String> =
-            flatten_text(fixture).split(' ').map(String::from).collect();
-        let t3_words: std::collections::HashSet<String> =
-            flatten_text(&minify(fixture, Tier::Three)).split(' ').map(String::from).collect();
-        for w in &raw_words {
-            assert!(t3_words.contains(w), "L2: tier 3 dropped body word {w:?}");
+    fn l2_tier3_preserves_all_body_words() {
+        // Trailing punctuation can re-attach to a different token once a link is
+        // unwrapped (e.g. `[the features page](url).` flattens to `page.` in the
+        // raw but `page` + `url.` after tier 3 strips the link). That is the same
+        // lossless serialiser artifact documented on `flatten_text`: no word is
+        // dropped, only an adjacent `.`/`,` moves. Compare on punctuation-trimmed
+        // stems so the subset check stays a genuine word-loss check.
+        fn stem(w: &str) -> &str {
+            w.trim_matches(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'))
+        }
+        for fixture in ALL_FIXTURES {
+            let raw_words: std::collections::HashSet<String> =
+                flatten_text(fixture).split(' ').map(|w| stem(w).to_string()).collect();
+            let t3_words: std::collections::HashSet<String> =
+                flatten_text(&minify(fixture, Tier::Three))
+                    .split(' ').map(|w| stem(w).to_string()).collect();
+            for w in &raw_words {
+                assert!(t3_words.contains(w), "L2: tier 3 dropped body word {w:?}");
+            }
         }
     }
 
@@ -439,6 +444,13 @@ mod tests {
             Event::Html(_) | Event::InlineHtml(_) => "html",
             Event::Text(_) => "text",
             Event::Code(_) => "code",
+            Event::Start(Tag::Table(_)) | Event::End(TagEnd::Table) => "table",
+            Event::Start(Tag::TableHead) | Event::End(TagEnd::TableHead) => "table-head",
+            Event::Start(Tag::TableRow) | Event::End(TagEnd::TableRow) => "table-row",
+            Event::Start(Tag::TableCell) | Event::End(TagEnd::TableCell) => "table-cell",
+            Event::Start(Tag::CodeBlock(_)) | Event::End(TagEnd::CodeBlock) => "code-block",
+            Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => "paragraph",
+            Event::Start(Tag::Item) | Event::End(TagEnd::Item) => "item",
             _ => "other",
         }
     }
@@ -451,8 +463,10 @@ mod tests {
             Tier::Two => &["html", "emphasis", "strong", "strike", "rule"],
             Tier::Three => &["html", "emphasis", "strong", "strike", "rule",
                               "heading", "blockquote", "link", "image"],
+            // `item` is intrinsic list sub-structure: flattening a list necessarily
+            // removes its items, so it is declared alongside `list`.
             Tier::Four => &["html", "emphasis", "strong", "strike", "rule",
-                             "heading", "blockquote", "link", "image", "list"],
+                             "heading", "blockquote", "link", "image", "list", "item"],
         }
     }
 
