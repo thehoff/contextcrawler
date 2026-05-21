@@ -3912,7 +3912,6 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
-            | Commands::Wc { .. }
             | Commands::MdMin { .. }
     )
 }
