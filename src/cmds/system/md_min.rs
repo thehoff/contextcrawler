@@ -288,20 +288,41 @@ mod tests {
 
     // ── Fixture-based tests (Task 7) ──────────────────────────────────────────
 
+    // Same whitespace-split definition as tests/common/mod.rs — the RTK test-token convention.
     fn count_tokens(s: &str) -> usize {
         s.split_whitespace().count()
     }
 
     #[test]
     fn every_tier_is_monotonically_smaller_or_equal() {
-        let input = include_str!("../../../tests/fixtures/md/mixed.md");
-        let sizes: Vec<usize> = [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four]
-            .iter()
-            .map(|t| count_tokens(&minify(input, *t)))
-            .collect();
-        for w in sizes.windows(2) {
-            assert!(w[1] <= w[0], "each tier must be <= the previous: {sizes:?}");
+        let fixtures: &[(&str, &str)] = &[
+            ("prose.md", include_str!("../../../tests/fixtures/md/prose.md")),
+            ("tables.md", include_str!("../../../tests/fixtures/md/tables.md")),
+            ("nested_lists.md", include_str!("../../../tests/fixtures/md/nested_lists.md")),
+            ("code_heavy.md", include_str!("../../../tests/fixtures/md/code_heavy.md")),
+            ("mixed.md", include_str!("../../../tests/fixtures/md/mixed.md")),
+        ];
+        for (name, input) in fixtures {
+            let sizes: Vec<usize> = [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four]
+                .iter()
+                .map(|t| count_tokens(&minify(input, *t)))
+                .collect();
+            for w in sizes.windows(2) {
+                assert!(
+                    w[1] <= w[0],
+                    "{name}: each tier must be <= the previous: {sizes:?}"
+                );
+            }
         }
+        // Strict end-to-end reduction on the content-rich mixed fixture confirms
+        // the pipeline genuinely reduces, not just shuffles tokens.
+        let mixed = include_str!("../../../tests/fixtures/md/mixed.md");
+        let tier0 = count_tokens(&minify(mixed, Tier::Zero));
+        let tier4 = count_tokens(&minify(mixed, Tier::Four));
+        assert!(
+            tier4 < tier0,
+            "mixed.md: tier4 ({tier4}) must be strictly less than tier0 ({tier0})"
+        );
     }
 
     #[test]
@@ -318,6 +339,8 @@ mod tests {
             let out = minify(input, t);
             assert!(out.contains("日本語"));
             assert!(out.contains("🚀"));
+            assert!(out.contains("ünïcode"));
+            assert!(out.contains("émojis"));
         }
     }
 
