@@ -5,7 +5,7 @@
 //! `docs/superpowers/specs/2026-05-21-md-min-viability-design.md`.
 
 use anyhow::{Context, Result};
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 /// Strip aggressiveness. Additive: tier N applies tier N-1 plus more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,26 +87,40 @@ fn transform(events: Vec<Event>, tier: Tier) -> Vec<Event> {
     strip_tier4(events)
 }
 
-/// Tier 1: drop HTML comment events.
-///
-/// HTML comments arrive as either `Event::Html` (block-level comment) or
-/// `Event::InlineHtml` (inline comment). Both carry the raw text including
-/// the `<!--` / `-->` delimiters, so we detect them by checking that the
-/// trimmed string starts with `<!--`.
+/// Tier 1: drop HTML comments. Block comments arrive as a `HtmlBlock`
+/// container with one `Html` event per line — only the first line starts
+/// with `<!--`, so the whole container must be tracked statefully, not
+/// filtered line by line. Inline comments are a single `InlineHtml` event.
 ///
 /// Hard-break form: profiling (see `hard_break_form_profiling` test) showed
 /// two-space=5 tokens vs backslash=5 tokens — identical cost on o200k_base.
 /// No rewrite is applied; hard breaks are left as the parser emits them.
 fn strip_tier1(events: Vec<Event>) -> Vec<Event> {
-    events
-        .into_iter()
-        .filter(|e| match e {
-            Event::Html(html) | Event::InlineHtml(html) => {
-                !html.trim_start().starts_with("<!--")
+    let mut out: Vec<Event> = Vec::with_capacity(events.len());
+    let mut in_comment_block = false;
+    for e in events {
+        match &e {
+            Event::Html(html)
+                if !in_comment_block && html.trim_start().starts_with("<!--") =>
+            {
+                // First line of a block comment — drop it, and also pop the
+                // `Start(HtmlBlock)` container we already pushed.
+                if matches!(out.last(), Some(Event::Start(Tag::HtmlBlock))) {
+                    out.pop();
+                }
+                in_comment_block = true;
             }
-            _ => true,
-        })
-        .collect()
+            Event::Html(_) if in_comment_block => { /* continuation line — drop */ }
+            Event::End(TagEnd::HtmlBlock) if in_comment_block => {
+                in_comment_block = false; // end of comment block — drop
+            }
+            Event::InlineHtml(html) if html.trim_start().starts_with("<!--") => {
+                /* inline comment — drop */
+            }
+            _ => out.push(e),
+        }
+    }
+    out
 }
 
 /// Tier 2 placeholder — implemented in a later task.
@@ -157,6 +171,17 @@ mod tests {
     }
 
     #[test]
+    fn tier1_drops_multiline_html_comments() {
+        let input = "Before.\n\n<!--\nhidden body\nmore hidden\n-->\n\nAfter.\n";
+        let out = minify(input, Tier::One);
+        assert!(!out.contains("hidden body"), "multiline comment body must be dropped");
+        assert!(!out.contains("more hidden"));
+        assert!(!out.contains("-->"));
+        assert!(out.contains("Before."));
+        assert!(out.contains("After."));
+    }
+
+    #[test]
     fn hard_break_form_profiling() {
         // Spec cycle 1: do NOT assume "  \n" -> "\\\n" saves tokens. Measure.
         use tiktoken_rs::o200k_base;
@@ -166,6 +191,12 @@ mod tests {
         let n_space = bpe.encode_with_special_tokens(two_space).len();
         let n_back = bpe.encode_with_special_tokens(backslash).len();
         println!("hard-break tokens: two-space={n_space} backslash={n_back}");
-        assert!(n_space > 0 && n_back > 0);
+        // Decision recorded: backslash form is not cheaper on o200k_base, so
+        // strip_tier1 applies no hard-break rewrite. If this flips, revisit.
+        assert!(
+            n_back >= n_space,
+            "backslash hard-break became cheaper ({n_back} < {n_space}) — \
+             strip_tier1 should now rewrite hard breaks"
+        );
     }
 }
