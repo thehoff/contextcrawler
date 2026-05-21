@@ -286,6 +286,41 @@ mod tests {
         assert!(!out.contains("1. first"), "ordered list markers must be gone");
     }
 
+    // ── Fixture-based tests (Task 7) ──────────────────────────────────────────
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    #[test]
+    fn every_tier_is_monotonically_smaller_or_equal() {
+        let input = include_str!("../../../tests/fixtures/md/mixed.md");
+        let sizes: Vec<usize> = [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four]
+            .iter()
+            .map(|t| count_tokens(&minify(input, *t)))
+            .collect();
+        for w in sizes.windows(2) {
+            assert!(w[1] <= w[0], "each tier must be <= the previous: {sizes:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_input_does_not_panic() {
+        for junk in ["", "```unclosed", "[", "| broken |", "\u{0}\u{0}"] {
+            let _ = minify(junk, Tier::Four); // must not panic
+        }
+    }
+
+    #[test]
+    fn unicode_content_survives_all_tiers() {
+        let input = "# 日本語\n\nParagraph with émojis 🚀 and ünïcode.\n";
+        for t in [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four] {
+            let out = minify(input, t);
+            assert!(out.contains("日本語"));
+            assert!(out.contains("🚀"));
+        }
+    }
+
     #[test]
     fn hard_break_form_profiling() {
         // Spec cycle 1: do NOT assume "  \n" -> "\\\n" saves tokens. Measure.
