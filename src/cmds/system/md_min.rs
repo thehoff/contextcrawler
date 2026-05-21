@@ -67,13 +67,61 @@ fn try_minify(input: &str, tier: Tier) -> Result<String> {
     Ok(out)
 }
 
-/// Apply the tier's event transform. Tier 0 is identity.
+/// Apply the tier's event transform. Tiers compose additively.
 fn transform(events: Vec<Event>, tier: Tier) -> Vec<Event> {
-    match tier {
-        Tier::Zero => events,
-        // Filled in by later tasks.
-        _ => events,
+    if tier == Tier::Zero {
+        return events;
     }
+    let mut events = strip_tier1(events);
+    if tier == Tier::One {
+        return events;
+    }
+    events = strip_tier2(events);
+    if tier == Tier::Two {
+        return events;
+    }
+    events = strip_tier3(events);
+    if tier == Tier::Three {
+        return events;
+    }
+    strip_tier4(events)
+}
+
+/// Tier 1: drop HTML comment events.
+///
+/// HTML comments arrive as either `Event::Html` (block-level comment) or
+/// `Event::InlineHtml` (inline comment). Both carry the raw text including
+/// the `<!--` / `-->` delimiters, so we detect them by checking that the
+/// trimmed string starts with `<!--`.
+///
+/// Hard-break form: profiling (see `hard_break_form_profiling` test) showed
+/// two-space=5 tokens vs backslash=5 tokens — identical cost on o200k_base.
+/// No rewrite is applied; hard breaks are left as the parser emits them.
+fn strip_tier1(events: Vec<Event>) -> Vec<Event> {
+    events
+        .into_iter()
+        .filter(|e| match e {
+            Event::Html(html) | Event::InlineHtml(html) => {
+                !html.trim_start().starts_with("<!--")
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+/// Tier 2 placeholder — implemented in a later task.
+fn strip_tier2(events: Vec<Event>) -> Vec<Event> {
+    events
+}
+
+/// Tier 3 placeholder — implemented in a later task.
+fn strip_tier3(events: Vec<Event>) -> Vec<Event> {
+    events
+}
+
+/// Tier 4 placeholder — implemented in a later task.
+fn strip_tier4(events: Vec<Event>) -> Vec<Event> {
+    events
 }
 
 #[cfg(test)]
@@ -89,5 +137,35 @@ mod tests {
         assert_eq!(once, twice, "tier 0 must be idempotent");
         assert!(once.contains("# Title"));
         assert!(once.contains("**bold**"));
+    }
+
+    #[test]
+    fn tier1_drops_html_comments() {
+        let input = "Before.\n\n<!-- a hidden comment -->\n\nAfter.\n";
+        let out = minify(input, Tier::One);
+        assert!(!out.contains("hidden comment"), "tier 1 must drop HTML comments");
+        assert!(out.contains("Before."));
+        assert!(out.contains("After."));
+    }
+
+    #[test]
+    fn tier1_keeps_all_visible_text() {
+        let input = "# Heading\n\nReal content here.\n";
+        let out = minify(input, Tier::One);
+        assert!(out.contains("# Heading"));
+        assert!(out.contains("Real content here."));
+    }
+
+    #[test]
+    fn hard_break_form_profiling() {
+        // Spec cycle 1: do NOT assume "  \n" -> "\\\n" saves tokens. Measure.
+        use tiktoken_rs::o200k_base;
+        let bpe = o200k_base().expect("tokenizer");
+        let two_space = "line one  \nline two";
+        let backslash = "line one\\\nline two";
+        let n_space = bpe.encode_with_special_tokens(two_space).len();
+        let n_back = bpe.encode_with_special_tokens(backslash).len();
+        println!("hard-break tokens: two-space={n_space} backslash={n_back}");
+        assert!(n_space > 0 && n_back > 0);
     }
 }
