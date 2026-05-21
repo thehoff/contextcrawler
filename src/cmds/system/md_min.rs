@@ -422,6 +422,79 @@ mod tests {
         }
     }
 
+    // ── L1: AST allowed-mutation equivalence (Task 9) ─────────────────────────
+
+    /// Classify an event into a coarse kind for L1 comparison.
+    fn event_kind(e: &Event) -> &'static str {
+        match e {
+            Event::Start(Tag::Emphasis) | Event::End(TagEnd::Emphasis) => "emphasis",
+            Event::Start(Tag::Strong) | Event::End(TagEnd::Strong) => "strong",
+            Event::Start(Tag::Strikethrough) | Event::End(TagEnd::Strikethrough) => "strike",
+            Event::Rule => "rule",
+            Event::Start(Tag::Heading { .. }) | Event::End(TagEnd::Heading(_)) => "heading",
+            Event::Start(Tag::BlockQuote(_)) | Event::End(TagEnd::BlockQuote(_)) => "blockquote",
+            Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link) => "link",
+            Event::Start(Tag::Image { .. }) | Event::End(TagEnd::Image) => "image",
+            Event::Start(Tag::List(_)) | Event::End(TagEnd::List(_)) => "list",
+            Event::Html(_) | Event::InlineHtml(_) => "html",
+            Event::Text(_) => "text",
+            Event::Code(_) => "code",
+            _ => "other",
+        }
+    }
+
+    /// Event kinds each tier is permitted to remove or rewrite.
+    fn declared_deletions(tier: Tier) -> &'static [&'static str] {
+        match tier {
+            Tier::Zero => &[],
+            Tier::One => &["html"],
+            Tier::Two => &["html", "emphasis", "strong", "strike", "rule"],
+            Tier::Three => &["html", "emphasis", "strong", "strike", "rule",
+                              "heading", "blockquote", "link", "image"],
+            Tier::Four => &["html", "emphasis", "strong", "strike", "rule",
+                             "heading", "blockquote", "link", "image", "list"],
+        }
+    }
+
+    #[test]
+    fn l1_inline_code_is_never_lost() {
+        for fixture in [
+            include_str!("../../../tests/fixtures/md/mixed.md"),
+            include_str!("../../../tests/fixtures/md/code_heavy.md"),
+        ] {
+            let raw_codes: Vec<String> = Parser::new_ext(fixture, parser_options())
+                .filter_map(|e| match e { Event::Code(s) => Some(s.to_string()), _ => None })
+                .collect();
+            for t in [Tier::Zero, Tier::One, Tier::Two, Tier::Three, Tier::Four] {
+                let stripped_codes: Vec<String> =
+                    Parser::new_ext(&minify(fixture, t), parser_options())
+                        .filter_map(|e| match e { Event::Code(s) => Some(s.to_string()), _ => None })
+                        .collect();
+                assert_eq!(raw_codes, stripped_codes, "L1: tier {t:?} altered inline code");
+            }
+        }
+    }
+
+    #[test]
+    fn l1_no_undeclared_event_kinds_disappear() {
+        let fixture = include_str!("../../../tests/fixtures/md/mixed.md");
+        let raw_kinds: std::collections::HashSet<&str> =
+            Parser::new_ext(fixture, parser_options()).map(|e| event_kind(&e)).collect();
+        for t in [Tier::One, Tier::Two, Tier::Three, Tier::Four] {
+            let kinds: std::collections::HashSet<&str> =
+                Parser::new_ext(&minify(fixture, t), parser_options())
+                    .map(|e| event_kind(&e)).collect();
+            let allowed: std::collections::HashSet<&str> =
+                declared_deletions(t).iter().copied().collect();
+            for k in &raw_kinds {
+                assert!(
+                    kinds.contains(k) || allowed.contains(k),
+                    "L1: tier {t:?} removed undeclared event kind {k:?}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn hard_break_form_profiling() {
         // Spec cycle 1: do NOT assume "  \n" -> "\\\n" saves tokens. Measure.
