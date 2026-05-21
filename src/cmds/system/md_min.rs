@@ -139,8 +139,8 @@ fn strip_tier2(events: Vec<Event>) -> Vec<Event> {
         .collect()
 }
 
-/// Tier 3: drop heading hashes and blockquote markers, and reduce links to
-/// `text url` plain text. The URL is always kept because it is payload.
+/// Tier 3: drop heading hashes and blockquote markers, and reduce links and
+/// images to `text url` plain text. The URL is always kept because it is payload.
 fn strip_tier3(events: Vec<Event>) -> Vec<Event> {
     let mut out: Vec<Event> = Vec::with_capacity(events.len());
     let mut link_urls: Vec<CowStr> = Vec::new();
@@ -149,8 +149,12 @@ fn strip_tier3(events: Vec<Event>) -> Vec<Event> {
             Event::Start(Tag::Heading { .. }) => out.push(Event::Start(Tag::Paragraph)),
             Event::End(TagEnd::Heading(_)) => out.push(Event::End(TagEnd::Paragraph)),
             Event::Start(Tag::BlockQuote(_)) | Event::End(TagEnd::BlockQuote(_)) => {}
-            Event::Start(Tag::Link { dest_url, .. }) => link_urls.push(dest_url),
-            Event::End(TagEnd::Link) => {
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                link_urls.push(dest_url)
+            }
+            Event::End(TagEnd::Link | TagEnd::Image) => {
+                // Parser guarantees balanced tags, so the stack is non-empty here for
+                // every real document; `if let` is a defensive no-op otherwise.
                 if let Some(url) = link_urls.pop() {
                     out.push(Event::Text(CowStr::Borrowed(" ")));
                     out.push(Event::Text(url));
@@ -172,7 +176,7 @@ fn strip_tier4(events: Vec<Event>) -> Vec<Event> {
             Event::End(TagEnd::Item) => Some(Event::End(TagEnd::Paragraph)),
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
                 Some(Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(
-                    CowStr::Borrowed(""),
+                    CowStr::Borrowed(""), // empty string -> serialiser emits a bare fence with no language tag
                 ))))
             }
             other => Some(other),
@@ -231,6 +235,7 @@ mod tests {
         assert!(out.contains("italic"));
         assert!(out.contains("struck"));
         assert!(!out.contains("**"), "bold markers must be gone");
+        assert!(!out.contains("_italic_"), "underscore emphasis must not be re-emitted");
         assert!(!out.contains("~~"), "strikethrough markers must be gone");
         assert!(!out.contains("---"), "horizontal rule must be gone");
     }
@@ -255,6 +260,30 @@ mod tests {
         assert!(!out.contains("- one"), "list markers must be gone");
         assert!(out.contains("fn x() {}"), "code body survives verbatim");
         assert!(!out.contains("```rust"), "fence language must be gone");
+    }
+
+    #[test]
+    fn tier3_strips_image_keeps_url() {
+        let input = "An image ![the alt](https://example.com/i.png) here.\n";
+        let out = minify(input, Tier::Three);
+        assert!(out.contains("the alt"), "image alt text must survive");
+        assert!(out.contains("https://example.com/i.png"), "image URL must be kept");
+        assert!(!out.contains("!["), "image markup must be gone");
+    }
+
+    #[test]
+    fn tier3_autolink_url_survives() {
+        let input = "Visit <https://example.com/auto> today.\n";
+        let out = minify(input, Tier::Three);
+        assert!(out.contains("https://example.com/auto"), "autolink URL must survive");
+    }
+
+    #[test]
+    fn tier4_flattens_ordered_list() {
+        let input = "1. first\n2. second\n";
+        let out = minify(input, Tier::Four);
+        assert!(out.contains("first") && out.contains("second"), "item text survives");
+        assert!(!out.contains("1. first"), "ordered list markers must be gone");
     }
 
     #[test]
