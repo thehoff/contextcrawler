@@ -391,6 +391,19 @@ mod tests {
     }
 
     #[test]
+    fn flatten_text_glues_standalone_trailing_punctuation() {
+        // `**bold**.` parses as `Text("bold")` + `Text(".")` — the trailing
+        // full stop is its own text run because the emphasis span ends right
+        // before it. flatten_text must glue that standalone `.` back onto the
+        // preceding word so the run compares equal to its merged form.
+        let md = "A word ending in **bold**. And plain text.\n";
+        assert_eq!(
+            flatten_text(md),
+            "A word ending in bold. And plain text.",
+        );
+    }
+
+    #[test]
     fn l2_tiers_0_to_2_preserve_all_text() {
         for fixture in ALL_FIXTURES {
             let raw = flatten_text(fixture);
@@ -489,22 +502,28 @@ mod tests {
         }
     }
 
+    /// L1 is a *set-level* check: across every fixture it verifies that no
+    /// undeclared event KIND is entirely eliminated by a tier. It does not
+    /// assert that every individual event is preserved — count-level fidelity
+    /// is out of scope here. Text-content preservation is covered by the L2
+    /// tests above.
     #[test]
     fn l1_no_undeclared_event_kinds_disappear() {
-        let fixture = include_str!("../../../tests/fixtures/md/mixed.md");
-        let raw_kinds: std::collections::HashSet<&str> =
-            Parser::new_ext(fixture, parser_options()).map(|e| event_kind(&e)).collect();
-        for t in [Tier::One, Tier::Two, Tier::Three, Tier::Four] {
-            let kinds: std::collections::HashSet<&str> =
-                Parser::new_ext(&minify(fixture, t), parser_options())
-                    .map(|e| event_kind(&e)).collect();
-            let allowed: std::collections::HashSet<&str> =
-                declared_deletions(t).iter().copied().collect();
-            for k in &raw_kinds {
-                assert!(
-                    kinds.contains(k) || allowed.contains(k),
-                    "L1: tier {t:?} removed undeclared event kind {k:?}",
-                );
+        for (idx, fixture) in ALL_FIXTURES.iter().enumerate() {
+            let raw_kinds: std::collections::HashSet<&str> =
+                Parser::new_ext(fixture, parser_options()).map(|e| event_kind(&e)).collect();
+            for t in [Tier::One, Tier::Two, Tier::Three, Tier::Four] {
+                let kinds: std::collections::HashSet<&str> =
+                    Parser::new_ext(&minify(fixture, t), parser_options())
+                        .map(|e| event_kind(&e)).collect();
+                let allowed: std::collections::HashSet<&str> =
+                    declared_deletions(t).iter().copied().collect();
+                for k in &raw_kinds {
+                    assert!(
+                        kinds.contains(k) || allowed.contains(k),
+                        "L1: fixture #{idx} tier {t:?} removed undeclared event kind {k:?}",
+                    );
+                }
             }
         }
     }
