@@ -37,7 +37,7 @@ In `Cargo.toml`, under `[dependencies]`, add:
 
 ```toml
 pulldown-cmark = { version = "0.13", default-features = false }
-pulldown-cmark-to-cmark = "21"
+pulldown-cmark-to-cmark = "22"
 ```
 
 - [ ] **Step 2: Add the dev-dependency for token profiling**
@@ -45,7 +45,7 @@ pulldown-cmark-to-cmark = "21"
 Under `[dev-dependencies]` (currently empty), add:
 
 ```toml
-tiktoken-rs = "0.7"
+tiktoken-rs = "0.11"
 ```
 
 - [ ] **Step 3: Verify it resolves and builds**
