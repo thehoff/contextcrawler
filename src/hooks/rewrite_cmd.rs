@@ -69,7 +69,10 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
                 // through. The gate is opt-in (`supply_chain.enabled`), so
                 // once a user has turned it on we fail CLOSED on error.
                 let sc_verdict = supply_chain_gate::check(cmd);
-                supply_chain_gate::log_event(cmd, &sc_verdict);
+                // Telemetry packages (#172): keeps Allow-path package
+                // identity in the install ledger.
+                let telemetry = supply_chain_gate::extract_packages_for_telemetry(cmd);
+                supply_chain_gate::log_event(cmd, &sc_verdict, &telemetry);
                 match &sc_verdict {
                     supply_chain_gate::Verdict::Block(_) => {
                         eprintln!("{}", supply_chain_gate::render(&sc_verdict));

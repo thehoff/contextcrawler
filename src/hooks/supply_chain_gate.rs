@@ -2111,8 +2111,112 @@ fn matches_override(pkg: &str, patterns: &[String]) -> bool {
     false
 }
 
+/// One package extracted from an install command for telemetry purposes.
+/// Best-effort, regex-based — captures package identity even when the gate
+/// returns `Allow` (in which case there are no findings to inspect).
+/// Closes codex peer-review HIGH (#162/#172): Allow-path installs used to
+/// collapse to placeholder rows because `Verdict::Allow` carries no findings.
+#[derive(Debug, Clone)]
+pub struct TelemetryPackage {
+    pub package: String,
+    pub ecosystem: String,
+}
+
+lazy_static::lazy_static! {
+    // Anchor mirrors the install-detect regexes — `/`, `\`, whitespace,
+    // and shell operators all count as command-start delimiters.
+    static ref NPM_INSTALL_RE: regex::Regex = regex::Regex::new(
+        r"(?:^|[\s;/\\]|&&|\|\|)(?:npm|pnpm|yarn|bun)\s+(?:i|install|add)\s+([^\n|;&<>]+)"
+    ).unwrap();
+    static ref PIP_INSTALL_RE: regex::Regex = regex::Regex::new(
+        r"(?:^|[\s;/\\]|&&|\|\|)(?:pip|pip3|uv\s+pip|poetry\s+add|pipx\s+install)\s+(?:install\s+)?([^\n|;&<>]+)"
+    ).unwrap();
+    static ref CARGO_INSTALL_RE: regex::Regex = regex::Regex::new(
+        r"(?:^|[\s;/\\]|&&|\|\|)cargo\s+(?:add|install)\s+([^\n|;&<>]+)"
+    ).unwrap();
+    static ref GEM_INSTALL_RE: regex::Regex = regex::Regex::new(
+        r"(?:^|[\s;/\\]|&&|\|\|)gem\s+install\s+([^\n|;&<>]+)"
+    ).unwrap();
+}
+
+/// Best-effort extraction of package names from an install command. Returns
+/// an empty vec for non-install commands. Used only for telemetry — the
+/// real gate uses the full detect_installs pipeline.
+pub fn extract_packages_for_telemetry(cmd: &str) -> Vec<TelemetryPackage> {
+    let mut out = Vec::new();
+    let mut push_pkgs = |captures_iter: regex::CaptureMatches, ecosystem: &str| {
+        for cap in captures_iter {
+            if let Some(args) = cap.get(1) {
+                for tok in args.as_str().split_whitespace() {
+                    if let Some(pkg) = normalise_install_token(tok) {
+                        out.push(TelemetryPackage {
+                            package: pkg,
+                            ecosystem: ecosystem.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    };
+    push_pkgs(NPM_INSTALL_RE.captures_iter(cmd), "npm");
+    push_pkgs(PIP_INSTALL_RE.captures_iter(cmd), "PyPI");
+    push_pkgs(CARGO_INSTALL_RE.captures_iter(cmd), "cargo");
+    push_pkgs(GEM_INSTALL_RE.captures_iter(cmd), "RubyGems");
+    out
+}
+
+/// Strip version pins / flags / paths from a single install-arg token.
+/// Handles npm scoped names (`@scope/name`, `@scope/name@^4.0`) correctly.
+/// Returns `None` if the token is a flag, a path/URL/lockfile, or empty.
+fn normalise_install_token(tok: &str) -> Option<String> {
+    // Flags: `-g`, `--save-dev`, etc.
+    if tok.starts_with('-') {
+        return None;
+    }
+    // Strip version pins. `@scope/name@version` splits via rsplit_once('@').
+    // Bare `name@version` and `name==version` use the leading delimiter.
+    let pkg = if let Some(rest) = tok.strip_prefix('@') {
+        // Scoped — keep the `@` prefix, strip any trailing `@version`.
+        match rest.rsplit_once('@') {
+            Some((name, _)) => format!("@{name}"),
+            None => tok.to_string(),
+        }
+    } else {
+        // Bare — split on first `@`, `==`, `>=`, `~=`, `<=`, `>`, `<`.
+        let cut = tok
+            .find('@')
+            .or_else(|| tok.find("=="))
+            .or_else(|| tok.find(">="))
+            .or_else(|| tok.find("~="))
+            .or_else(|| tok.find("<="))
+            .or_else(|| tok.find('>'))
+            .or_else(|| tok.find('<'));
+        match cut {
+            Some(i) => tok[..i].to_string(),
+            None => tok.to_string(),
+        }
+    };
+    if pkg.is_empty() {
+        return None;
+    }
+    // URL / path / file-like — the real gate handles those.
+    if pkg.contains(':') {
+        return None;
+    }
+    // Only allow `/` in scoped names (`@scope/name`).
+    let slash_ok = pkg.starts_with('@') && pkg.matches('/').count() == 1;
+    if pkg.contains('/') && !slash_ok {
+        return None;
+    }
+    Some(pkg)
+}
+
 /// Append a gate event to the local log for `contextcrawler security --supply-chain-log`.
-pub fn log_event(cmd: &str, verdict: &Verdict) {
+///
+/// `telemetry` carries package identity for the Allow-verdict path where
+/// `verdict.findings()` is empty (codex peer-review HIGH #172). Pass an
+/// empty slice if the caller hasn't extracted packages.
+pub fn log_event(cmd: &str, verdict: &Verdict, telemetry: &[TelemetryPackage]) {
     let Some(data_dir) = dirs::data_local_dir() else {
         return;
     };
@@ -2150,16 +2254,40 @@ pub fn log_event(cmd: &str, verdict: &Verdict) {
     // Mirror into the installs ledger (#172). Best-effort: any failure here
     // (no $HOME, locked DB, etc.) silently falls back to JSONL-only — the
     // backfill picks it up on next Tracker construction.
-    record_install_to_db(&ts, kind, cmd, findings_val.map(|v| v.as_slice()));
+    record_install_to_db(
+        &ts,
+        kind,
+        cmd,
+        findings_val.map(|v| v.as_slice()),
+        telemetry,
+    );
 }
 
 /// DB-side mirror of `log_event` — populates the `installs` table so the
 /// dashboard can query per-project install history without re-parsing JSONL.
 ///
-/// Uses `std::env::current_dir()` for project_path. JSONL backfill rows
-/// have empty project_path (CWD wasn't captured historically).
-fn record_install_to_db(ts: &str, verdict: &str, cmd: &str, findings: Option<&[Finding]>) {
+/// Codex peer-review HIGH #172 fix: when `findings` is absent (Allow path)
+/// OR carries no per-package entries, fall back to `telemetry` so the row
+/// preserves package identity instead of becoming a blank placeholder.
+///
+/// Codex peer-review MED #172 fix: findings are aggregated by (package,
+/// ecosystem) before insertion so a single package with two findings
+/// (e.g. RecentRelease + KnownVulnerability) lands as one row with both
+/// IDs in `finding_ids`, not as two rows where the second is silently
+/// dropped by the UNIQUE(ts, raw_command, package) constraint.
+///
+/// project_path is `std::env::current_dir()`. JSONL backfill rows have
+/// empty project_path (CWD was never captured historically).
+fn record_install_to_db(
+    ts: &str,
+    verdict: &str,
+    cmd: &str,
+    findings: Option<&[Finding]>,
+    telemetry: &[TelemetryPackage],
+) {
     use crate::core::tracking::{InstallEvent, InstallPackage, Tracker};
+    use std::collections::BTreeMap;
+
     let Ok(tracker) = Tracker::new() else {
         return;
     };
@@ -2167,26 +2295,67 @@ fn record_install_to_db(ts: &str, verdict: &str, cmd: &str, findings: Option<&[F
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
         .unwrap_or_default();
-    let packages = findings
-        .map(|fs| {
-            fs.iter()
-                .map(|f| InstallPackage {
+
+    // Aggregate findings by (package, ecosystem). BTreeMap for deterministic
+    // ordering (otherwise the row contents depend on HashMap iteration order).
+    let mut by_pkg: BTreeMap<(String, String), InstallPackage> = BTreeMap::new();
+    if let Some(fs) = findings {
+        for f in fs {
+            let key = (f.package.clone(), f.ecosystem.clone());
+            let resolved = match &f.reason {
+                FindingReason::RecentRelease { version, .. } => Some(version.clone()),
+                _ => None,
+            };
+            let fid = match &f.reason {
+                FindingReason::KnownVulnerability { id, .. } => Some(id.clone()),
+                _ => None,
+            };
+            let sev = format!("{:?}", f.severity).to_uppercase();
+            by_pkg
+                .entry(key)
+                .and_modify(|p| {
+                    if p.resolved_version.is_none() {
+                        p.resolved_version = resolved.clone();
+                    }
+                    if let Some(id) = &fid {
+                        if !p.finding_ids.contains(id) {
+                            p.finding_ids.push(id.clone());
+                        }
+                    }
+                    // Keep the highest severity seen.
+                    if severity_rank(&sev) > severity_rank(&p.severity) {
+                        p.severity = sev.clone();
+                    }
+                })
+                .or_insert_with(|| InstallPackage {
                     ecosystem: f.ecosystem.clone(),
                     package: f.package.clone(),
                     version_spec: None,
-                    resolved_version: match &f.reason {
-                        FindingReason::RecentRelease { version, .. } => Some(version.clone()),
-                        _ => None,
-                    },
-                    severity: format!("{:?}", f.severity).to_uppercase(),
-                    finding_ids: match &f.reason {
-                        FindingReason::KnownVulnerability { id, .. } => vec![id.clone()],
-                        _ => vec![],
-                    },
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    resolved_version: resolved,
+                    severity: sev,
+                    finding_ids: fid.into_iter().collect(),
+                });
+        }
+    }
+
+    // Allow / Skip path: no findings, but the command might still be a real
+    // install — fold telemetry packages in so we don't lose identity. Skip
+    // any (package, ecosystem) already covered by a finding above.
+    if by_pkg.is_empty() {
+        for t in telemetry {
+            let key = (t.package.clone(), t.ecosystem.clone());
+            by_pkg.entry(key).or_insert_with(|| InstallPackage {
+                ecosystem: t.ecosystem.clone(),
+                package: t.package.clone(),
+                version_spec: None,
+                resolved_version: None,
+                severity: String::new(),
+                finding_ids: Vec::new(),
+            });
+        }
+    }
+
+    let packages: Vec<InstallPackage> = by_pkg.into_values().collect();
     let ev = InstallEvent {
         ts: ts.to_string(),
         project_path,
@@ -2195,6 +2364,109 @@ fn record_install_to_db(ts: &str, verdict: &str, cmd: &str, findings: Option<&[F
         packages,
     };
     let _ = tracker.record_install(&ev);
+}
+
+/// Severity ranking for aggregation — higher wins.
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "CRITICAL" => 4,
+        "HIGH" => 3,
+        "MEDIUM" => 2,
+        "LOW" => 1,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod telemetry_extractor_tests {
+    use super::extract_packages_for_telemetry;
+
+    fn pkgs(cmd: &str) -> Vec<(String, String)> {
+        extract_packages_for_telemetry(cmd)
+            .into_iter()
+            .map(|t| (t.package, t.ecosystem))
+            .collect()
+    }
+
+    #[test]
+    fn npm_bare_install() {
+        assert_eq!(pkgs("npm install lodash"), vec![("lodash".into(), "npm".into())]);
+    }
+
+    #[test]
+    fn npm_install_with_version_pin() {
+        assert_eq!(
+            pkgs("npm install express@4.18.2"),
+            vec![("express".into(), "npm".into())]
+        );
+    }
+
+    #[test]
+    fn npm_install_scoped_package() {
+        // The codex HIGH finding: `@scope/name` MUST round-trip; previous
+        // implementation dropped these because of the `/` filter.
+        assert_eq!(
+            pkgs("npm install -g --ignore-scripts @earendil-works/pi-coding-agent"),
+            vec![("@earendil-works/pi-coding-agent".into(), "npm".into())]
+        );
+    }
+
+    #[test]
+    fn npm_install_scoped_with_version() {
+        assert_eq!(
+            pkgs("npm install @types/node@^20.0.0"),
+            vec![("@types/node".into(), "npm".into())]
+        );
+    }
+
+    #[test]
+    fn pip_install_with_pin() {
+        assert_eq!(
+            pkgs("pip install requests==2.20.0"),
+            vec![("requests".into(), "PyPI".into())]
+        );
+    }
+
+    #[test]
+    fn cargo_add_with_features() {
+        // `--features` is a flag — only the package should land.
+        let result = pkgs("cargo add tokio --features full");
+        assert!(
+            result.iter().any(|(p, e)| p == "tokio" && e == "cargo"),
+            "expected tokio in cargo result, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn non_install_command_returns_empty() {
+        assert!(pkgs("git status").is_empty());
+        assert!(pkgs("ls -la").is_empty());
+        // Note: `echo npm install foo` WILL false-positive because the
+        // telemetry extractor is intentionally simpler than the real gate
+        // (no data-utility allowlist, #141). This is acceptable for the
+        // dashboard ledger — surfacing an echo'd install line is more
+        // useful than silently dropping legitimate Allow-path installs.
+    }
+
+    #[test]
+    fn url_and_path_tokens_skipped() {
+        // Real gate handles these — telemetry just declines to invent a name.
+        assert!(pkgs("npm install https://github.com/foo/bar.git").is_empty());
+        assert!(pkgs("pip install /tmp/wheel.whl").is_empty());
+    }
+
+    #[test]
+    fn multiple_packages_extracted() {
+        let result = pkgs("npm install lodash express react");
+        assert_eq!(result.len(), 3);
+        assert!(result.iter().all(|(_, e)| e == "npm"));
+    }
+
+    #[test]
+    fn flags_filtered() {
+        let result = pkgs("npm install -g --save-dev lodash");
+        assert_eq!(result, vec![("lodash".into(), "npm".into())]);
+    }
 }
 
 /// Render a Verdict as a human-readable explanation (for hook warnings and CLI).

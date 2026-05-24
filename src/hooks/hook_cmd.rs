@@ -474,7 +474,11 @@ fn process_claude_payload_with(
     process_claude_payload_with_gate(v, check, |cmd| {
         let tirith_verdict = tirith_gate::check(cmd);
         let sc_verdict = supply_chain_gate::check(cmd);
-        supply_chain_gate::log_event(cmd, &sc_verdict);
+        // Telemetry packages (#172): captures Allow-path identity so the
+        // dashboard install ledger doesn't lose `npm install lodash` as a
+        // blank placeholder when the verdict carries no findings.
+        let telemetry = supply_chain_gate::extract_packages_for_telemetry(cmd);
+        supply_chain_gate::log_event(cmd, &sc_verdict, &telemetry);
         let decision = gate_decision(&tirith_verdict, &sc_verdict);
         // Emit the Tirith downgrade audit line when (and only when) the
         // classification is an Ask driven by Tirith — the pure `gate_decision`

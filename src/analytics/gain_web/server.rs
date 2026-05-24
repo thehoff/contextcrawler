@@ -178,22 +178,32 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// SIGINT-set sentinel. POSIX says a signal handler must only touch async-
+/// signal-safe operations — locking a Mutex is not in that set (codex peer-
+/// review MED). We use a `'static AtomicBool` directly: `store` on AtomicBool
+/// is wait-free and explicitly listed as signal-safe under the POSIX
+/// `<signal.h>` rules for lock-free types.
+#[cfg(unix)]
+static SIGINT_FIRED: AtomicBool = AtomicBool::new(false);
+
 #[cfg(unix)]
 fn ctrlc_handler(flag: Arc<AtomicBool>) {
-    // Lightweight SIGINT handler via libc::signal. We don't pull the
-    // `ctrlc` crate just for this — tiny_http's recv_timeout means we'll
-    // notice the flag within POLL_INTERVAL.
-    use std::sync::Mutex;
-    static HANDLER: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
-    *HANDLER.lock().unwrap() = Some(flag);
+    // The local `flag` is what the main loop polls; the static sentinel is
+    // what the signal handler can safely write to. A polling thread bridges
+    // the two so the main loop's contract is unchanged.
     extern "C" fn on_sigint(_: libc::c_int) {
-        if let Some(f) = HANDLER.lock().unwrap().as_ref() {
-            f.store(true, Ordering::Relaxed);
-        }
+        SIGINT_FIRED.store(true, Ordering::Relaxed);
     }
     unsafe {
         libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
     }
+    std::thread::spawn(move || loop {
+        if SIGINT_FIRED.load(Ordering::Relaxed) {
+            flag.store(true, Ordering::Relaxed);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    });
 }
 
 #[cfg(not(unix))]
