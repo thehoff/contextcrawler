@@ -88,6 +88,8 @@ fn handle(request: tiny_http::Request) {
         "/api/failures" => api::failures().map(json_response),
         "/api/boundaries" => api::boundaries().map(json_response),
         "/api/insights" => api::insights().map(json_response),
+        "/api/security/gate" => api::security_gate().map(json_response),
+        "/api/security/supply-chain" => api::security_supply_chain().map(json_response),
         _ => Ok(text_response(404, "not found")),
     };
 

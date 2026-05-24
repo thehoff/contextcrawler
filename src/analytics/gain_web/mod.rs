@@ -8,6 +8,7 @@
 //! Issue: https://github.com/thehoff/contextcrawler/issues/162
 
 mod api;
+mod security_log;
 mod server;
 
 use anyhow::Result;

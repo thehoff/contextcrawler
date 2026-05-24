@@ -229,6 +229,7 @@
       <a class="nav-item"        data-pane="weak">   Weak filters</a>
       <a class="nav-item"        data-pane="fail">   Parse failures</a>
       <a class="nav-item"        data-pane="bounds"> Release boundaries</a>
+      <a class="nav-item"        data-pane="sec">    Security</a>
       <a class="nav-item"        data-pane="insight">Insights</a>
     </nav>
     <div class="footer">
@@ -293,6 +294,13 @@
       <h2>Release boundaries</h2>
       <p class="lede">When contextcrawler upgrades landed — useful for before/after savings comparisons.</p>
       <div id="bounds-body"><div class="loading">loading…</div></div>
+    </section>
+
+    <!-- === SECURITY === -->
+    <section class="pane" data-pane="sec">
+      <h2>Security</h2>
+      <p class="lede">Tirith gate downgrades + supply-chain check verdicts. Loopback-only — these are local events from your machine.</p>
+      <div id="sec-body"><div class="loading">loading…</div></div>
     </section>
 
     <!-- === INSIGHTS === -->
@@ -535,6 +543,106 @@ const loaders = {
           <div class="panel-head"><h3>Install history</h3><span class="panel-meta">${boundaries.length} entries</span></div>
           <table><thead><tr><th>Installed at</th><th>Version</th><th></th></tr></thead><tbody>${rows}</tbody></table>
         </div>`;
+    } catch (e) { renderError(body, e); }
+  },
+
+  sec: async () => {
+    const body = document.getElementById("sec-body");
+    try {
+      const [gate, sc] = await Promise.all([
+        fetchJSON("/api/security/gate"),
+        fetchJSON("/api/security/supply-chain"),
+      ]);
+
+      const gateBlockRate = gate.total ? (((gate.by_action.find(([k]) => k === "tirith_block") || [, 0])[1]) / gate.total * 100) : 0;
+      const scAllow = (sc.by_verdict.find(([k]) => k === "allow") || [, 0])[1];
+      const scBlock = (sc.by_verdict.find(([k]) => k === "block") || [, 0])[1];
+      const scBlockRate = sc.total ? (scBlock / sc.total * 100) : 0;
+
+      const tailPill = (capped) => capped ? ' <span class="pill" title="Read tail-capped at 1 MiB — older events not included">tail</span>' : '';
+
+      const actionRows = gate.by_action.map(([action, n]) => `
+        <tr><td>${escapeHtml(action)}</td><td class="num">${fmtNum(n)}</td></tr>
+      `).join("");
+      const ruleRows = gate.by_rule.map(([rule, n]) => `
+        <tr><td>${escapeHtml(rule)}</td><td class="num">${fmtNum(n)}</td></tr>
+      `).join("");
+      const recentGate = gate.recent.map(e => `
+        <tr>
+          <td>${escapeHtml(e.ts)}</td>
+          <td>${escapeHtml(e.reason)}</td>
+          <td>${escapeHtml((e.rule_ids || []).join(", "))}</td>
+          <td style="font-family:ui-monospace;font-size:12px;color:var(--text-muted)">${escapeHtml(e.cmd)}</td>
+        </tr>
+      `).join("");
+
+      const verdictRows = sc.by_verdict.map(([v, n]) => `
+        <tr><td>${escapeHtml(v)}</td><td class="num">${fmtNum(n)}</td></tr>
+      `).join("");
+      const topBlocked = sc.top_blocked_packages.map(([pkg, n]) => `
+        <tr><td>${escapeHtml(pkg)}</td><td class="num">${fmtNum(n)}</td></tr>
+      `).join("");
+      const recentBlocks = sc.recent_blocks.map(e => {
+        const findings = (e.findings || []).map(f =>
+          `<span class="pill" style="margin-right:4px">${escapeHtml(f.package)} · ${escapeHtml(f.ecosystem)} · ${escapeHtml(f.severity)}</span>`
+        ).join("");
+        return `
+          <tr>
+            <td>${escapeHtml(e.ts)}</td>
+            <td style="font-family:ui-monospace;font-size:12px;color:var(--text-muted)">${escapeHtml(e.cmd)}</td>
+            <td>${findings}</td>
+          </tr>`;
+      }).join("");
+
+      body.innerHTML = `
+        <div class="cards">
+          <div class="card">
+            <p class="label">Gate events</p>
+            <p class="value">${fmtNum(gate.total)}</p>
+            <p class="sub">${fmtPct(gateBlockRate)} blocked${tailPill(gate.tail_capped)}</p>
+          </div>
+          <div class="card">
+            <p class="label">Supply-chain checks</p>
+            <p class="value purple">${fmtNum(sc.total)}</p>
+            <p class="sub">${fmtNum(scAllow)} allowed · ${fmtNum(scBlock)} blocked${tailPill(sc.tail_capped)}</p>
+          </div>
+          <div class="card">
+            <p class="label">Supply-chain block rate</p>
+            <p class="value ${scBlockRate < 5 ? 'green' : 'cyan'}">${fmtPct(scBlockRate)}</p>
+            <p class="sub">${sc.top_blocked_packages.length} distinct blocked pkgs</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Tirith gate · by action</h3><span class="panel-meta">${gate.by_action.length} actions</span></div>
+          ${actionRows ? `<table><thead><tr><th>Action</th><th class="num">Count</th></tr></thead><tbody>${actionRows}</tbody></table>` : '<div class="empty">no events</div>'}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Tirith gate · top rules</h3><span class="panel-meta">top 10</span></div>
+          ${ruleRows ? `<table><thead><tr><th>Rule</th><th class="num">Count</th></tr></thead><tbody>${ruleRows}</tbody></table>` : '<div class="empty">no rule activity</div>'}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Tirith gate · recent</h3><span class="panel-meta">last 20</span></div>
+          ${recentGate ? `<table><thead><tr><th>When</th><th>Reason</th><th>Rules</th><th>Command</th></tr></thead><tbody>${recentGate}</tbody></table>` : '<div class="empty">no recent</div>'}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Supply-chain · verdicts</h3><span class="panel-meta">${sc.by_verdict.length} kinds</span></div>
+          ${verdictRows ? `<table><thead><tr><th>Verdict</th><th class="num">Count</th></tr></thead><tbody>${verdictRows}</tbody></table>` : '<div class="empty">no events</div>'}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Supply-chain · most-blocked packages</h3><span class="panel-meta">top 10</span></div>
+          ${topBlocked ? `<table><thead><tr><th>Package</th><th class="num">Blocks</th></tr></thead><tbody>${topBlocked}</tbody></table>` : '<div class="empty">no blocks yet</div>'}
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Supply-chain · recent blocks</h3><span class="panel-meta">last 20</span></div>
+          ${recentBlocks ? `<table><thead><tr><th>When</th><th>Command</th><th>Findings</th></tr></thead><tbody>${recentBlocks}</tbody></table>` : '<div class="empty">no recent blocks</div>'}
+        </div>
+      `;
     } catch (e) { renderError(body, e); }
   },
 

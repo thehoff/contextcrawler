@@ -12,6 +12,8 @@ use crate::core::tracking::{
     DayStats, GainSummary, ParseFailureSummary, ReleaseBoundary, Tracker, WeakFilter,
 };
 
+use super::security_log;
+
 /// `/api/summary` — overall savings rollup (lifetime + last 30d).
 pub fn summary() -> Result<String> {
     let tracker = Tracker::new().context("Failed to open tracking DB")?;
@@ -122,6 +124,18 @@ struct Insight {
     kind: String,
     title: String,
     detail: String,
+}
+
+/// `/api/security/gate` — Tirith downgrades log rollup (#171).
+pub fn security_gate() -> Result<String> {
+    let summary = security_log::gate_summary().context("Failed to read gate log")?;
+    serde_json::to_string(&summary).context("Failed to serialise gate JSON")
+}
+
+/// `/api/security/supply-chain` — supply-chain check log rollup (#171).
+pub fn security_supply_chain() -> Result<String> {
+    let summary = security_log::supply_chain_summary().context("Failed to read supply-chain log")?;
+    serde_json::to_string(&summary).context("Failed to serialise supply-chain JSON")
 }
 
 #[cfg(test)]
