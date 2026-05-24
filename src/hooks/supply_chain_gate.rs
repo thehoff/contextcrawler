@@ -2128,20 +2128,73 @@ pub fn log_event(cmd: &str, verdict: &Verdict) {
         Verdict::Ask(_) => "ask",
         Verdict::Unavailable(_) => "unavailable",
     };
-    let findings = match verdict {
-        Verdict::Block(f) | Verdict::Ask(f) => serde_json::to_string(f).unwrap_or_default(),
-        _ => "[]".to_string(),
+    let findings_val = match verdict {
+        Verdict::Block(f) | Verdict::Ask(f) => Some(f),
+        _ => None,
     };
+    let findings_json = findings_val
+        .map(|f| serde_json::to_string(f).unwrap_or_default())
+        .unwrap_or_else(|| "[]".to_string());
+    let ts = Utc::now().to_rfc3339();
     let record = format!(
         r#"{{"ts":"{}","verdict":"{}","cmd":{},"findings":{}}}"#,
-        Utc::now().to_rfc3339(),
+        ts,
         kind,
         serde_json::to_string(cmd).unwrap_or_else(|_| "\"\"".into()),
-        findings
+        findings_json
     );
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{}", record);
     }
+
+    // Mirror into the installs ledger (#172). Best-effort: any failure here
+    // (no $HOME, locked DB, etc.) silently falls back to JSONL-only — the
+    // backfill picks it up on next Tracker construction.
+    record_install_to_db(&ts, kind, cmd, findings_val.map(|v| v.as_slice()));
+}
+
+/// DB-side mirror of `log_event` — populates the `installs` table so the
+/// dashboard can query per-project install history without re-parsing JSONL.
+///
+/// Uses `std::env::current_dir()` for project_path. JSONL backfill rows
+/// have empty project_path (CWD wasn't captured historically).
+fn record_install_to_db(ts: &str, verdict: &str, cmd: &str, findings: Option<&[Finding]>) {
+    use crate::core::tracking::{InstallEvent, InstallPackage, Tracker};
+    let Ok(tracker) = Tracker::new() else {
+        return;
+    };
+    let project_path = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+    let packages = findings
+        .map(|fs| {
+            fs.iter()
+                .map(|f| InstallPackage {
+                    ecosystem: f.ecosystem.clone(),
+                    package: f.package.clone(),
+                    version_spec: None,
+                    resolved_version: match &f.reason {
+                        FindingReason::RecentRelease { version, .. } => Some(version.clone()),
+                        _ => None,
+                    },
+                    severity: format!("{:?}", f.severity).to_uppercase(),
+                    finding_ids: match &f.reason {
+                        FindingReason::KnownVulnerability { id, .. } => vec![id.clone()],
+                        _ => vec![],
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ev = InstallEvent {
+        ts: ts.to_string(),
+        project_path,
+        verdict: verdict.to_string(),
+        raw_command: cmd.to_string(),
+        packages,
+    };
+    let _ = tracker.record_install(&ev);
 }
 
 /// Render a Verdict as a human-readable explanation (for hook warnings and CLI).

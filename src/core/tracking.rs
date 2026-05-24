@@ -543,6 +543,40 @@ impl Tracker {
             [],
         )?;
 
+        // Per-project install ledger (#172). Populated synchronously by the
+        // supply-chain hook (`supply_chain_gate::log_event`) AND backfilled
+        // from the historical `supply_chain.jsonl` audit log on first boot.
+        // JSONL stays the immutable audit log; this table is the query surface
+        // the dashboard uses for "what got installed where, with what verdict".
+        //
+        // UNIQUE (ts, raw_command) makes the backfill idempotent — re-running
+        // it after a partial run is safe.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS installs (
+                id INTEGER PRIMARY KEY,
+                ts TEXT NOT NULL,
+                project_path TEXT NOT NULL DEFAULT '',
+                ecosystem TEXT NOT NULL DEFAULT '',
+                package TEXT NOT NULL DEFAULT '',
+                version_spec TEXT,
+                resolved_version TEXT,
+                verdict TEXT NOT NULL,
+                finding_ids TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT '',
+                raw_command TEXT NOT NULL,
+                UNIQUE (ts, raw_command, package)
+            )",
+            [],
+        )?;
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_installs_project_ts ON installs(project_path, ts)",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_installs_verdict ON installs(verdict)",
+            [],
+        );
+
         // One-time migration for legacy DBs: `auto_vacuum=INCREMENTAL` set
         // above is a no-op on a DB created in mode 0 (full/none). A single
         // full VACUUM rewrites the file and commits it to incremental mode,
@@ -561,6 +595,10 @@ impl Tracker {
         // Best-effort: never fail tracker construction on a boundary insert
         // problem (downstream record() still works without it).
         let _ = tracker.ensure_release_boundary();
+        // One-time backfill from supply_chain.jsonl on the first run after
+        // the `installs` table is created (#172). Idempotent (UNIQUE
+        // constraint), best-effort (silent on any failure).
+        let _ = tracker.backfill_installs_from_jsonl();
         Ok(tracker)
     }
 
@@ -621,6 +659,245 @@ impl Tracker {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Record a single supply-chain install event (#172). One row per package
+    /// touched by the install command — a `pip install requests flask` block
+    /// expands to two rows so per-package querying stays trivial.
+    ///
+    /// `project_path` should be the CWD at install time; pass `""` if unknown
+    /// (the JSONL backfill always lacks it).
+    ///
+    /// Idempotent against the `UNIQUE(ts, raw_command, package)` index, so
+    /// re-running the same backfill is safe. Returns the number of rows
+    /// actually inserted (i.e. excluding rows the unique constraint rejected).
+    pub fn record_install(&self, ev: &InstallEvent) -> Result<usize> {
+        if ev.packages.is_empty() {
+            // No package detail (e.g. a "skip" verdict on a non-install
+            // command) — record a single placeholder row so the verdict
+            // shows up in per-project queries.
+            return self
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO installs
+                       (ts, project_path, ecosystem, package, version_spec, resolved_version,
+                        verdict, finding_ids, severity, raw_command)
+                     VALUES (?1, ?2, '', '', NULL, NULL, ?3, '', '', ?4)",
+                    params![ev.ts, ev.project_path, ev.verdict, ev.raw_command],
+                )
+                .context("Failed to record install (placeholder)");
+        }
+        let mut inserted = 0usize;
+        for p in &ev.packages {
+            let finding_ids = p.finding_ids.join(",");
+            inserted += self
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO installs
+                       (ts, project_path, ecosystem, package, version_spec, resolved_version,
+                        verdict, finding_ids, severity, raw_command)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        ev.ts,
+                        ev.project_path,
+                        p.ecosystem,
+                        p.package,
+                        p.version_spec,
+                        p.resolved_version,
+                        ev.verdict,
+                        finding_ids,
+                        p.severity,
+                        ev.raw_command,
+                    ],
+                )
+                .context("Failed to record install")?;
+        }
+        Ok(inserted)
+    }
+
+    /// Query installs for one project (or all if `project_path` is `None`).
+    /// Newest first, hard-capped at `limit` rows.
+    pub fn get_installs(
+        &self,
+        project_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<InstallRow>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, project_path, ecosystem, package, version_spec, resolved_version,
+                    verdict, finding_ids, severity, raw_command
+             FROM installs
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             ORDER BY ts DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![project_exact, project_glob, limit as i64],
+            |row| {
+                Ok(InstallRow {
+                    ts: row.get(0)?,
+                    project_path: row.get(1)?,
+                    ecosystem: row.get(2)?,
+                    package: row.get(3)?,
+                    version_spec: row.get(4)?,
+                    resolved_version: row.get(5)?,
+                    verdict: row.get(6)?,
+                    finding_ids: row.get::<_, String>(7)?
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                        .collect(),
+                    severity: row.get(8)?,
+                    raw_command: row.get(9)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Distinct project paths seen in either `commands` or `installs`.
+    /// Used by the dashboard to populate the project filter dropdown (#172).
+    pub fn distinct_project_paths(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT project_path FROM commands
+              WHERE project_path IS NOT NULL AND project_path != ''
+             UNION
+             SELECT DISTINCT project_path FROM installs
+              WHERE project_path IS NOT NULL AND project_path != ''
+             ORDER BY 1",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Per-project install rollup: count of installs by verdict.
+    pub fn installs_by_verdict(
+        &self,
+        project_path: Option<&str>,
+    ) -> Result<Vec<(String, usize)>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
+        let mut stmt = self.conn.prepare(
+            "SELECT verdict, COUNT(*)
+             FROM installs
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+             GROUP BY verdict
+             ORDER BY 2 DESC",
+        )?;
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// One-shot ETL from `supply_chain.jsonl` into the `installs` table.
+    /// Idempotent via the UNIQUE constraint. Best-effort: silent on any IO
+    /// or parse failure (the live `record_install` path keeps working).
+    ///
+    /// project_path is left empty for backfilled rows — the JSONL never
+    /// captured CWD. New live events carry it correctly.
+    ///
+    /// Only runs when the table is empty (cheap LIMIT 1 probe) — keeps the
+    /// hot-path cost at one query per Tracker construction.
+    fn backfill_installs_from_jsonl(&self) -> Result<()> {
+        let already_populated: bool = self
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM installs LIMIT 1)", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(true);
+        if already_populated {
+            return Ok(());
+        }
+
+        let Some(jsonl) = dirs::data_local_dir()
+            .map(|d| d.join("contextcrawler/supply_chain.jsonl"))
+        else {
+            return Ok(());
+        };
+        if !jsonl.exists() {
+            return Ok(());
+        }
+
+        // Cap at 4 MiB tail to bound first-boot cost. Real history can grow
+        // beyond this — that's fine: the cap means we backfill recent install
+        // history; older events live in the immutable JSONL audit log.
+        const BACKFILL_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+        let content = {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut f = match std::fs::File::open(&jsonl) {
+                Ok(f) => f,
+                Err(_) => return Ok(()),
+            };
+            let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+            if len > BACKFILL_TAIL_BYTES {
+                let _ = f.seek(SeekFrom::Start(len - BACKFILL_TAIL_BYTES));
+            }
+            let mut buf =
+                Vec::with_capacity(BACKFILL_TAIL_BYTES.min(len).max(1) as usize);
+            if f.take(BACKFILL_TAIL_BYTES).read_to_end(&mut buf).is_err() {
+                return Ok(());
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            let ts = v.get("ts").and_then(|x| x.as_str()).unwrap_or("");
+            let cmd = v.get("cmd").and_then(|x| x.as_str()).unwrap_or("");
+            let verdict =
+                v.get("verdict").and_then(|x| x.as_str()).unwrap_or("unknown");
+            if ts.is_empty() || cmd.is_empty() {
+                continue;
+            }
+
+            let findings = v.get("findings").and_then(|f| f.as_array());
+            let packages: Vec<InstallPackage> = findings
+                .map(|arr| {
+                    arr.iter()
+                        .map(|f| InstallPackage {
+                            ecosystem: f
+                                .get("ecosystem")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            package: f
+                                .get("package")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            version_spec: None,
+                            resolved_version: f
+                                .get("reason")
+                                .and_then(|r| r.get("version"))
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.to_string()),
+                            severity: f
+                                .get("severity")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            finding_ids: vec![],
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let ev = InstallEvent {
+                ts: ts.to_string(),
+                project_path: String::new(),
+                verdict: verdict.to_string(),
+                raw_command: cmd.to_string(),
+                packages,
+            };
+            let _ = self.record_install(&ev);
+        }
+        Ok(())
     }
 
     /// Create an isolated in-memory tracker for tests.
@@ -1767,6 +2044,44 @@ pub struct ParseFailureSummary {
 pub struct ReleaseBoundary {
     pub version: String,
     pub installed_at: String,
+}
+
+/// A single package touched by an install event (#172).
+#[derive(Debug, Clone)]
+pub struct InstallPackage {
+    pub ecosystem: String,
+    pub package: String,
+    pub version_spec: Option<String>,
+    pub resolved_version: Option<String>,
+    pub severity: String,
+    pub finding_ids: Vec<String>,
+}
+
+/// One supply-chain install event recorded into the `installs` table (#172).
+/// Either an empty `packages` list (one placeholder row gets inserted for
+/// "skip" verdicts on non-install commands) or one row per package.
+#[derive(Debug, Clone)]
+pub struct InstallEvent {
+    pub ts: String,
+    pub project_path: String,
+    pub verdict: String,
+    pub raw_command: String,
+    pub packages: Vec<InstallPackage>,
+}
+
+/// A row read back from the `installs` table for the dashboard (#172).
+#[derive(Debug, Serialize)]
+pub struct InstallRow {
+    pub ts: String,
+    pub project_path: String,
+    pub ecosystem: String,
+    pub package: String,
+    pub version_spec: Option<String>,
+    pub resolved_version: Option<String>,
+    pub verdict: String,
+    pub finding_ids: Vec<String>,
+    pub severity: String,
+    pub raw_command: String,
 }
 
 /// Record a parse failure without ever crashing.

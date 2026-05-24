@@ -230,6 +230,7 @@
       <a class="nav-item"        data-pane="fail">   Parse failures</a>
       <a class="nav-item"        data-pane="bounds"> Release boundaries</a>
       <a class="nav-item"        data-pane="sec">    Security</a>
+      <a class="nav-item"        data-pane="install">Installs</a>
       <a class="nav-item"        data-pane="insight">Insights</a>
     </nav>
     <div class="footer">
@@ -301,6 +302,20 @@
       <h2>Security</h2>
       <p class="lede">Tirith gate downgrades + supply-chain check verdicts. Loopback-only — these are local events from your machine.</p>
       <div id="sec-body"><div class="loading">loading…</div></div>
+    </section>
+
+    <!-- === INSTALLS === -->
+    <section class="pane" data-pane="install">
+      <h2>Installs</h2>
+      <p class="lede">Per-project package install history with supply-chain verdicts (#172).</p>
+      <div class="panel" style="display:flex;gap:12px;align-items:center;">
+        <label style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;">Project</label>
+        <select id="install-project" style="flex:1;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:13px;">
+          <option value="">(all projects)</option>
+        </select>
+        <button id="install-refresh" style="background:linear-gradient(90deg,var(--pink),var(--purple));color:white;border:none;border-radius:6px;padding:8px 16px;font-family:inherit;font-size:12px;text-transform:uppercase;letter-spacing:0.1em;cursor:pointer;">Refresh</button>
+      </div>
+      <div id="install-body"><div class="loading">loading…</div></div>
     </section>
 
     <!-- === INSIGHTS === -->
@@ -644,6 +659,94 @@ const loaders = {
         </div>
       `;
     } catch (e) { renderError(body, e); }
+  },
+
+  install: async () => {
+    const body = document.getElementById("install-body");
+    const sel = document.getElementById("install-project");
+    const refreshBtn = document.getElementById("install-refresh");
+
+    const load = async () => {
+      body.innerHTML = `<div class="loading">loading…</div>`;
+      try {
+        const project = sel.value;
+        const q = project ? `?project=${encodeURIComponent(project)}&limit=200` : `?limit=200`;
+        const data = await fetchJSON(`/api/installs${q}`);
+
+        // Populate dropdown once (preserve current selection)
+        if (sel.options.length <= 1 && data.projects) {
+          const current = sel.value;
+          data.projects.forEach(p => {
+            const o = document.createElement("option");
+            o.value = p;
+            o.textContent = p;
+            sel.appendChild(o);
+          });
+          sel.value = current;
+        }
+
+        const totals = data.by_verdict.reduce((a, [, n]) => a + n, 0);
+        const blocked = (data.by_verdict.find(([k]) => k === "block") || [, 0])[1];
+        const allowed = (data.by_verdict.find(([k]) => k === "allow") || [, 0])[1];
+        const blockRate = totals ? (blocked / totals * 100) : 0;
+
+        const verdictRows = data.by_verdict.map(([v, n]) => `
+          <tr><td>${escapeHtml(v)}</td><td class="num">${fmtNum(n)}</td></tr>
+        `).join("");
+
+        const verdictBadge = (v) => {
+          const colour = v === "block" ? "pink" : (v === "allow" ? "green" : (v === "skip" ? "purple" : "cyan"));
+          const map = { pink: "var(--pink)", green: "var(--green)", purple: "var(--purple)", cyan: "var(--cyan)" };
+          return `<span class="pill" style="color:${map[colour]};border-color:${map[colour]}55;background:${map[colour]}11">${escapeHtml(v)}</span>`;
+        };
+
+        const rowsHtml = data.rows.map(r => `
+          <tr>
+            <td>${escapeHtml(r.ts)}</td>
+            <td>${escapeHtml(r.package || "—")}</td>
+            <td>${escapeHtml(r.ecosystem || "—")}</td>
+            <td>${escapeHtml(r.resolved_version || r.version_spec || "—")}</td>
+            <td>${verdictBadge(r.verdict)}</td>
+            <td>${r.severity ? `<span class="pill" style="color:var(--amber);border-color:rgba(255,183,0,0.3);background:rgba(255,183,0,0.08)">${escapeHtml(r.severity)}</span>` : ""}</td>
+            <td style="font-size:11px;color:var(--text-muted)">${escapeHtml((r.finding_ids || []).join(", "))}</td>
+            <td style="font-family:ui-monospace;font-size:11px;color:var(--text-muted)" title="${escapeHtml(r.project_path || '')}">${escapeHtml((r.project_path || '').split('/').pop() || '—')}</td>
+          </tr>
+        `).join("");
+
+        body.innerHTML = `
+          <div class="cards">
+            <div class="card">
+              <p class="label">${data.scope ? "Project installs" : "Total installs"}</p>
+              <p class="value">${fmtNum(totals)}</p>
+              <p class="sub">${data.scope ? escapeHtml(data.scope.split('/').slice(-2).join('/')) : `${data.projects.length} projects total`}</p>
+            </div>
+            <div class="card">
+              <p class="label">Allowed</p>
+              <p class="value green">${fmtNum(allowed)}</p>
+            </div>
+            <div class="card">
+              <p class="label">Blocked</p>
+              <p class="value">${fmtNum(blocked)}</p>
+              <p class="sub">${fmtPct(blockRate)} block rate</p>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>Verdict mix</h3><span class="panel-meta">${data.by_verdict.length} kinds</span></div>
+            ${verdictRows ? `<table><thead><tr><th>Verdict</th><th class="num">Count</th></tr></thead><tbody>${verdictRows}</tbody></table>` : '<div class="empty">no installs recorded</div>'}
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>Install ledger</h3><span class="panel-meta">newest ${data.rows.length} of ≤${data.limit}</span></div>
+            ${rowsHtml ? `<table><thead><tr><th>When</th><th>Package</th><th>Ecosystem</th><th>Version</th><th>Verdict</th><th>Severity</th><th>Finding IDs</th><th>Project</th></tr></thead><tbody>${rowsHtml}</tbody></table>` : '<div class="empty">no install rows for this scope yet</div>'}
+          </div>
+        `;
+      } catch (e) { renderError(body, e); }
+    };
+
+    sel.addEventListener("change", load);
+    refreshBtn.addEventListener("click", load);
+    load();
   },
 
   insight: async () => {

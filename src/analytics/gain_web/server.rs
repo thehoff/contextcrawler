@@ -77,8 +77,12 @@ fn handle(request: tiny_http::Request) {
     }
 
     // tiny_http exposes the path as the full request-target (may include
-    // query string). Trim the query for routing.
-    let path = request.url().split('?').next().unwrap_or("/").to_string();
+    // query string). Split on the first '?' for routing; keep the query
+    // string available for endpoints that read params (e.g. /api/installs).
+    let full = request.url().to_string();
+    let mut parts = full.splitn(2, '?');
+    let path = parts.next().unwrap_or("/").to_string();
+    let query = parts.next().unwrap_or("").to_string();
 
     let response_result = match path.as_str() {
         "/" | "/index.html" => Ok(index_response()),
@@ -90,6 +94,7 @@ fn handle(request: tiny_http::Request) {
         "/api/insights" => api::insights().map(json_response),
         "/api/security/gate" => api::security_gate().map(json_response),
         "/api/security/supply-chain" => api::security_supply_chain().map(json_response),
+        "/api/installs" => api::installs(&query).map(json_response),
         _ => Ok(text_response(404, "not found")),
     };
 

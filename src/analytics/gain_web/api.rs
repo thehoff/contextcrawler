@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::core::tracking::{
-    DayStats, GainSummary, ParseFailureSummary, ReleaseBoundary, Tracker, WeakFilter,
+    DayStats, GainSummary, InstallRow, ParseFailureSummary, ReleaseBoundary, Tracker, WeakFilter,
 };
 
 use super::security_log;
@@ -136,6 +136,103 @@ pub fn security_gate() -> Result<String> {
 pub fn security_supply_chain() -> Result<String> {
     let summary = security_log::supply_chain_summary().context("Failed to read supply-chain log")?;
     serde_json::to_string(&summary).context("Failed to serialise supply-chain JSON")
+}
+
+/// `/api/installs` — per-project install ledger (#172).
+///
+/// Query params (parsed from the full request path):
+///   `project=<absolute path or empty>` — empty / unset ⇒ all projects
+///   `limit=<n>` — default 100, hard cap 1000
+pub fn installs(query: &str) -> Result<String> {
+    let mut project: Option<String> = None;
+    let mut limit: usize = 100;
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let mut it = pair.splitn(2, '=');
+        let k = it.next().unwrap_or("");
+        let v = it.next().unwrap_or("");
+        match k {
+            "project" => {
+                let decoded = url_decode(v);
+                if !decoded.is_empty() {
+                    project = Some(decoded);
+                }
+            }
+            "limit" => {
+                if let Ok(n) = v.parse::<usize>() {
+                    limit = n.clamp(1, 1000);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let tracker = Tracker::new().context("Failed to open tracking DB")?;
+    let rows: Vec<InstallRow> = tracker
+        .get_installs(project.as_deref(), limit)
+        .context("Failed to load installs")?;
+    let by_verdict = tracker
+        .installs_by_verdict(project.as_deref())
+        .context("Failed to summarise installs by verdict")?;
+    let projects = tracker
+        .distinct_project_paths()
+        .context("Failed to list project paths")?;
+    let envelope = InstallsEnvelope {
+        scope: project,
+        limit,
+        by_verdict,
+        projects,
+        rows,
+    };
+    serde_json::to_string(&envelope).context("Failed to serialise installs JSON")
+}
+
+#[derive(Serialize)]
+struct InstallsEnvelope {
+    /// `Some(project_path)` when the response is scoped, `None` ⇒ all projects.
+    scope: Option<String>,
+    limit: usize,
+    by_verdict: Vec<(String, usize)>,
+    /// All distinct project paths seen in `commands` or `installs` — for the
+    /// frontend dropdown.
+    projects: Vec<String>,
+    rows: Vec<InstallRow>,
+}
+
+/// Minimal %-decode for query string values. Enough for path bytes we care
+/// about (`/`, `:`, spaces, dots, dashes); not a full RFC 3986 implementation.
+/// Invalid `%XX` sequences pass through verbatim — safer than dropping data.
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+        } else if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &bytes[i + 1..i + 3];
+            if let (Some(h), Some(l)) = (hex_digit(hex[0]), hex_digit(hex[1])) {
+                out.push((h << 4) | l);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + b - b'a'),
+        b'A'..=b'F' => Some(10 + b - b'A'),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
