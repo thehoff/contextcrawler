@@ -84,6 +84,10 @@ fn handle(request: tiny_http::Request) {
         "/" | "/index.html" => Ok(index_response()),
         "/api/summary" => api::summary().map(json_response),
         "/api/by-day" => api::by_day().map(json_response),
+        "/api/weak-filters" => api::weak_filters().map(json_response),
+        "/api/failures" => api::failures().map(json_response),
+        "/api/boundaries" => api::boundaries().map(json_response),
+        "/api/insights" => api::insights().map(json_response),
         _ => Ok(text_response(404, "not found")),
     };
 

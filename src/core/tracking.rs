@@ -608,6 +608,21 @@ impl Tracker {
             .optional()?)
     }
 
+    /// Every recorded release boundary, newest first. Used by the
+    /// `gain --web` dashboard to render an install-history timeline (#162).
+    pub fn all_release_boundaries(&self) -> Result<Vec<ReleaseBoundary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT version, installed_at FROM release_boundaries ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ReleaseBoundary {
+                version: row.get(0)?,
+                installed_at: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Create an isolated in-memory tracker for tests.
     #[cfg(test)]
     pub fn new_in_memory() -> Result<Self> {
@@ -1727,7 +1742,7 @@ fn confine_db_path_to_home(db_path: PathBuf) -> Result<PathBuf> {
 }
 
 /// Individual parse failure record.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ParseFailureRecord {
     pub timestamp: String,
     pub raw_command: String,
@@ -1737,12 +1752,21 @@ pub struct ParseFailureRecord {
 }
 
 /// Aggregated parse failure summary.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ParseFailureSummary {
     pub total: usize,
     pub recovery_rate: f64,
     pub top_commands: Vec<(String, usize)>,
     pub recent: Vec<ParseFailureRecord>,
+}
+
+/// One row of the `release_boundaries` table — the version installed
+/// at `installed_at` (RFC-3339 / ISO-8601). Exposed for the `gain --web`
+/// dashboard timeline (#162).
+#[derive(Debug, Serialize)]
+pub struct ReleaseBoundary {
+    pub version: String,
+    pub installed_at: String,
 }
 
 /// Record a parse failure without ever crashing.
