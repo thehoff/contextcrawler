@@ -2,23 +2,571 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>contextcrawler — gain dashboard</title>
+<title>contextcrawler — gain</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  /* Slice 1 stub. Full neon SPA lands in slice 3. */
-  html, body { background: #0a0014; color: #f5e6ff; font-family: ui-monospace, monospace; }
-  h1 { color: #ff2a9d; text-shadow: 0 0 8px #ff2a9d; }
-  a { color: #b026ff; }
-  pre { background: #1a0a2e; padding: 1em; border: 1px solid #3a1a5c; border-radius: 6px; }
+  /* === neon synthwave palette (#162) === */
+  :root {
+    --bg:           #0a0014;
+    --surface:      #1a0a2e;
+    --surface-2:    #220e3a;
+    --border:       #3a1a5c;
+    --text:         #f5e6ff;
+    --text-muted:   #9a7ac0;
+    --pink:         #ff2a9d;
+    --purple:       #b026ff;
+    --cyan:         #00f0ff;
+    --green:        #39ff14;
+    --amber:        #ffb700;
+    --glow-pink:    0 0 8px rgba(255, 42, 157, 0.6);
+    --glow-purple:  0 0 8px rgba(176, 38, 255, 0.5);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  body {
+    background:
+      radial-gradient(ellipse at top, rgba(176, 38, 255, 0.12), transparent 60%),
+      radial-gradient(ellipse at bottom, rgba(255, 42, 157, 0.08), transparent 60%),
+      var(--bg);
+  }
+
+  /* === layout === */
+  .app { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    background: linear-gradient(180deg, var(--surface), var(--surface-2));
+    border-right: 1px solid var(--border);
+    padding: 24px 0;
+    display: flex; flex-direction: column;
+  }
+  .main { flex: 1; padding: 32px 40px; max-width: 1200px; }
+
+  /* === brand === */
+  .brand {
+    padding: 0 24px 24px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  .brand h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--pink);
+    text-shadow: var(--glow-pink);
+    letter-spacing: 0.02em;
+  }
+  .brand .sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+  }
+
+  /* === nav === */
+  .nav { flex: 1; padding: 0 12px; }
+  .nav-item {
+    display: block;
+    padding: 10px 14px;
+    margin: 2px 0;
+    color: var(--text-muted);
+    text-decoration: none;
+    border-radius: 6px;
+    border-left: 2px solid transparent;
+    transition: all 120ms ease;
+    cursor: pointer;
+    user-select: none;
+  }
+  .nav-item:hover { color: var(--text); background: rgba(176, 38, 255, 0.08); }
+  .nav-item.active {
+    color: var(--text);
+    background: rgba(255, 42, 157, 0.08);
+    border-left-color: var(--pink);
+    box-shadow: inset 0 0 12px rgba(255, 42, 157, 0.05);
+  }
+
+  .footer {
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .footer a { color: var(--purple); text-decoration: none; }
+  .footer a:hover { color: var(--cyan); text-shadow: 0 0 6px var(--cyan); }
+
+  /* === panes === */
+  .pane { display: none; }
+  .pane.active { display: block; }
+
+  .pane h2 {
+    margin: 0 0 6px;
+    font-size: 22px;
+    color: var(--text);
+    font-weight: 600;
+  }
+  .pane .lede {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin: 0 0 28px;
+  }
+
+  /* === cards === */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, var(--pink), var(--purple));
+    opacity: 0.6;
+  }
+  .card .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-muted);
+    margin: 0 0 8px;
+  }
+  .card .value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--pink);
+    text-shadow: var(--glow-pink);
+    margin: 0;
+    line-height: 1.1;
+  }
+  .card .value.purple { color: var(--purple); text-shadow: var(--glow-purple); }
+  .card .value.cyan   { color: var(--cyan);   text-shadow: 0 0 8px rgba(0,240,255,0.5); }
+  .card .value.green  { color: var(--green);  text-shadow: 0 0 8px rgba(57,255,20,0.4); }
+  .card .sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 6px;
+  }
+
+  /* === sparkline panel === */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .panel-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .panel h3 { margin: 0; font-size: 14px; color: var(--text); font-weight: 600; }
+  .panel-meta { font-size: 11px; color: var(--text-muted); }
+
+  .spark { width: 100%; height: 140px; display: block; }
+
+  /* === tables (used by later slices) === */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:hover td { background: rgba(176, 38, 255, 0.04); }
+
+  /* === states === */
+  .empty, .loading {
+    color: var(--text-muted);
+    text-align: center;
+    padding: 40px 20px;
+    font-size: 13px;
+  }
+  .error {
+    color: var(--pink);
+    background: rgba(255, 42, 157, 0.06);
+    border: 1px solid rgba(255, 42, 157, 0.3);
+    border-radius: 8px;
+    padding: 16px;
+    margin: 12px 0;
+    font-size: 13px;
+  }
+
+  /* === pills === */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    background: rgba(176, 38, 255, 0.15);
+    color: var(--purple);
+    border: 1px solid rgba(176, 38, 255, 0.3);
+  }
 </style>
 </head>
 <body>
-<h1>contextcrawler — gain</h1>
-<p>Dashboard online. Frontend ships in slice 3 (#162).</p>
-<p>Live endpoints:</p>
-<ul>
-  <li><a href="/api/summary">/api/summary</a></li>
-  <li><a href="/api/by-day">/api/by-day</a></li>
-</ul>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>contextcrawler</h1>
+      <div class="sub">gain dashboard</div>
+    </div>
+    <nav class="nav" id="nav">
+      <a class="nav-item active" data-pane="summary">› Summary</a>
+      <a class="nav-item"        data-pane="byday">  By day</a>
+      <a class="nav-item"        data-pane="weak">   Weak filters</a>
+      <a class="nav-item"        data-pane="fail">   Parse failures</a>
+      <a class="nav-item"        data-pane="bounds"> Release boundaries</a>
+      <a class="nav-item"        data-pane="insight">Insights</a>
+    </nav>
+    <div class="footer">
+      <div>local · read-only · 127.0.0.1</div>
+      <div style="margin-top:6px"><a href="https://github.com/thehoff/contextcrawler/issues/162" target="_blank">#162</a></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- === SUMMARY === -->
+    <section class="pane active" data-pane="summary">
+      <h2>Summary</h2>
+      <p class="lede">Lifetime token savings across every tracked command.</p>
+      <div class="cards" id="summary-cards">
+        <div class="loading">loading…</div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Top tools by tokens saved</h3>
+          <span class="panel-meta">top 10</span>
+        </div>
+        <div id="summary-top"><div class="loading">loading…</div></div>
+      </div>
+    </section>
+
+    <!-- === BY DAY === -->
+    <section class="pane" data-pane="byday">
+      <h2>By day</h2>
+      <p class="lede">Daily savings — the higher the spike, the more output the filters compressed.</p>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Tokens saved per day</h3>
+          <span class="panel-meta" id="byday-range">—</span>
+        </div>
+        <svg class="spark" id="byday-spark" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Daily detail</h3>
+          <span class="panel-meta" id="byday-count">—</span>
+        </div>
+        <div id="byday-table"><div class="loading">loading…</div></div>
+      </div>
+    </section>
+
+    <!-- === WEAK FILTERS === -->
+    <section class="pane" data-pane="weak">
+      <h2>Weak filters</h2>
+      <p class="lede">Tools leaking the most tokens — where a better filter would help most.</p>
+      <div id="weak-body"><div class="loading">loading…</div></div>
+    </section>
+
+    <!-- === PARSE FAILURES === -->
+    <section class="pane" data-pane="fail">
+      <h2>Parse failures</h2>
+      <p class="lede">Commands that fell back to raw execution. Recovery rate should stay above 95%.</p>
+      <div id="fail-body"><div class="loading">loading…</div></div>
+    </section>
+
+    <!-- === BOUNDARIES === -->
+    <section class="pane" data-pane="bounds">
+      <h2>Release boundaries</h2>
+      <p class="lede">When contextcrawler upgrades landed — useful for before/after savings comparisons.</p>
+      <div id="bounds-body"><div class="loading">loading…</div></div>
+    </section>
+
+    <!-- === INSIGHTS === -->
+    <section class="pane" data-pane="insight">
+      <h2>Insights</h2>
+      <p class="lede">Patterns detected across your tracked commands.</p>
+      <div id="insight-body"><div class="loading">loading…</div></div>
+    </section>
+  </main>
+</div>
+
+<script>
+// === helpers ===
+const fmtNum = (n) => {
+  if (n == null) return "—";
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+};
+const fmtPct = (p) => (p == null ? "—" : p.toFixed(1) + "%");
+const fmtMs  = (ms) => {
+  if (ms == null) return "—";
+  if (ms < 1000) return ms + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+  return (ms / 60000).toFixed(1) + "m";
+};
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]
+));
+
+async function fetchJSON(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(path + " → HTTP " + r.status);
+  return r.json();
+}
+
+function renderError(el, e) {
+  el.innerHTML = `<div class="error">${escapeHtml(e.message || String(e))}</div>`;
+}
+
+// === nav routing ===
+const navItems = document.querySelectorAll(".nav-item");
+const panes = document.querySelectorAll(".pane");
+const loaded = new Set();
+
+function activate(name) {
+  navItems.forEach(n => n.classList.toggle("active", n.dataset.pane === name));
+  panes.forEach(p => p.classList.toggle("active", p.dataset.pane === name));
+  if (!loaded.has(name)) {
+    loaded.add(name);
+    loaders[name]?.();
+  }
+}
+
+navItems.forEach(n => n.addEventListener("click", () => activate(n.dataset.pane)));
+
+// === loaders ===
+const loaders = {
+  summary: async () => {
+    const cards = document.getElementById("summary-cards");
+    const top = document.getElementById("summary-top");
+    try {
+      const s = await fetchJSON("/api/summary");
+      cards.innerHTML = `
+        <div class="card">
+          <p class="label">Tokens saved</p>
+          <p class="value">${fmtNum(s.total_saved)}</p>
+          <p class="sub">${fmtPct(s.avg_savings_pct)} avg savings</p>
+        </div>
+        <div class="card">
+          <p class="label">Commands tracked</p>
+          <p class="value purple">${fmtNum(s.total_commands)}</p>
+          <p class="sub">${fmtNum(s.total_input)} in · ${fmtNum(s.total_output)} out</p>
+        </div>
+        <div class="card">
+          <p class="label">Total exec time</p>
+          <p class="value cyan">${fmtMs(s.total_time_ms)}</p>
+          <p class="sub">${fmtMs(s.avg_time_ms)} avg / command</p>
+        </div>
+        <div class="card">
+          <p class="label">Last 30 days</p>
+          <p class="value green">${fmtNum((s.by_day || []).reduce((a, [, v]) => a + v, 0))}</p>
+          <p class="sub">${(s.by_day || []).length} active days</p>
+        </div>
+      `;
+      const rows = (s.by_command || []).slice(0, 10).map(([cmd, count, saved, pct, avgMs]) => `
+        <tr>
+          <td>${escapeHtml(cmd)}</td>
+          <td class="num">${fmtNum(count)}</td>
+          <td class="num">${fmtNum(saved)}</td>
+          <td class="num">${fmtPct(pct)}</td>
+          <td class="num">${fmtMs(avgMs)}</td>
+        </tr>
+      `).join("");
+      top.innerHTML = rows
+        ? `<table><thead><tr><th>Command</th><th class="num">Runs</th><th class="num">Saved</th><th class="num">Pct</th><th class="num">Avg time</th></tr></thead><tbody>${rows}</tbody></table>`
+        : `<div class="empty">No tracking data yet.</div>`;
+    } catch (e) {
+      renderError(cards, e);
+      top.innerHTML = "";
+    }
+  },
+
+  byday: async () => {
+    const spark = document.getElementById("byday-spark");
+    const range = document.getElementById("byday-range");
+    const count = document.getElementById("byday-count");
+    const table = document.getElementById("byday-table");
+    try {
+      const { days } = await fetchJSON("/api/by-day");
+      if (!days || !days.length) {
+        spark.innerHTML = "";
+        table.innerHTML = `<div class="empty">No daily data yet.</div>`;
+        return;
+      }
+      // Sparkline
+      const W = 1000, H = 140, PAD = 6;
+      const xs = days.map((_, i) => i);
+      const ys = days.map(d => d.saved_tokens);
+      const yMax = Math.max(...ys, 1);
+      const x = (i) => PAD + (i / Math.max(xs.length - 1, 1)) * (W - 2 * PAD);
+      const y = (v) => H - PAD - (v / yMax) * (H - 2 * PAD);
+      const linePts = days.map((d, i) => `${x(i).toFixed(1)},${y(d.saved_tokens).toFixed(1)}`).join(" ");
+      const areaPts = `${PAD},${H - PAD} ${linePts} ${(W - PAD).toFixed(1)},${H - PAD}`;
+      spark.setAttribute("viewBox", `0 0 ${W} ${H}`);
+      spark.innerHTML = `
+        <defs>
+          <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#ff2a9d" stop-opacity="0.45"/>
+            <stop offset="100%" stop-color="#b026ff" stop-opacity="0.05"/>
+          </linearGradient>
+          <linearGradient id="sparkStroke" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%"   stop-color="#ff2a9d"/>
+            <stop offset="100%" stop-color="#b026ff"/>
+          </linearGradient>
+        </defs>
+        <polygon points="${areaPts}" fill="url(#sparkFill)"/>
+        <polyline points="${linePts}" fill="none" stroke="url(#sparkStroke)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" style="filter: drop-shadow(0 0 4px rgba(255,42,157,0.5));"/>
+      `;
+      range.textContent = `${days[0].date} → ${days[days.length - 1].date}`;
+      count.textContent = `${days.length} days`;
+
+      const rev = days.slice().reverse();
+      const rows = rev.map(d => `
+        <tr>
+          <td>${escapeHtml(d.date)}</td>
+          <td class="num">${fmtNum(d.commands)}</td>
+          <td class="num">${fmtNum(d.input_tokens)}</td>
+          <td class="num">${fmtNum(d.saved_tokens)}</td>
+          <td class="num">${fmtPct(d.savings_pct)}</td>
+          <td class="num">${fmtMs(d.avg_time_ms)}</td>
+        </tr>
+      `).join("");
+      table.innerHTML = `<table><thead><tr><th>Date</th><th class="num">Runs</th><th class="num">Input</th><th class="num">Saved</th><th class="num">Pct</th><th class="num">Avg</th></tr></thead><tbody>${rows}</tbody></table>`;
+    } catch (e) {
+      renderError(table, e);
+    }
+  },
+
+  weak: async () => {
+    const body = document.getElementById("weak-body");
+    try {
+      const { weak_filters } = await fetchJSON("/api/weak-filters");
+      if (!weak_filters || !weak_filters.length) {
+        body.innerHTML = `<div class="empty">No weak filters detected. Filters are doing their job.</div>`;
+        return;
+      }
+      const rows = weak_filters.map(w => `
+        <tr>
+          <td>${escapeHtml(w.tool)}</td>
+          <td class="num">${fmtNum(w.runs)}</td>
+          <td class="num">${fmtNum(w.input_tokens)}</td>
+          <td class="num" style="color: var(--amber)">${fmtNum(w.leaked_tokens)}</td>
+          <td class="num">${fmtPct(w.savings_pct)}</td>
+        </tr>
+      `).join("");
+      body.innerHTML = `
+        <div class="panel">
+          <div class="panel-head"><h3>Top token leakers</h3><span class="panel-meta">${weak_filters.length} tools</span></div>
+          <table><thead><tr><th>Tool</th><th class="num">Runs</th><th class="num">Input</th><th class="num">Leaked</th><th class="num">Savings</th></tr></thead><tbody>${rows}</tbody></table>
+        </div>`;
+    } catch (e) { renderError(body, e); }
+  },
+
+  fail: async () => {
+    const body = document.getElementById("fail-body");
+    try {
+      const f = await fetchJSON("/api/failures");
+      if (!f.total) {
+        body.innerHTML = `<div class="empty">No parse failures recorded.</div>`;
+        return;
+      }
+      const recoveryColour = f.recovery_rate >= 95 ? "green" : (f.recovery_rate >= 80 ? "cyan" : "amber");
+      const recoveryStyle = recoveryColour === "amber" ? `color: var(--amber); text-shadow: 0 0 8px rgba(255,183,0,0.4);` : "";
+      const topRows = (f.top_commands || []).map(([cmd, cnt]) => `
+        <tr><td>${escapeHtml(cmd)}</td><td class="num">${fmtNum(cnt)}</td></tr>
+      `).join("");
+      const recentRows = (f.recent || []).map(r => `
+        <tr>
+          <td>${escapeHtml(r.timestamp)}</td>
+          <td>${escapeHtml(r.raw_command)}</td>
+          <td>${escapeHtml(r.error_message)}</td>
+          <td>${r.fallback_succeeded ? '<span class="pill" style="color:var(--green);border-color:rgba(57,255,20,0.3);background:rgba(57,255,20,0.08)">ok</span>' : '<span class="pill" style="color:var(--pink);border-color:rgba(255,42,157,0.3);background:rgba(255,42,157,0.08)">fail</span>'}</td>
+        </tr>
+      `).join("");
+      body.innerHTML = `
+        <div class="cards">
+          <div class="card"><p class="label">Total failures</p><p class="value purple">${fmtNum(f.total)}</p></div>
+          <div class="card"><p class="label">Recovery rate</p><p class="value ${recoveryColour}" style="${recoveryStyle}">${fmtPct(f.recovery_rate)}</p><p class="sub">target ≥ 95%</p></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Top failing commands</h3><span class="panel-meta">top 10</span></div>
+          ${topRows ? `<table><thead><tr><th>Command</th><th class="num">Count</th></tr></thead><tbody>${topRows}</tbody></table>` : '<div class="empty">none</div>'}
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Recent</h3><span class="panel-meta">last 10</span></div>
+          ${recentRows ? `<table><thead><tr><th>When</th><th>Command</th><th>Error</th><th>Fallback</th></tr></thead><tbody>${recentRows}</tbody></table>` : '<div class="empty">none</div>'}
+        </div>`;
+    } catch (e) { renderError(body, e); }
+  },
+
+  bounds: async () => {
+    const body = document.getElementById("bounds-body");
+    try {
+      const { latest, boundaries } = await fetchJSON("/api/boundaries");
+      if (!boundaries || !boundaries.length) {
+        body.innerHTML = `<div class="empty">No release boundaries recorded yet.</div>`;
+        return;
+      }
+      const rows = boundaries.map(b => `
+        <tr>
+          <td>${escapeHtml(b.installed_at)}</td>
+          <td>${escapeHtml(b.version)}</td>
+          ${latest === b.installed_at ? '<td><span class="pill">latest</span></td>' : '<td></td>'}
+        </tr>
+      `).join("");
+      body.innerHTML = `
+        <div class="panel">
+          <div class="panel-head"><h3>Install history</h3><span class="panel-meta">${boundaries.length} entries</span></div>
+          <table><thead><tr><th>Installed at</th><th>Version</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+        </div>`;
+    } catch (e) { renderError(body, e); }
+  },
+
+  insight: async () => {
+    const body = document.getElementById("insight-body");
+    try {
+      const { insights, status, message } = await fetchJSON("/api/insights");
+      if (status && status !== "ok") {
+        body.innerHTML = `
+          <div class="panel">
+            <div class="panel-head"><h3>Awaiting #158</h3><span class="pill">stub</span></div>
+            <p style="color: var(--text-muted); margin: 8px 0 0">${escapeHtml(message || "Insights endpoint live; backing logic ships with #158.")}</p>
+          </div>`;
+        return;
+      }
+      if (!insights || !insights.length) {
+        body.innerHTML = `<div class="empty">No insights yet.</div>`;
+        return;
+      }
+      body.innerHTML = insights.map(i => `
+        <div class="panel">
+          <div class="panel-head"><h3>${escapeHtml(i.title || "insight")}</h3><span class="pill">${escapeHtml(i.kind || "")}</span></div>
+          <p>${escapeHtml(i.detail || "")}</p>
+        </div>
+      `).join("");
+    } catch (e) { renderError(body, e); }
+  },
+};
+
+// Boot
+loaded.add("summary");
+loaders.summary();
+</script>
 </body>
 </html>
