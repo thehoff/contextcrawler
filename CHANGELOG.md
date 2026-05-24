@@ -3,6 +3,27 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`contextcrawler gain --web` — local read-only dashboard** (#162). Boots
+  a 127.0.0.1-only HTTP server on a kernel-assigned port (or `--port N`),
+  auto-opens the browser (`--no-browser` for ssh/headless), and serves a
+  neon-themed single-page dashboard over six JSON endpoints
+  (`/api/summary`, `/api/by-day`, `/api/weak-filters`, `/api/failures`,
+  `/api/boundaries`, `/api/insights`). All endpoints back onto existing
+  `Tracker` query funcs — zero new SQL, zero new DB writes. Server
+  auto-shuts-down after 1h of zero requests so it never lingers. Built on
+  `tiny_http` (~300KB, no async runtime) to preserve RTK's single-
+  threaded blocking-I/O invariant. The `/api/insights` endpoint is a
+  stable stub; real data wires in with #158.
+- `Tracker::all_release_boundaries()` returning every recorded release
+  install with version + timestamp (powers the boundaries dashboard pane).
+- `Serialize` derives on `GainSummary`, `ParseFailureSummary`,
+  `ParseFailureRecord`, and new `ReleaseBoundary` — required by the
+  dashboard JSON wire shape.
+
 ## [0.1.7] — 2026-05-18
 
 Read-filter, grep, and downstream-rebrand cleanup release. Lands the

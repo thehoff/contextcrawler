@@ -182,6 +182,22 @@ The default tail of `security log` shows the same events in chronological
 order with per-finding detail — handy when triaging which install or which
 shell pattern actually fired.
 
+### Live dashboard — `gain --web`
+
+For glanceable, per-day / per-tool trend views, boot the local dashboard:
+
+```bash
+contextcrawler gain --web                  # free port, opens browser
+contextcrawler gain --web --port 8765      # pinned port
+contextcrawler gain --web --no-browser     # ssh / headless
+```
+
+Read-only, loopback-only (`127.0.0.1`), no auth, auto-shutdown after 1h
+idle. Six panes — summary, by-day sparkline, weak filters, parse failures,
+release boundaries, insights — all backed by the same `Tracker` queries
+the text-mode subcommands use. Themed in synthwave neon (pink / purple /
+cyan) because that's how dashboards should look.
+
 ## Diagrams
 
 Click each section to expand. All diagrams are top-to-bottom Mermaid;
