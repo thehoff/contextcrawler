@@ -46,6 +46,7 @@ url = "2"
 
 # ===== contextzip-downstream dependencies begin =====
 scraper = "0.20"      # used by cmds/cloud/web_cmd.rs (HTML content extraction)
+tiny_http = "0.12"    # used by analytics/gain_web — local 127.0.0.1 dashboard (#162)
 # ===== contextzip-downstream dependencies end =====
 
 [target.'cfg(unix)'.dependencies]

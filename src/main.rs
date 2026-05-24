@@ -474,6 +474,15 @@ enum Commands {
         /// Skip confirmation prompt when resetting
         #[arg(long, requires = "reset")]
         yes: bool,
+        /// Boot a local read-only dashboard (127.0.0.1) for these stats (#162).
+        #[arg(long)]
+        web: bool,
+        /// Port for --web (default: kernel-assigned free port).
+        #[arg(long, requires = "web")]
+        port: Option<u16>,
+        /// Suppress auto-opening the browser for --web (use for ssh / headless).
+        #[arg(long = "no-browser", requires = "web")]
+        no_browser: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (contextcrawler) analysis
@@ -3602,26 +3611,34 @@ fn run_cli() -> Result<i32> {
             all_time,
             reset,
             yes,
+            web,
+            port,
+            no_browser,
         } => {
-            analytics::gain::run(
-                project, // added: pass project flag
-                graph,
-                history,
-                quota,
-                &tier,
-                daily,
-                weekly,
-                monthly,
-                all,
-                &format,
-                failures,
-                weak_filters,
-                reset,
-                yes,
-                cli.verbose,
-                all_time,
-            )?;
-            0
+            if web {
+                analytics::gain_web::run(port, no_browser)?;
+                0
+            } else {
+                analytics::gain::run(
+                    project, // added: pass project flag
+                    graph,
+                    history,
+                    quota,
+                    &tier,
+                    daily,
+                    weekly,
+                    monthly,
+                    all,
+                    &format,
+                    failures,
+                    weak_filters,
+                    reset,
+                    yes,
+                    cli.verbose,
+                    all_time,
+                )?;
+                0
+            }
         }
 
         Commands::CcEconomics {

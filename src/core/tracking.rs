@@ -237,7 +237,7 @@ pub struct CommandRecord {
 ///
 /// Provides overall metrics and breakdowns by command and by day.
 /// Returned by [`Tracker::get_summary`].
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct GainSummary {
     /// Total number of commands recorded
     pub total_commands: usize,
