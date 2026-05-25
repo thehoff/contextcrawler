@@ -26,9 +26,19 @@ on:
       - 'ci/**'
   workflow_dispatch:
 
+# Tighten the default GITHUB_TOKEN to read-only. Per-job permissions can
+# override if needed (none of these jobs write to the repo).
+permissions:
+  contents: read
+
 concurrency:
   group: self-hosted-${{ github.ref }}
   cancel-in-progress: true
+
+# All third-party actions pinned to commit SHAs (not tags) so a
+# compromised tag re-point cannot poison the self-hosted runner.
+# Version comments reflect the tag/branch the SHA resolved from at
+# pinning time — update via Dependabot or manual re-resolve.
 
 jobs:
   test:
@@ -37,13 +47,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           shared-key: self-hosted-stable
 
@@ -52,7 +64,7 @@ jobs:
 
       - name: Upload tee logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: rtk-tee-logs-${{ github.run_id }}
           path: ~/.local/share/rtk/tee/
@@ -65,15 +77,17 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
         with:
           components: clippy
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           shared-key: self-hosted-stable
 
