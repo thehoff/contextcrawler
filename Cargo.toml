@@ -63,6 +63,15 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Profiling build — release-optimised AND retains debug symbols so
+# samply / cargo-flamegraph can resolve function names. Build with:
+#   cargo build --profile profiling
+# Output lands at target/profiling/contextcrawler.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
 # Note: dependency source paths (/Users/<builder>/.cargo/registry/...) and the
 # workspace path get embedded in the release binary for panic backtraces. To
 # strip them, build via `scripts/build-release.sh` which sets RUSTFLAGS with
