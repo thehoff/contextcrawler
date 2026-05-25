@@ -52,7 +52,9 @@ claudedocs
 # ContextCrawler: personal/AI workspace — never publish
 local/
 .claude/
-.github/
+# .github: ignore everything except shipped workflows
+.github/*
+!.github/workflows/
 .rtk/
 
 # bench harness output (tests/harness_standalone.rs) — see issue #29

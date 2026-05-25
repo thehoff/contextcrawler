@@ -1,0 +1,81 @@
+name: CI (self-hosted)
+
+# Routes the compile-heavy cargo test pass to the Hoff's self-hosted
+# Linux/X64 runner. Triggered only on pushes to in-repo branches and on
+# manual dispatch — NEVER on `pull_request`, because fork PRs from
+# outside contributors must not be able to execute code on the
+# self-hosted box (they hit the existing `ubuntu-latest` ci.yml jobs
+# instead, where GitHub sandboxes the work).
+#
+# Belt-and-braces: GitHub repo setting "Require approval for all
+# outside collaborators" must also be enabled in Settings -> Actions
+# -> General so even the cloud-hosted workflows don't fire on a fork
+# PR without manual approval.
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+      - 'feat/**'
+      - 'fix/**'
+      - 'harden/**'
+      - 'polish/**'
+      - 'perf/**'
+      - 'docs/**'
+      - 'ci/**'
+  workflow_dispatch:
+
+concurrency:
+  group: self-hosted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: cargo test (self-hosted)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: self-hosted-stable
+
+      - name: cargo test --bin contextcrawler
+        run: cargo test --bin contextcrawler --no-fail-fast
+
+      - name: Upload tee logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtk-tee-logs-${{ github.run_id }}
+          path: ~/.local/share/rtk/tee/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  clippy:
+    name: cargo clippy (self-hosted)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: self-hosted-stable
+
+      - name: cargo clippy -- -D warnings
+        run: cargo clippy --bin contextcrawler --all-features -- -D warnings
