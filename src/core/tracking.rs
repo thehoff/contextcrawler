@@ -707,6 +707,14 @@ impl Tracker {
     /// re-running the same backfill is safe. Returns the number of rows
     /// actually inserted (i.e. excluding rows the unique constraint rejected).
     pub fn record_install(&self, ev: &InstallEvent) -> Result<usize> {
+        // Scrub once at the write boundary so bearer tokens, --password
+        // values, and inline credentials (e.g. `pip install --index-url
+        // https://user:tok@host …`) do not survive 90 days in the DB and
+        // resurface via the dashboard or `gain --history`. Matches the
+        // discipline already applied to the `commands` and
+        // `parse_failures` tables. Closes the deferred #172 Codex MED.
+        let raw_command = scrub_secrets(&ev.raw_command);
+
         if ev.packages.is_empty() {
             // No package detail (e.g. a "skip" verdict on a non-install
             // command) — record a single placeholder row so the verdict
@@ -718,7 +726,7 @@ impl Tracker {
                        (ts, project_path, ecosystem, package, version_spec, resolved_version,
                         verdict, finding_ids, severity, raw_command)
                      VALUES (?1, ?2, '', '', NULL, NULL, ?3, '', '', ?4)",
-                    params![ev.ts, ev.project_path, ev.verdict, ev.raw_command],
+                    params![ev.ts, ev.project_path, ev.verdict, raw_command],
                 )
                 .context("Failed to record install (placeholder)");
         }
@@ -742,7 +750,7 @@ impl Tracker {
                         ev.verdict,
                         finding_ids,
                         p.severity,
-                        ev.raw_command,
+                        raw_command,
                     ],
                 )
                 .context("Failed to record install")?;
@@ -992,6 +1000,25 @@ impl Tracker {
                 id INTEGER PRIMARY KEY,
                 version TEXT NOT NULL,
                 installed_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        // Mirror production: installs table for supply-chain ledger
+        // (#172). Kept in sync with the schema in `Tracker::new` above.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS installs (
+                id INTEGER PRIMARY KEY,
+                ts TEXT NOT NULL,
+                project_path TEXT NOT NULL DEFAULT '',
+                ecosystem TEXT NOT NULL DEFAULT '',
+                package TEXT NOT NULL DEFAULT '',
+                version_spec TEXT,
+                resolved_version TEXT,
+                verdict TEXT NOT NULL,
+                finding_ids TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT '',
+                raw_command TEXT NOT NULL,
+                UNIQUE (ts, raw_command, package)
             )",
             [],
         )?;
@@ -3560,5 +3587,70 @@ mod tests {
             n, 1,
             "atomic INSERT...WHERE NOT EXISTS must dedupe across N concurrent connections"
         );
+    }
+
+    // Closes the deferred #172 Codex MED: install rows must not retain
+    // bearer tokens or inline credentials in their stored raw_command.
+    // Verifies both the placeholder path (no packages) and the per-package
+    // path so a future regression on either branch is caught.
+    #[test]
+    fn test_record_install_scrubs_secrets() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+
+        let secret_cmd = "pip install requests --index-url https://alice:hunter2@pypi.example.com/simple --token sk-leakme";
+
+        // Per-package path
+        let ev_with_pkg = InstallEvent {
+            ts: "2026-05-25T10:00:00Z".to_string(),
+            project_path: "/tmp/proj".to_string(),
+            verdict: "ok".to_string(),
+            raw_command: secret_cmd.to_string(),
+            packages: vec![InstallPackage {
+                ecosystem: "pip".to_string(),
+                package: "requests".to_string(),
+                version_spec: None,
+                resolved_version: None,
+                severity: "".to_string(),
+                finding_ids: vec![],
+            }],
+        };
+        tracker
+            .record_install(&ev_with_pkg)
+            .expect("Failed to record install with package");
+
+        // Placeholder path
+        let ev_placeholder = InstallEvent {
+            ts: "2026-05-25T10:01:00Z".to_string(),
+            project_path: "/tmp/proj".to_string(),
+            verdict: "skip".to_string(),
+            raw_command: secret_cmd.to_string(),
+            packages: vec![],
+        };
+        tracker
+            .record_install(&ev_placeholder)
+            .expect("Failed to record install placeholder");
+
+        let rows = tracker
+            .get_installs(None, 50)
+            .expect("Failed to query installs");
+        assert_eq!(rows.len(), 2, "expected one row per write path");
+
+        for r in &rows {
+            assert!(
+                !r.raw_command.contains("hunter2"),
+                "URL password leaked into installs row: {}",
+                r.raw_command
+            );
+            assert!(
+                !r.raw_command.contains("sk-leakme"),
+                "--token value leaked into installs row: {}",
+                r.raw_command
+            );
+            assert!(
+                r.raw_command.contains("pip install"),
+                "scrubbing should preserve the install verb, got: {}",
+                r.raw_command
+            );
+        }
     }
 }
