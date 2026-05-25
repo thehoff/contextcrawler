@@ -214,6 +214,75 @@
     color: var(--purple);
     border: 1px solid rgba(176, 38, 255, 0.3);
   }
+
+  /* === polish bundle === */
+  .pane-toolbar {
+    display: flex; align-items: center; gap: 10px;
+    margin: -12px 0 24px;
+  }
+  .pane-toolbar .spacer { flex: 1; }
+  .toolbar-input, .toolbar-select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: 12px;
+  }
+  .toolbar-input:focus, .toolbar-select:focus {
+    outline: none;
+    border-color: var(--purple);
+    box-shadow: 0 0 0 2px rgba(176, 38, 255, 0.15);
+  }
+  .export-btn {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: all 100ms ease;
+  }
+  .export-btn:hover {
+    color: var(--text);
+    border-color: var(--purple);
+    background: rgba(176, 38, 255, 0.08);
+  }
+  .refresh-status {
+    font-size: 10px;
+    color: var(--text-muted);
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .refresh-status.fresh {
+    color: var(--green);
+    border-color: rgba(57, 255, 20, 0.3);
+    background: rgba(57, 255, 20, 0.06);
+    transition: color 600ms ease, border-color 600ms ease, background 600ms ease;
+  }
+  .footer .refresh-row {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: 8px;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .footer .refresh-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: refresh-pulse 2s infinite ease-in-out;
+  }
+  @keyframes refresh-pulse {
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 1; }
+  }
 </style>
 </head>
 <body>
@@ -236,13 +305,14 @@
     <div class="footer">
       <div>local · read-only · 127.0.0.1</div>
       <div style="margin-top:6px"><a href="https://github.com/thehoff/contextcrawler/issues/162" target="_blank">#162</a></div>
+      <div class="refresh-row"><span class="refresh-dot"></span> auto-refresh every 30s</div>
     </div>
   </aside>
 
   <main class="main">
     <!-- === SUMMARY === -->
     <section class="pane active" data-pane="summary">
-      <h2>Summary</h2>
+      <div class="pane-toolbar"><h2 style="margin:0">Summary</h2><div class="spacer"></div><button class="export-btn" data-export="summary" data-fmt="json">↓ JSON</button><button class="export-btn" data-export="summary" data-fmt="csv">↓ CSV</button></div>
       <p class="lede">Lifetime token savings across every tracked command.</p>
       <div class="cards" id="summary-cards">
         <div class="loading">loading…</div>
@@ -260,6 +330,17 @@
     <section class="pane" data-pane="byday">
       <h2>By day</h2>
       <p class="lede">Daily savings — the higher the spike, the more output the filters compressed.</p>
+      <div class="pane-toolbar">
+        <label style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;">Range</label>
+        <select id="byday-range-picker" class="toolbar-select">
+          <option value="all">All time</option>
+          <option value="30">Last 30 days</option>
+          <option value="7">Last 7 days</option>
+        </select>
+        <div class="spacer"></div>
+        <button class="export-btn" data-export="byday" data-fmt="json">↓ JSON</button>
+        <button class="export-btn" data-export="byday" data-fmt="csv">↓ CSV</button>
+      </div>
       <div class="panel">
         <div class="panel-head">
           <h3>Tokens saved per day</h3>
@@ -278,41 +359,42 @@
 
     <!-- === WEAK FILTERS === -->
     <section class="pane" data-pane="weak">
-      <h2>Weak filters</h2>
+      <div class="pane-toolbar"><h2 style="margin:0">Weak filters</h2><div class="spacer"></div><button class="export-btn" data-export="weak" data-fmt="json">↓ JSON</button><button class="export-btn" data-export="weak" data-fmt="csv">↓ CSV</button></div>
       <p class="lede">Tools leaking the most tokens — where a better filter would help most.</p>
       <div id="weak-body"><div class="loading">loading…</div></div>
     </section>
 
     <!-- === PARSE FAILURES === -->
     <section class="pane" data-pane="fail">
-      <h2>Parse failures</h2>
+      <div class="pane-toolbar"><h2 style="margin:0">Parse failures</h2><div class="spacer"></div><button class="export-btn" data-export="fail" data-fmt="json">↓ JSON</button><button class="export-btn" data-export="fail" data-fmt="csv">↓ CSV</button></div>
       <p class="lede">Commands that fell back to raw execution. Recovery rate should stay above 95%.</p>
       <div id="fail-body"><div class="loading">loading…</div></div>
     </section>
 
     <!-- === BOUNDARIES === -->
     <section class="pane" data-pane="bounds">
-      <h2>Release boundaries</h2>
+      <div class="pane-toolbar"><h2 style="margin:0">Release boundaries</h2><div class="spacer"></div><button class="export-btn" data-export="bounds" data-fmt="json">↓ JSON</button><button class="export-btn" data-export="bounds" data-fmt="csv">↓ CSV</button></div>
       <p class="lede">When contextcrawler upgrades landed — useful for before/after savings comparisons.</p>
       <div id="bounds-body"><div class="loading">loading…</div></div>
     </section>
 
     <!-- === SECURITY === -->
     <section class="pane" data-pane="sec">
-      <h2>Security</h2>
+      <div class="pane-toolbar"><h2 style="margin:0">Security</h2><div class="spacer"></div><button class="export-btn" data-export="sec" data-fmt="json">↓ JSON</button></div>
       <p class="lede">Tirith gate downgrades + supply-chain check verdicts. Loopback-only — these are local events from your machine.</p>
       <div id="sec-body"><div class="loading">loading…</div></div>
     </section>
 
     <!-- === INSTALLS === -->
     <section class="pane" data-pane="install">
-      <h2>Installs</h2>
+      <div class="pane-toolbar"><h2 style="margin:0">Installs</h2><div class="spacer"></div><button class="export-btn" data-export="install" data-fmt="json">↓ JSON</button><button class="export-btn" data-export="install" data-fmt="csv">↓ CSV</button></div>
       <p class="lede">Per-project package install history with supply-chain verdicts (#172).</p>
-      <div class="panel" style="display:flex;gap:12px;align-items:center;">
+      <div class="panel" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
         <label style="font-size:12px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;">Project</label>
-        <select id="install-project" style="flex:1;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:13px;">
+        <select id="install-project" style="flex:1;min-width:200px;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:inherit;font-size:13px;">
           <option value="">(all projects)</option>
         </select>
+        <input id="install-search" class="toolbar-input" type="search" placeholder="filter package / verdict / project…" style="flex:1;min-width:220px;padding:8px 10px;font-size:13px;" />
         <button id="install-refresh" style="background:linear-gradient(90deg,var(--pink),var(--purple));color:white;border:none;border-radius:6px;padding:8px 16px;font-family:inherit;font-size:12px;text-transform:uppercase;letter-spacing:0.1em;cursor:pointer;">Refresh</button>
       </div>
       <div id="install-body"><div class="loading">loading…</div></div>
@@ -357,18 +439,123 @@ function renderError(el, e) {
   el.innerHTML = `<div class="error">${escapeHtml(e.message || String(e))}</div>`;
 }
 
+// === persistent state (polish bundle) ===
+const STATE_KEY = "cc:dash:v1";
+const loadState = () => {
+  try { return JSON.parse(localStorage.getItem(STATE_KEY) || "{}"); }
+  catch { return {}; }
+};
+const saveState = (patch) => {
+  try {
+    const s = { ...loadState(), ...patch };
+    localStorage.setItem(STATE_KEY, JSON.stringify(s));
+  } catch { /* localStorage might be disabled; non-fatal */ }
+};
+
+// === per-pane snapshot for export ===
+const lastData = {};
+
+// === download helper (polish bundle) ===
+function download(filename, mime, content) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+}
+
+function toCsv(rows) {
+  if (!rows || !rows.length) return "";
+  const cols = Object.keys(rows[0]);
+  const esc = (v) => {
+    if (v == null) return "";
+    const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [cols.join(","), ...rows.map(r => cols.map(c => esc(r[c])).join(","))].join("\n");
+}
+
+// CSV shapes per pane (returns rows array or null if not tabular).
+const csvShape = {
+  summary: (d) => (d.by_command || []).map(([cmd, runs, saved, pct, avg_ms]) =>
+    ({ cmd, runs, saved, pct, avg_ms })),
+  byday: (d) => d.days || [],
+  weak: (d) => d.weak_filters || [],
+  fail: (d) => (d.recent || []).map(r => ({
+    timestamp: r.timestamp, raw_command: r.raw_command,
+    error_message: r.error_message, fallback_succeeded: r.fallback_succeeded,
+  })),
+  bounds: (d) => d.boundaries || [],
+  install: (d) => d.rows || [],
+};
+
+function exportPane(name, fmt) {
+  const data = lastData[name];
+  if (!data) return;
+  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  if (fmt === "json") {
+    download(`contextcrawler-${name}-${ts}.json`, "application/json",
+      JSON.stringify(data, null, 2));
+  } else if (fmt === "csv") {
+    const rows = csvShape[name]?.(data);
+    if (!rows || !rows.length) {
+      alert(`No tabular data available for ${name} (try JSON export).`);
+      return;
+    }
+    download(`contextcrawler-${name}-${ts}.csv`, "text/csv", toCsv(rows));
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".export-btn");
+  if (btn) exportPane(btn.dataset.export, btn.dataset.fmt);
+});
+
+// === auto-refresh — only the active pane, only while tab is visible ===
+const REFRESH_MS = 30_000;
+let refreshTimer = null;
+let lastRefreshAt = 0;
+let currentPane = "summary";
+
+function flashRefreshStatus() {
+  document.querySelectorAll(".refresh-status").forEach(el => {
+    el.classList.add("fresh");
+    setTimeout(() => el.classList.remove("fresh"), 600);
+  });
+}
+
+function scheduleRefresh(name) {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    if (document.hidden) {
+      scheduleRefresh(name); // retry one cycle later
+      return;
+    }
+    loaders[name]?.().then(() => {
+      lastRefreshAt = Date.now();
+      flashRefreshStatus();
+    }).catch(() => {/* keep cadence on error */}).finally(() => scheduleRefresh(name));
+  }, REFRESH_MS);
+}
+
 // === nav routing ===
 const navItems = document.querySelectorAll(".nav-item");
 const panes = document.querySelectorAll(".pane");
 const loaded = new Set();
 
 function activate(name) {
+  currentPane = name;
+  saveState({ pane: name });
   navItems.forEach(n => n.classList.toggle("active", n.dataset.pane === name));
   panes.forEach(p => p.classList.toggle("active", p.dataset.pane === name));
   if (!loaded.has(name)) {
     loaded.add(name);
     loaders[name]?.();
   }
+  scheduleRefresh(name);
 }
 
 navItems.forEach(n => n.addEventListener("click", () => activate(n.dataset.pane)));
@@ -380,6 +567,7 @@ const loaders = {
     const top = document.getElementById("summary-top");
     try {
       const s = await fetchJSON("/api/summary");
+      lastData.summary = s;
       cards.innerHTML = `
         <div class="card">
           <p class="label">Tokens saved</p>
@@ -425,9 +613,16 @@ const loaders = {
     const range = document.getElementById("byday-range");
     const count = document.getElementById("byday-count");
     const table = document.getElementById("byday-table");
+    const picker = document.getElementById("byday-range-picker");
     try {
-      const { days } = await fetchJSON("/api/by-day");
-      if (!days || !days.length) {
+      const raw = await fetchJSON("/api/by-day");
+      const allDays = raw.days || [];
+      // Slice client-side to the picker selection (defaults to "all").
+      const sel = picker.value || loadState().bydayRange || "all";
+      picker.value = sel;
+      const days = sel === "all" ? allDays : allDays.slice(-parseInt(sel, 10));
+      lastData.byday = { ...raw, days };
+      if (!days.length) {
         spark.innerHTML = "";
         table.innerHTML = `<div class="empty">No daily data yet.</div>`;
         return;
@@ -479,7 +674,9 @@ const loaders = {
   weak: async () => {
     const body = document.getElementById("weak-body");
     try {
-      const { weak_filters } = await fetchJSON("/api/weak-filters");
+      const raw = await fetchJSON("/api/weak-filters");
+      lastData.weak = raw;
+      const { weak_filters } = raw;
       if (!weak_filters || !weak_filters.length) {
         body.innerHTML = `<div class="empty">No weak filters detected. Filters are doing their job.</div>`;
         return;
@@ -505,6 +702,7 @@ const loaders = {
     const body = document.getElementById("fail-body");
     try {
       const f = await fetchJSON("/api/failures");
+      lastData.fail = f;
       if (!f.total) {
         body.innerHTML = `<div class="empty">No parse failures recorded.</div>`;
         return;
@@ -541,7 +739,9 @@ const loaders = {
   bounds: async () => {
     const body = document.getElementById("bounds-body");
     try {
-      const { latest, boundaries } = await fetchJSON("/api/boundaries");
+      const raw = await fetchJSON("/api/boundaries");
+      lastData.bounds = raw;
+      const { latest, boundaries } = raw;
       if (!boundaries || !boundaries.length) {
         body.innerHTML = `<div class="empty">No release boundaries recorded yet.</div>`;
         return;
@@ -568,6 +768,7 @@ const loaders = {
         fetchJSON("/api/security/gate"),
         fetchJSON("/api/security/supply-chain"),
       ]);
+      lastData.sec = { gate, supply_chain: sc };
 
       const gateBlockRate = gate.total ? (((gate.by_action.find(([k]) => k === "tirith_block") || [, 0])[1]) / gate.total * 100) : 0;
       const scAllow = (sc.by_verdict.find(([k]) => k === "allow") || [, 0])[1];
@@ -665,18 +866,39 @@ const loaders = {
     const body = document.getElementById("install-body");
     const sel = document.getElementById("install-project");
     const refreshBtn = document.getElementById("install-refresh");
+    const search = document.getElementById("install-search");
+
+    // Restore persisted filter values on first paint (lazy — only on first load).
+    if (!sel.dataset.bound) {
+      const st = loadState();
+      if (st.installProject) sel.value = st.installProject;
+      if (st.installSearch) search.value = st.installSearch;
+      sel.dataset.bound = "1";
+    }
 
     const load = async () => {
       body.innerHTML = `<div class="loading">loading…</div>`;
       try {
         const project = sel.value;
+        saveState({ installProject: project, installSearch: search.value });
         const q = project ? `?project=${encodeURIComponent(project)}&limit=200` : `?limit=200`;
-        const data = await fetchJSON(`/api/installs${q}`);
+        const raw = await fetchJSON(`/api/installs${q}`);
+        // Apply client-side search filter.
+        const needle = (search.value || "").trim().toLowerCase();
+        const filteredRows = needle
+          ? (raw.rows || []).filter(r =>
+              (r.package || "").toLowerCase().includes(needle) ||
+              (r.verdict || "").toLowerCase().includes(needle) ||
+              (r.ecosystem || "").toLowerCase().includes(needle) ||
+              (r.project_path || "").toLowerCase().includes(needle))
+          : (raw.rows || []);
+        const data = { ...raw, rows: filteredRows };
+        lastData.install = data;
 
         // Populate dropdown once (preserve current selection)
-        if (sel.options.length <= 1 && data.projects) {
+        if (sel.options.length <= 1 && raw.projects) {
           const current = sel.value;
-          data.projects.forEach(p => {
+          raw.projects.forEach(p => {
             const o = document.createElement("option");
             o.value = p;
             o.textContent = p;
@@ -744,15 +966,26 @@ const loaders = {
       } catch (e) { renderError(body, e); }
     };
 
-    sel.addEventListener("change", load);
-    refreshBtn.addEventListener("click", load);
-    load();
+    if (!sel.dataset.handlersBound) {
+      sel.addEventListener("change", load);
+      refreshBtn.addEventListener("click", load);
+      // Debounce search so we don't re-fetch on every keystroke.
+      let searchTimer = null;
+      search.addEventListener("input", () => {
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(load, 200);
+      });
+      sel.dataset.handlersBound = "1";
+    }
+    await load();
   },
 
   insight: async () => {
     const body = document.getElementById("insight-body");
     try {
-      const { insights, status, message } = await fetchJSON("/api/insights");
+      const raw = await fetchJSON("/api/insights");
+      lastData.insight = raw;
+      const { insights, status, message } = raw;
       if (status && status !== "ok") {
         body.innerHTML = `
           <div class="panel">
@@ -775,9 +1008,31 @@ const loaders = {
   },
 };
 
-// Boot
-loaded.add("summary");
-loaders.summary();
+// Boot — restore last-viewed pane (polish bundle) and wire one-off listeners.
+(function boot() {
+  const st = loadState();
+  // By-day range picker — re-render the byday pane on change + persist.
+  const bydayPicker = document.getElementById("byday-range-picker");
+  if (bydayPicker) {
+    if (st.bydayRange) bydayPicker.value = st.bydayRange;
+    bydayPicker.addEventListener("change", () => {
+      saveState({ bydayRange: bydayPicker.value });
+      if (loaded.has("byday")) loaders.byday();
+    });
+  }
+  // Pause auto-refresh on hidden tabs (timer self-defers via document.hidden).
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && currentPane) {
+      // On tab focus, force a refresh if last fetch was > REFRESH_MS ago.
+      if (Date.now() - lastRefreshAt > REFRESH_MS) {
+        loaders[currentPane]?.().then(() => { lastRefreshAt = Date.now(); flashRefreshStatus(); });
+      }
+    }
+  });
+  // Restore last pane, default to summary.
+  const want = (st.pane && document.querySelector(`.pane[data-pane="${st.pane}"]`)) ? st.pane : "summary";
+  activate(want);
+})();
 </script>
 </body>
 </html>
