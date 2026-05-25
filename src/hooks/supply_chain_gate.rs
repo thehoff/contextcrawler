@@ -2291,9 +2291,14 @@ fn record_install_to_db(
     let Ok(tracker) = Tracker::new() else {
         return;
     };
+    // Canonicalise the CWD before persisting (codex peer-review LOW #172).
+    // Symlinked project roots otherwise split across multiple dashboard
+    // buckets; canonicalise_project_path falls back gracefully if the path
+    // can't be resolved.
     let project_path = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .map(|s| crate::core::tracking::canonicalise_project_path(&s))
         .unwrap_or_default();
 
     // Aggregate findings by (package, ecosystem). BTreeMap for deterministic

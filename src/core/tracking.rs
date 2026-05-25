@@ -177,14 +177,49 @@ fn current_project_path_string() -> String {
 /// Build SQL filter params for project-scoped queries.
 /// Returns (exact_match, glob_prefix) for WHERE clause.
 /// Uses GLOB instead of LIKE to avoid `_` and `%` in paths acting as wildcards. // changed: GLOB
+///
+/// SQLite's GLOB syntax treats `*`, `?`, and `[...]` as metacharacters and
+/// has no escape mechanism (unlike LIKE's `ESCAPE` clause). If the user's
+/// project path literally contains any of those bytes, naïve substitution
+/// over-matches — e.g. `/repos/foo[1]` would match `/repos/foo1*` as well
+/// as the literal directory. Closes codex peer-review LOW (#172): when the
+/// path contains GLOB meta, we degrade to exact-match-only by returning
+/// `None` for the glob_prefix half so the OR-clause in the calling SQL
+/// never expands beyond the exact match.
 fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<String>) {
     match project_path {
-        Some(p) => (
-            Some(p.to_string()),
-            Some(format!("{}{}*", p, std::path::MAIN_SEPARATOR)), // changed: GLOB pattern with * wildcard
-        ),
+        Some(p) => {
+            let exact = p.to_string();
+            let glob = if p.contains('*') || p.contains('?') || p.contains('[') {
+                None
+            } else {
+                Some(format!("{}{}*", p, std::path::MAIN_SEPARATOR))
+            };
+            (Some(exact), glob)
+        }
         None => (None, None),
     }
+}
+
+/// Canonicalise a project path before persistence so symlinked roots
+/// resolve to a single bucket in the install ledger. Falls back to the
+/// input unchanged if canonicalisation fails (path no longer exists,
+/// permission denied, etc.) — never panics, never blocks the write.
+///
+/// Closes codex peer-review LOW (#172): live install rows from
+/// `std::env::current_dir()` used the raw string while command history
+/// canonicalises elsewhere — symlinked project roots split into different
+/// dashboard buckets. Canonicalising on write fixes the split going
+/// forward; historical backfill rows are unaffected (they have empty
+/// project_path).
+pub fn canonicalise_project_path(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    std::fs::canonicalize(raw)
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| raw.to_string())
 }
 
 use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
@@ -2273,6 +2308,61 @@ mod tests {
     /// env-mutating test (issue #69). This single shared lock is the real
     /// serialisation point; every env-touching test must hold it.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // Codex peer-review LOWs — project_path canonicalisation + GLOB escape.
+
+    #[test]
+    fn project_filter_drops_glob_when_path_contains_star() {
+        let (exact, glob) = project_filter_params(Some("/repos/foo*bar"));
+        assert_eq!(exact.as_deref(), Some("/repos/foo*bar"));
+        assert!(glob.is_none(), "literal '*' must disable GLOB prefix matching");
+    }
+
+    #[test]
+    fn project_filter_drops_glob_when_path_contains_bracket() {
+        let (_, glob) = project_filter_params(Some("/repos/foo[1]"));
+        assert!(glob.is_none(), "literal '[' must disable GLOB prefix matching");
+    }
+
+    #[test]
+    fn project_filter_drops_glob_when_path_contains_question() {
+        let (_, glob) = project_filter_params(Some("/repos/maybe?"));
+        assert!(glob.is_none(), "literal '?' must disable GLOB prefix matching");
+    }
+
+    #[test]
+    fn project_filter_keeps_glob_for_normal_path() {
+        let (exact, glob) = project_filter_params(Some("/repos/myapp"));
+        assert_eq!(exact.as_deref(), Some("/repos/myapp"));
+        // Glob suffix uses MAIN_SEPARATOR + "*" so subdir matching keeps working.
+        assert!(glob.is_some());
+        assert!(glob.as_deref().unwrap().ends_with('*'));
+    }
+
+    #[test]
+    fn canonicalise_returns_input_when_path_missing() {
+        // Non-existent path → fallback to input string, never panics.
+        let out = canonicalise_project_path("/definitely/does/not/exist/zzz");
+        assert_eq!(out, "/definitely/does/not/exist/zzz");
+    }
+
+    #[test]
+    fn canonicalise_empty_string_is_empty() {
+        assert_eq!(canonicalise_project_path(""), "");
+    }
+
+    #[test]
+    fn canonicalise_resolves_existing_path() {
+        // The temp dir exists on every supported platform.
+        let tmp = std::env::temp_dir();
+        let raw = tmp.to_str().expect("temp dir is utf-8");
+        let canon = canonicalise_project_path(raw);
+        // Canonical form should still resolve to the same directory.
+        assert!(
+            std::fs::canonicalize(&canon).is_ok(),
+            "canonicalised path must still exist"
+        );
+    }
 
     #[test]
     fn scrub_redacts_password_flag_with_equals() {

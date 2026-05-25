@@ -61,3 +61,18 @@ bench/results-*.md
 # bench harness output (tests/harness_claude_code.rs) — see #29
 bench/claude-code-*.json
 bench/claude-code-*.md
+
+# Playwright MCP working dir — produced by browser_take_screenshot / downloads
+.playwright-mcp/
+
+# Hermes hook test caches
+hooks/hermes/**/__pycache__/
+
+# Stray patch / lock files left by AI agents (agy intent-diff, an npm
+# lockfile without a package.json) — never part of the build.
+.agy-intent-diff.patch
+package-lock.json
+
+# Unsanitised dashboard screenshots taken in repo root by playwright runs.
+# Canonical sanitised copies live under docs/assets/ (#162).
+/dash-*.png
