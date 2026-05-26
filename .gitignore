@@ -52,6 +52,10 @@ claudedocs
 # ContextCrawler: personal/AI workspace — never publish
 local/
 .claude/
+# Peer-review / intent-diff scratch (never commit)
+.agy-intent-diff.patch
+# Stray playwright-mcp dependency lockfile (not used by this Rust crate)
+package-lock.json
 # .github: ignore everything except shipped workflows
 .github/*
 !.github/workflows/

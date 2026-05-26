@@ -1,6 +1,6 @@
 name: CI (self-hosted)
 
-# Routes the compile-heavy cargo test pass to the Hoff's self-hosted
+# Routes the compile-heavy cargo test pass to a self-hosted
 # Linux/X64 runner. Triggered only on pushes to in-repo branches and on
 # manual dispatch — NEVER on `pull_request`, because fork PRs from
 # outside contributors must not be able to execute code on the
