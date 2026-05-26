@@ -200,6 +200,159 @@ pub fn tirith_binary_path() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Run the `contextcrawler security --scrub-logs` action: scan both the
+/// tirith downgrade log and the supply-chain event log, deep-redact every
+/// string field via `core::secret_redact::redact`, and rewrite atomically.
+/// A timestamped backup is written alongside each rewritten file. With
+/// `dry_run`, no file is touched — only counts are reported.
+///
+/// Returns the process exit code (0 on success).
+pub fn run_scrub_logs(dry_run: bool) -> anyhow::Result<i32> {
+    let data_dir = dirs::data_local_dir().ok_or_else(|| {
+        anyhow::anyhow!("could not resolve data_local_dir (XDG_DATA_HOME or platform equivalent)")
+    })?;
+    let log_dir = data_dir.join("contextcrawler");
+    let report = scrub_logs_in(&log_dir, dry_run)?;
+    println!(
+        "ContextCrawler audit log scrub — {}",
+        if dry_run { "DRY RUN" } else { "live" }
+    );
+    println!("════════════════════════════════════════════════════════════");
+    println!("log dir: {}", log_dir.display());
+    println!();
+    for f in &report.files {
+        if f.skipped {
+            println!("  {}: not present, skipping", f.name);
+            continue;
+        }
+        println!(
+            "  {}: lines={} changed={} unparseable={}",
+            f.name, f.total, f.changed, f.unparseable
+        );
+        if let Some(bak) = &f.backup_path {
+            println!("    backup: {}", bak.display());
+        }
+    }
+    println!();
+    println!(
+        "Summary: {} lines processed, {} changed{}",
+        report.grand_total,
+        report.grand_changed,
+        if dry_run { " (no files written)" } else { "" }
+    );
+    Ok(0)
+}
+
+/// Per-file outcome from a scrub pass.
+#[derive(Debug, Default)]
+pub struct ScrubFileReport {
+    pub name: String,
+    pub skipped: bool,
+    pub total: usize,
+    pub changed: usize,
+    pub unparseable: usize,
+    pub backup_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Default)]
+pub struct ScrubReport {
+    pub files: Vec<ScrubFileReport>,
+    pub grand_total: usize,
+    pub grand_changed: usize,
+}
+
+/// Core of `run_scrub_logs`, lifted out so tests can drive it against a
+/// tempdir instead of the real `~/Library/Application Support/contextcrawler`.
+pub fn scrub_logs_in(
+    log_dir: &std::path::Path,
+    dry_run: bool,
+) -> anyhow::Result<ScrubReport> {
+    use crate::core::secret_redact::redact;
+    use chrono::Utc;
+    use serde_json::Value;
+    use std::io::{BufRead, BufReader, Write};
+
+    fn deep_redact(v: &mut Value) {
+        match v {
+            Value::String(s) => {
+                let r = redact(s);
+                if let std::borrow::Cow::Owned(new) = r {
+                    *s = new;
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(deep_redact),
+            Value::Object(m) => m.values_mut().for_each(deep_redact),
+            _ => {}
+        }
+    }
+
+    let targets = ["downgrades.jsonl", "supply_chain.jsonl"];
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut report = ScrubReport::default();
+
+    for name in &targets {
+        let mut entry = ScrubFileReport {
+            name: (*name).to_string(),
+            ..Default::default()
+        };
+        let path = log_dir.join(name);
+        if !path.exists() {
+            entry.skipped = true;
+            report.files.push(entry);
+            continue;
+        }
+        let src = std::fs::File::open(&path)?;
+        let reader = BufReader::new(src);
+        let tmp_path = path.with_extension("jsonl.scrub-tmp");
+        let mut out_buf: Vec<u8> = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.is_empty() {
+                out_buf.extend_from_slice(b"\n");
+                continue;
+            }
+            entry.total += 1;
+            match serde_json::from_str::<Value>(&line) {
+                Ok(mut v) => {
+                    let before = v.clone();
+                    deep_redact(&mut v);
+                    if v != before {
+                        entry.changed += 1;
+                    }
+                    let serialised =
+                        serde_json::to_string(&v).unwrap_or_else(|_| line.clone());
+                    out_buf.extend_from_slice(serialised.as_bytes());
+                    out_buf.push(b'\n');
+                }
+                Err(_) => {
+                    entry.unparseable += 1;
+                    let r = redact(&line);
+                    if r.as_ref() != line {
+                        entry.changed += 1;
+                    }
+                    out_buf.extend_from_slice(r.as_bytes());
+                    out_buf.push(b'\n');
+                }
+            }
+        }
+        report.grand_total += entry.total;
+        report.grand_changed += entry.changed;
+        if !dry_run {
+            {
+                let mut tmp = std::fs::File::create(&tmp_path)?;
+                tmp.write_all(&out_buf)?;
+                tmp.sync_all()?;
+            }
+            let bak = path.with_file_name(format!("{}.bak-{}", name, stamp));
+            std::fs::copy(&path, &bak)?;
+            std::fs::rename(&tmp_path, &path)?;
+            entry.backup_path = Some(bak);
+        }
+        report.files.push(entry);
+    }
+    Ok(report)
+}
+
 /// Returns the path where downgrade events are appended (whether or not
 /// the file exists yet). Mirrors the resolution in `log_downgrade`.
 pub fn downgrades_log_path() -> Option<std::path::PathBuf> {
@@ -485,5 +638,70 @@ mod tests {
             records.last().unwrap().contains("c49999"),
             "last record must be the most recent line"
         );
+    }
+
+    #[test]
+    fn scrub_logs_in_strips_credentials_and_backs_up() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let down = dir.path().join("downgrades.jsonl");
+        let supply = dir.path().join("supply_chain.jsonl");
+        std::fs::write(
+            &down,
+            concat!(
+                r#"{"ts":"2026-05-26T00:00:00Z","reason":"tirith_block","cmd":"TEA_TOKEN=147dd871c9edab5848377af412b6575bca133169 curl -H \"Authorization: token 147dd871c9edab5848377af412b6575bca133169\" https://x","tirith":{"action":"block","evidence":[{"raw":"Authorization: token 147dd871c9edab5848377af412b6575bca133169"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &supply,
+            concat!(
+                r#"{"ts":"2026-05-26T00:00:00Z","verdict":"skip","cmd":"echo MY_API_KEY=abc123 && curl -H 'Authorization: Bearer eyJ.tok.en' https://x","findings":[]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let report = scrub_logs_in(dir.path(), false).unwrap();
+        assert_eq!(report.grand_total, 2);
+        assert_eq!(report.grand_changed, 2, "both lines must be scrubbed");
+        assert!(report.files.iter().all(|f| f.backup_path.is_some()));
+
+        let down_new = std::fs::read_to_string(&down).unwrap();
+        let supply_new = std::fs::read_to_string(&supply).unwrap();
+        assert!(!down_new.contains("147dd871"), "leaked: {}", down_new);
+        assert!(!down_new.contains("Authorization: token 147"));
+        assert!(!supply_new.contains("abc123"));
+        assert!(!supply_new.contains("eyJ.tok.en"));
+        assert!(supply_new.contains("MY_API_KEY=<REDACTED>"));
+        // Surrounding JSON shape preserved.
+        assert!(down_new.contains(r#""reason""#));
+        assert!(supply_new.contains(r#""verdict""#));
+    }
+
+    #[test]
+    fn scrub_logs_in_dry_run_does_not_write() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let down = dir.path().join("downgrades.jsonl");
+        let leaky = concat!(
+            r#"{"ts":"x","reason":"r","cmd":"TEA_TOKEN=abc curl https://x"}"#,
+            "\n",
+        );
+        std::fs::write(&down, leaky).unwrap();
+        let before = std::fs::read_to_string(&down).unwrap();
+        let report = scrub_logs_in(dir.path(), true).unwrap();
+        let after = std::fs::read_to_string(&down).unwrap();
+        assert_eq!(before, after, "dry-run must not mutate the file");
+        assert_eq!(report.grand_changed, 1, "dry-run still reports counts");
+        assert!(report.files.iter().all(|f| f.backup_path.is_none()));
+    }
+
+    #[test]
+    fn scrub_logs_in_skips_missing_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let report = scrub_logs_in(dir.path(), false).unwrap();
+        assert!(report.files.iter().all(|f| f.skipped));
+        assert_eq!(report.grand_total, 0);
+        assert_eq!(report.grand_changed, 0);
     }
 }

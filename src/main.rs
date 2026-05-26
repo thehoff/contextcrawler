@@ -740,6 +740,14 @@ enum Commands {
         /// Emit machine-readable JSON instead of the human-readable dashboard
         #[arg(long)]
         json: bool,
+        /// Scrub credentials from existing audit logs in place.
+        /// Writes a `.bak-<ts>` backup alongside each rewritten file.
+        /// Pair with `--dry-run` to preview without writing.
+        #[arg(long, conflicts_with_all = ["all", "json"])]
+        scrub_logs: bool,
+        /// With `--scrub-logs`: report what would change without rewriting.
+        #[arg(long, requires = "scrub_logs")]
+        dry_run: bool,
     },
 
     /// Ruff linter/formatter with compact output
@@ -4263,7 +4271,13 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Security { all, json } => hooks::tirith_gate::run_security_dashboard(all, json)?,
+        Commands::Security { all, json, scrub_logs, dry_run } => {
+            if scrub_logs {
+                hooks::tirith_gate::run_scrub_logs(dry_run)?
+            } else {
+                hooks::tirith_gate::run_security_dashboard(all, json)?
+            }
+        }
     };
 
     Ok(code)
