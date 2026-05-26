@@ -2132,11 +2132,13 @@ pub fn log_event(cmd: &str, verdict: &Verdict) {
         Verdict::Block(f) | Verdict::Ask(f) => serde_json::to_string(f).unwrap_or_default(),
         _ => "[]".to_string(),
     };
+    // Scrub credentials before the cmd lands on disk. See issue #180.
+    let safe_cmd = crate::core::secret_redact::redact(cmd);
     let record = format!(
         r#"{{"ts":"{}","verdict":"{}","cmd":{},"findings":{}}}"#,
         Utc::now().to_rfc3339(),
         kind,
-        serde_json::to_string(cmd).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::to_string(safe_cmd.as_ref()).unwrap_or_else(|_| "\"\"".into()),
         findings
     );
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {

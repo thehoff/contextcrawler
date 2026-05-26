@@ -148,20 +148,23 @@ pub fn log_downgrade(cmd: &str, reason: &'static str, tirith_json: Option<&str>)
     }
     let path = dir.join("downgrades.jsonl");
 
+    // Scrub credentials before the cmd lands on disk. See issue #180.
+    let safe_cmd = crate::core::secret_redact::redact(cmd);
+
     let timestamp = chrono::Utc::now().to_rfc3339();
     let record = match tirith_json {
         Some(json) => format!(
             r#"{{"ts":"{}","reason":"{}","cmd":{},"tirith":{}}}"#,
             timestamp,
             reason,
-            json_escape(cmd),
+            json_escape(&safe_cmd),
             json.trim(),
         ),
         None => format!(
             r#"{{"ts":"{}","reason":"{}","cmd":{}}}"#,
             timestamp,
             reason,
-            json_escape(cmd),
+            json_escape(&safe_cmd),
         ),
     };
 
