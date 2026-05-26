@@ -7,6 +7,13 @@
 //! `*TOKEN`/`*KEY`/`*SECRET`/etc., URL basic-auth) without mangling normal
 //! shell commands. False negatives are preferred over false positives that
 //! corrupt the diagnostic value of the log.
+//!
+//! Known limitations (intentional false negatives):
+//! - Bare-shape secrets like `T=<40-hex>` (one-letter alias to a token) are
+//!   not redacted: a name-only heuristic can't safely distinguish a token
+//!   value from a git SHA without context. If a downstream consumer reuses
+//!   the alias in an `Authorization` header within the same cmd string, the
+//!   header-side match still scrubs that occurrence.
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -53,6 +60,23 @@ lazy_static! {
             )
             .unwrap(),
             "${name}=<REDACTED>",
+        ),
+        // 5. git-credential-helper format inside a piped string:
+        //    `protocol=http\nhost=...\nusername=...\npassword=<TOKEN>`
+        //    The literal `\n` puts the secret name mid-word from the regex
+        //    engine's POV, so `\b` (pattern 4) doesn't anchor. Match the
+        //    escape-prefix explicitly and preserve it.
+        (
+            Regex::new(
+                r#"(?xi)
+                (?P<pfx>\\n|\\r)
+                (?P<name>password|token|secret|auth)
+                =
+                (?P<val>[^\s'";\\]+)
+                "#
+            )
+            .unwrap(),
+            "${pfx}${name}=<REDACTED>",
         ),
         // 5. CLI flags carrying credentials.
         //    `--token foo`, `--token=foo`, `--password=foo`, `--api-key foo`, etc.
@@ -213,6 +237,20 @@ mod tests {
         for needle in &["aaa", "bbb", "ccc"] {
             assert!(!out.contains(needle), "leaked {}: {}", needle, out);
         }
+    }
+
+    #[test]
+    fn git_credential_helper_password_redacted() {
+        // git credential-osxkeychain / credential-store / cache feed a stream
+        // like `protocol=...\nhost=...\nusername=...\npassword=<TOKEN>` over a
+        // pipe. The literal `\n` defeats `\b`-anchored env-var matching.
+        let cmd = r#"printf "protocol=http\nhost=gitea.example\nusername=alice\npassword=147dd871c9edab5848377af412b6575bca133169\n\n" | git credential-store"#;
+        let out = redact(cmd);
+        assert!(!out.contains("147dd871"), "leaked: {}", out);
+        assert!(out.contains(r"\npassword=<REDACTED>"));
+        // Preserves benign neighbouring assignments.
+        assert!(out.contains(r"\nusername=alice"));
+        assert!(out.contains(r"\nhost=gitea.example"));
     }
 
     #[test]

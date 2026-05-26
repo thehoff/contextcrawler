@@ -150,9 +150,14 @@ pub fn log_downgrade(cmd: &str, reason: &'static str, tirith_json: Option<&str>)
 
     // Scrub credentials before the cmd lands on disk. See issue #180.
     let safe_cmd = crate::core::secret_redact::redact(cmd);
+    // The tirith blob frequently echoes the command (and any inline
+    // credentials) back in its findings, so scrub it too. The redactor is
+    // structure-preserving — it only touches matched substrings — so the
+    // surrounding JSON shape remains valid.
+    let safe_tirith = tirith_json.map(|j| crate::core::secret_redact::redact(j));
 
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let record = match tirith_json {
+    let record = match safe_tirith.as_deref() {
         Some(json) => format!(
             r#"{{"ts":"{}","reason":"{}","cmd":{},"tirith":{}}}"#,
             timestamp,
