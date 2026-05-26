@@ -1870,6 +1870,47 @@ fn cache_put(eco: Ecosystem, pkg: &str, version: &str, publish: &DateTime<Utc>) 
     }
 }
 
+/// Does `cmd` open with a leading `NAME=VALUE` assignment (possibly preceded
+/// by sibling assignments and whitespace), and is that assignment for `name`
+/// with a value in `allowed`?
+///
+/// Used so `CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install x` bypasses the
+/// gate the same way the user reads the hint suggests. Only the *leading*
+/// run of assignments counts — once we see a non-assignment token, the
+/// rest of the cmd is ignored. (Mid-cmd `&& FOO=bar baz` does not bypass.)
+///
+/// Conservative on value parsing: unquoted values are anything up to the
+/// next whitespace; quoted values are not supported in v1 (the bypass
+/// values we care about are short bareword tokens like `off`/`0`/`false`).
+fn cmd_has_leading_assignment(cmd: &str, name: &str, allowed: &[&str]) -> bool {
+    let mut rest = cmd.trim_start();
+    while !rest.is_empty() {
+        // Pull off the next whitespace-delimited token.
+        let tok_end = rest
+            .find(char::is_whitespace)
+            .unwrap_or(rest.len());
+        let token = &rest[..tok_end];
+        // POSIX-shape assignment: NAME=VALUE where NAME is identifier-safe.
+        let Some(eq_idx) = token.find('=') else {
+            // First non-assignment token ends the leading run.
+            return false;
+        };
+        let (n, rhs) = (&token[..eq_idx], &token[eq_idx + 1..]);
+        if n.is_empty()
+            || !n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return false;
+        }
+        if n == name && allowed.iter().any(|v| *v == rhs) {
+            return true;
+        }
+        // Advance past this assignment + any whitespace before the next token.
+        rest = rest[tok_end..].trim_start();
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
@@ -1881,6 +1922,18 @@ pub fn check(cmd: &str) -> Verdict {
         return Verdict::Skip;
     }
     if std::env::var("CONTEXTCRAWLER_SUPPLY_CHAIN").as_deref() == Ok("off") {
+        return Verdict::Skip;
+    }
+    // Also honour an inline leading-prefix bypass, which is what the gate's
+    // own error messages suggest (`Overrides: rerun with
+    // CONTEXTCRAWLER_SUPPLY_CHAIN=off …`). Without this branch the user
+    // sees the hint, runs the suggested form, and is still blocked — the
+    // inline assignment scopes to the subprocess, not to this hook. See #181.
+    if cmd_has_leading_assignment(
+        cmd,
+        "CONTEXTCRAWLER_SUPPLY_CHAIN",
+        &["off", "0", "false", "no"],
+    ) {
         return Verdict::Skip;
     }
 
@@ -3760,5 +3813,97 @@ mod tests {
         // the allowlist (otherwise `cd && npm install` semantics get
         // muddied if cd ever gains install-shaped argv).
         assert!(!command_head_is_data_utility("cd foo"));
+    }
+
+    #[test]
+    fn inline_bypass_simple() {
+        // The exact form the gate's own error message tells users to run.
+        assert!(cmd_has_leading_assignment(
+            "CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install starlette==0.49.1",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off"],
+        ));
+    }
+
+    #[test]
+    fn inline_bypass_value_variants() {
+        for v in &["off", "0", "false", "no"] {
+            let cmd = format!("CONTEXTCRAWLER_SUPPLY_CHAIN={} pip install x", v);
+            assert!(
+                cmd_has_leading_assignment(
+                    &cmd,
+                    "CONTEXTCRAWLER_SUPPLY_CHAIN",
+                    &["off", "0", "false", "no"],
+                ),
+                "should recognise value {}",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn inline_bypass_with_sibling_assignments() {
+        // Real-world: `FOO=bar CONTEXTCRAWLER_SUPPLY_CHAIN=off cmd`.
+        assert!(cmd_has_leading_assignment(
+            "FOO=bar CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install x",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off"],
+        ));
+        // Whitespace tolerance.
+        assert!(cmd_has_leading_assignment(
+            "  FOO=bar   CONTEXTCRAWLER_SUPPLY_CHAIN=off   pip install x",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off"],
+        ));
+    }
+
+    #[test]
+    fn inline_bypass_mid_cmd_does_not_count() {
+        // Bypass must be PREFIX, not mid-cmd. `&&` is not a sibling
+        // assignment, so once we hit `pip` the leading run ends.
+        assert!(!cmd_has_leading_assignment(
+            "pip install x && CONTEXTCRAWLER_SUPPLY_CHAIN=off other",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off"],
+        ));
+    }
+
+    #[test]
+    fn inline_bypass_wrong_value_does_not_count() {
+        // Defensive: user typed `=on` thinking it enables — must NOT bypass.
+        assert!(!cmd_has_leading_assignment(
+            "CONTEXTCRAWLER_SUPPLY_CHAIN=on pip install x",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off", "0", "false", "no"],
+        ));
+    }
+
+    #[test]
+    fn inline_bypass_value_must_match_exactly() {
+        // `=offsuffix` is not `=off`.
+        assert!(!cmd_has_leading_assignment(
+            "CONTEXTCRAWLER_SUPPLY_CHAIN=offsuffix pip install x",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off"],
+        ));
+    }
+
+    #[test]
+    fn inline_bypass_invalid_identifier_breaks_run() {
+        // `1NAME=` is not a valid identifier — should stop the leading run.
+        assert!(!cmd_has_leading_assignment(
+            "1NAME=x CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install x",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off"],
+        ));
+    }
+
+    #[test]
+    fn inline_bypass_empty_cmd() {
+        assert!(!cmd_has_leading_assignment(
+            "",
+            "CONTEXTCRAWLER_SUPPLY_CHAIN",
+            &["off"],
+        ));
     }
 }
