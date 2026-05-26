@@ -1571,32 +1571,102 @@ fn read_body(resp: ureq::Response) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-fn http_get_json(url: &str) -> Result<Value, String> {
-    let mut req = ureq::get(url)
-        .set("User-Agent", "contextcrawler-supply-chain-gate/0.1")
-        .timeout(StdDuration::from_secs(8));
-    // Request npm's abbreviated metadata where applicable — ~100x smaller.
-    // PyPI ignores the header, so it is safe to send unconditionally for npm
-    // hosts only.
-    if url.starts_with("https://registry.npmjs.org/") {
-        req = req.set("Accept", NPM_ABBREVIATED_ACCEPT);
+/// Per-attempt HTTP timeout. With one retry on transient errors, total
+/// wall-clock per call is bounded by `2 * HTTP_ATTEMPT_TIMEOUT +
+/// HTTP_RETRY_BACKOFF`. Kept well under `CHECK_WALL_BUDGET` so a single
+/// slow package can't blow the whole install's budget.
+const HTTP_ATTEMPT_TIMEOUT: StdDuration = StdDuration::from_secs(5);
+const HTTP_MAX_RETRIES: u32 = 1;
+const HTTP_RETRY_BACKOFF: StdDuration = StdDuration::from_millis(250);
+
+/// Lightweight tag for classifying an HTTP failure. Separated from
+/// `ureq::Error` so the policy can be unit-tested without constructing a
+/// real `ureq::Response`/`ureq::Transport`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpErrTag {
+    Status(u16),
+    Transport,
+}
+
+/// Should we retry after a failure of shape `tag`? Yes for transport-level
+/// failures (DNS hiccup, connection reset, read timeout) and 5xx responses
+/// (registry unhealthy, transient overload). No for 4xx — those signal a
+/// terminal problem with the request (package missing, auth, rate-limit)
+/// where an immediate retry just adds load and won't change the outcome.
+fn is_retryable_http_err_tag(tag: HttpErrTag) -> bool {
+    match tag {
+        HttpErrTag::Status(code) => (500..600).contains(&code),
+        HttpErrTag::Transport => true,
     }
-    let resp = req
-        .call()
-        .map_err(|e| format!("HTTP {}: {}", url, e))?;
-    let buf = read_body(resp)?;
-    serde_json::from_slice(&buf).map_err(|e| e.to_string())
+}
+
+fn is_retryable_http_err(e: &ureq::Error) -> bool {
+    let tag = match e {
+        ureq::Error::Status(code, _) => HttpErrTag::Status(*code),
+        ureq::Error::Transport(_) => HttpErrTag::Transport,
+    };
+    is_retryable_http_err_tag(tag)
+}
+
+fn http_get_json(url: &str) -> Result<Value, String> {
+    let mut last_err: Option<String> = None;
+    for attempt in 0..=HTTP_MAX_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(HTTP_RETRY_BACKOFF);
+        }
+        let mut req = ureq::get(url)
+            .set("User-Agent", "contextcrawler-supply-chain-gate/0.1")
+            .timeout(HTTP_ATTEMPT_TIMEOUT);
+        // Request npm's abbreviated metadata where applicable — ~100x smaller.
+        // PyPI ignores the header, so it is safe to send unconditionally for npm
+        // hosts only.
+        if url.starts_with("https://registry.npmjs.org/") {
+            req = req.set("Accept", NPM_ABBREVIATED_ACCEPT);
+        }
+        match req.call() {
+            Ok(resp) => {
+                let buf = read_body(resp)?;
+                return serde_json::from_slice(&buf).map_err(|e| e.to_string());
+            }
+            Err(e) => {
+                let retryable = is_retryable_http_err(&e);
+                last_err = Some(format!("HTTP {}: {}", url, e));
+                if !retryable {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| format!("HTTP {}: no attempts", url)))
 }
 
 fn http_post_json(url: &str, body: &Value) -> Result<Value, String> {
-    let resp = ureq::post(url)
-        .set("User-Agent", "contextcrawler-supply-chain-gate/0.1")
-        .set("Content-Type", "application/json")
-        .timeout(StdDuration::from_secs(8))
-        .send_string(&body.to_string())
-        .map_err(|e| format!("HTTP {}: {}", url, e))?;
-    let buf = read_body(resp)?;
-    serde_json::from_slice(&buf).map_err(|e| e.to_string())
+    let payload = body.to_string();
+    let mut last_err: Option<String> = None;
+    for attempt in 0..=HTTP_MAX_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(HTTP_RETRY_BACKOFF);
+        }
+        let resp = ureq::post(url)
+            .set("User-Agent", "contextcrawler-supply-chain-gate/0.1")
+            .set("Content-Type", "application/json")
+            .timeout(HTTP_ATTEMPT_TIMEOUT)
+            .send_string(&payload);
+        match resp {
+            Ok(r) => {
+                let buf = read_body(r)?;
+                return serde_json::from_slice(&buf).map_err(|e| e.to_string());
+            }
+            Err(e) => {
+                let retryable = is_retryable_http_err(&e);
+                last_err = Some(format!("HTTP {}: {}", url, e));
+                if !retryable {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| format!("HTTP {}: no attempts", url)))
 }
 
 /// Resolve (version, publish_time) for the package. If `pinned` is Some, use
@@ -3905,5 +3975,68 @@ mod tests {
             "CONTEXTCRAWLER_SUPPLY_CHAIN",
             &["off"],
         ));
+    }
+
+    #[test]
+    fn http_err_5xx_is_retryable() {
+        for code in [500u16, 502, 503, 504, 599] {
+            assert!(
+                is_retryable_http_err_tag(HttpErrTag::Status(code)),
+                "5xx must be retryable: {}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn http_err_4xx_is_not_retryable() {
+        // 404 = package doesn't exist; 401/403 = auth; 429 = rate-limit
+        // (we don't retry that here — would just add load against the same
+        // limiter; a separate cooldown could be future work).
+        for code in [400u16, 401, 403, 404, 422, 429] {
+            assert!(
+                !is_retryable_http_err_tag(HttpErrTag::Status(code)),
+                "4xx must NOT be retryable: {}",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn http_err_2xx_and_3xx_are_not_retryable() {
+        // Defensive: a 2xx/3xx shouldn't ever reach the classifier
+        // (ureq returns Ok for those), but if it did, treat as terminal —
+        // we don't want a bug to spin retries on a successful response.
+        for code in [200u16, 201, 204, 301, 302, 304] {
+            assert!(!is_retryable_http_err_tag(HttpErrTag::Status(code)));
+        }
+    }
+
+    #[test]
+    fn http_err_transport_is_retryable() {
+        // DNS hiccups, TCP resets, read timeouts — the cases the user's
+        // 5-unavailables-in-a-day issue traced back to.
+        assert!(is_retryable_http_err_tag(HttpErrTag::Transport));
+    }
+
+    #[test]
+    fn http_retry_constants_within_budget() {
+        // Per-attempt timeout × (1 + max_retries) + backoff × max_retries
+        // must comfortably fit inside CHECK_WALL_BUDGET so a single slow
+        // call cannot push the whole install past the deadline.
+        let worst_call = HTTP_ATTEMPT_TIMEOUT
+            .saturating_mul(1 + HTTP_MAX_RETRIES)
+            .saturating_add(HTTP_RETRY_BACKOFF.saturating_mul(HTTP_MAX_RETRIES));
+        assert!(
+            worst_call < CHECK_WALL_BUDGET,
+            "worst-case per-call ({:?}) must be less than CHECK_WALL_BUDGET ({:?})",
+            worst_call,
+            CHECK_WALL_BUDGET
+        );
+        // And the budget can still service at least two slow packages.
+        assert!(
+            worst_call * 2 < CHECK_WALL_BUDGET.saturating_add(StdDuration::from_secs(5)),
+            "budget must still cover ≥2 retried calls in one check"
+        );
     }
 }
