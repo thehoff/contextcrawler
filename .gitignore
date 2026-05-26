@@ -56,6 +56,11 @@ local/
 .agy-intent-diff.patch
 # Stray playwright-mcp dependency lockfile (not used by this Rust crate)
 package-lock.json
+# Playwright MCP browser-session captures
+.playwright-mcp/
+# Python bytecode (hermes hooks)
+__pycache__/
+*.pyc
 # .github: ignore everything except shipped workflows
 .github/*
 !.github/workflows/
