@@ -4,6 +4,8 @@
 //! this crate for deterministic output summarization/filtering without spawning
 //! the CLI and reparsing stdout.
 
+mod discover;
+mod hooks;
 pub mod core;
 
 pub use core::output_summary::{summarize_command_output, CommandOutputSummaryOptions};
