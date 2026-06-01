@@ -34,7 +34,6 @@ Agent runs "cargo test"
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
-| OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
@@ -84,14 +83,6 @@ rtk init --global --opencode
 ```
 
 Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
-
-### OpenClaw
-
-```bash
-openclaw plugins install ./openclaw
-```
-
-Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates to `rtk rewrite`.
 
 ### Hermes
 
