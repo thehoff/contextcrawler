@@ -1880,9 +1880,7 @@ enum GrepPreprocess {
 /// basic-regex). Reordering+forwarding either to rg yields silent help text
 /// or an "unrecognized flag" exit 2. Both route to passthrough instead, where
 /// the system-grep fallback handles them correctly — same as `-H`.
-const GREP_BOOL_SHORTS: &[u8] = &[
-    b'i', b'w', b'x', b'v', b'n', b's', b'F', b'P', b'a', b'I',
-];
+const GREP_BOOL_SHORTS: &[u8] = &[b'i', b'w', b'x', b'v', b'n', b's', b'F', b'P', b'a', b'I'];
 
 /// Long-form boolean grep flags forwarded to rg with output still filtered.
 const GREP_BOOL_LONGS: &[&str] = &[
@@ -2066,7 +2064,10 @@ fn has_grep_context_flag(args: &[String]) -> bool {
 
     for arg in args {
         // Long forms — match exact and `--flag=value`.
-        if LONG_FLAGS.iter().any(|f| arg == f || arg.strip_prefix(f).is_some_and(|s| s.starts_with('='))) {
+        if LONG_FLAGS
+            .iter()
+            .any(|f| arg == f || arg.strip_prefix(f).is_some_and(|s| s.starts_with('=')))
+        {
             return true;
         }
         if arg.starts_with("--") || !arg.starts_with('-') || arg.len() < 2 {
@@ -2699,10 +2700,7 @@ mod grep_preprocess_tests {
         // `-v` as the global verbosity flag, but on the grep path it is a
         // recognised grep bool flag and reorders into extra_args.
         let out = preprocess_grep_args(v(&["-v", "needle", "file"]));
-        assert_eq!(
-            out,
-            GrepPreprocess::Stripped(v(&["needle", "file", "-v"]))
-        );
+        assert_eq!(out, GrepPreprocess::Stripped(v(&["needle", "file", "-v"])));
     }
 
     // Helper-level coverage for the classifiers.
@@ -2987,10 +2985,7 @@ fn run_cli() -> Result<i32> {
                     let mut full = Vec::with_capacity(stripped.len() + 1);
                     full.push("grep".to_string());
                     full.extend(stripped);
-                    return run_grep_passthrough_labelled(
-                        &full,
-                        "quiet passthrough",
-                    );
+                    return run_grep_passthrough_labelled(&full, "quiet passthrough");
                 }
                 GrepPreprocess::Passthrough(stripped) => {
                     // Context-flag passthrough: rtk-backed grep can't honour
@@ -4069,6 +4064,36 @@ fn run_cli() -> Result<i32> {
                 );
             }
 
+            // SECURITY (council P0-2 / task #2): the proxy path must pass the
+            // same defence-in-depth gates (Tirith + supply-chain) as the hook
+            // path. Without this, `contextcrawler proxy <cmd>` was a complete
+            // gate bypass — a hook-rewritten command got gated while the
+            // documented "raw" escape hatch did not. Both gates are opt-in,
+            // so with Tirith absent and supply-chain disabled this is a no-op
+            // and proxy behaviour is unchanged.
+            {
+                let gate_cmd = if cmd_args_display.is_empty() {
+                    cmd_name_display.clone()
+                } else {
+                    format!("{} {}", cmd_name_display, cmd_args_display.join(" "))
+                };
+                let decision = hooks::hook_cmd::run_gates(&gate_cmd);
+                let ack = std::env::var("CONTEXTCRAWLER_PROXY_ACK").as_deref() == Ok("1");
+                match hooks::hook_cmd::proxy_gate_outcome(decision, ack) {
+                    hooks::hook_cmd::ProxyGateOutcome::Run => {}
+                    hooks::hook_cmd::ProxyGateOutcome::Refuse { reason, exit_code } => {
+                        eprintln!("{}", reason);
+                        timer.track(
+                            &format!("proxy {} (gate refused)", cmd_name_display),
+                            &format!("contextcrawler proxy {}", cmd_name_display),
+                            "",
+                            "",
+                        );
+                        std::process::exit(exit_code);
+                    }
+                }
+            }
+
             // Nudge: if the proxied tool has a wrapped equivalent, point the
             // caller at it. The wrap exists for a reason (token-savings filter
             // + env-strip + arg deny-list), and `proxy <wrapped-tool>` is
@@ -4271,7 +4296,12 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Security { all, json, scrub_logs, dry_run } => {
+        Commands::Security {
+            all,
+            json,
+            scrub_logs,
+            dry_run,
+        } => {
             if scrub_logs {
                 hooks::tirith_gate::run_scrub_logs(dry_run)?
             } else {
