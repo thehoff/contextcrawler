@@ -1,9 +1,9 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
+use crate::core::runner;
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
-use crate::core::runner;
 use crate::core::tracking;
 use crate::core::utils::{
     check_forbidden_git_args, exit_code_from_output, exit_code_from_status, secure_git_command,
@@ -201,6 +201,51 @@ where
     out
 }
 
+/// Flags whose output is consumed programmatically — scripts, pipelines,
+/// `git apply`, `patch`, CI checks. Any of these → raw passthrough: no
+/// compaction, no injected headers, no prepended `--stat` run, faithful
+/// byte-for-byte output and exit code.
+///
+/// Task #10 / upstream #1918 (PR #1981 pattern): the compact format breaks
+/// every programmatic consumer, and injected "--- Changes ---" headers
+/// corrupt shell pipelines parsing the output.
+fn is_passthrough_diff(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--stat"
+                | "--numstat"
+                | "--shortstat"
+                | "--name-only"
+                | "--name-status"
+                | "--raw"
+                | "-z"
+                | "--check"
+                | "--exit-code"
+                | "--quiet"
+                | "--patch"
+                | "-p"
+                | "--summary"
+                | "--no-compact"
+                | "--binary"
+                | "--full-index"
+                | "--patch-with-raw"
+                | "--patch-with-stat"
+        ) || arg.starts_with("-U")
+            || arg.starts_with("--unified")
+            || arg.starts_with("--output")
+            || arg.starts_with("--diff-filter")
+            || arg.starts_with("--word-diff")
+    })
+}
+
+/// git-diff exit semantics: 0 = no differences, 1 = differences found (only
+/// emitted with `--exit-code`/`--quiet`), >1 = real error. Exit 1 is a
+/// *result*, not a failure — treating it as failure drops the diff output.
+fn diff_exit_is_error(exit_code: i32) -> bool {
+    exit_code > 1
+}
+
 fn run_diff(
     args: &[String],
     max_lines: Option<usize>,
@@ -212,16 +257,8 @@ fn run_diff(
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
     let args = &normalize_diff_args(args);
 
-    // Check if user wants stat output
-    let wants_stat = args
-        .iter()
-        .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
-
-    // Check if user wants compact diff (default RTK behavior)
-    let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
-
-    if wants_stat || !wants_compact {
-        // User wants stat or explicitly no compacting - pass through directly
+    if is_passthrough_diff(args) {
+        // Programmatic consumer: faithful passthrough of output AND exit code.
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
         for arg in args {
@@ -233,12 +270,15 @@ fn run_diff(
 
         let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
 
-        if !result.success() {
-            eprintln!("{}", result.stderr);
-            return Ok(result.exit_code);
+        // Print stdout byte-faithfully (no trim — diffs are whitespace-
+        // sensitive) and even when exit != 0: `--exit-code` exits 1 *with*
+        // diff output when differences exist.
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
         }
-
-        println!("{}", result.stdout.trim());
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
@@ -247,7 +287,7 @@ fn run_diff(
             &result.stdout,
         );
 
-        return Ok(0);
+        return Ok(result.exit_code);
     }
 
     // Default RTK behavior: stat first, then compacted diff
@@ -260,7 +300,7 @@ fn run_diff(
 
     let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
 
-    if !result.success() {
+    if diff_exit_is_error(result.exit_code) {
         if !result.stderr.trim().is_empty() {
             eprint!("{}", result.stderr);
         }
@@ -354,9 +394,7 @@ fn run_show(
                     use crate::core::config;
                     use crate::core::filter::{FilterLevel, Language};
                     use std::path::Path as StdPath;
-                    let ext = StdPath::new(path)
-                        .extension()
-                        .and_then(|e| e.to_str());
+                    let ext = StdPath::new(path).extension().and_then(|e| e.to_str());
                     let lang = ext
                         .map(Language::from_extension)
                         .unwrap_or(Language::Unknown);
@@ -1241,7 +1279,12 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         println!("{}", compact);
 
-        timer.track(&original_cmd, "contextcrawler git commit", &raw_output, &compact);
+        timer.track(
+            &original_cmd,
+            "contextcrawler git commit",
+            &raw_output,
+            &compact,
+        );
     } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
         println!("ok (nothing to commit)");
         timer.track(
@@ -1257,7 +1300,12 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         if !stdout.trim().is_empty() {
             eprint!("{}", stdout);
         }
-        timer.track(&original_cmd, "contextcrawler git commit", &raw_output, &raw_output);
+        timer.track(
+            &original_cmd,
+            "contextcrawler git commit",
+            &raw_output,
+            &raw_output,
+        );
         return Ok(exit_code);
     }
 
@@ -1678,7 +1726,11 @@ fn filter_branch_output_with_mode(output: &str, remote_only_mode: bool) -> Strin
             .filter(|r| *r != &current && !local.contains(r))
             .collect();
         if !remote_only.is_empty() {
-            let label = if remote_only_mode { "remote" } else { "remote-only" };
+            let label = if remote_only_mode {
+                "remote"
+            } else {
+                "remote-only"
+            };
             result.push(format!("  {} ({}):", label, remote_only.len()));
             for b in remote_only.iter().take(10) {
                 result.push(format!("    {}", b));
@@ -1789,7 +1841,12 @@ fn run_stash(
             if result.stdout.trim().is_empty() {
                 let msg = "No stashes";
                 println!("{}", msg);
-                timer.track("git stash list", "contextcrawler git stash list", &result.stdout, msg);
+                timer.track(
+                    "git stash list",
+                    "contextcrawler git stash list",
+                    &result.stdout,
+                    msg,
+                );
                 return Ok(0);
             }
 
@@ -2184,8 +2241,14 @@ mod tests {
         assert!(uses_compact_status_path(&["-b".to_string()]));
         assert!(uses_compact_status_path(&["--branch".to_string()]));
         assert!(uses_compact_status_path(&["-sb".to_string()]));
-        assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
-        assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
+        assert!(uses_compact_status_path(&[
+            "-s".to_string(),
+            "-b".to_string()
+        ]));
+        assert!(uses_compact_status_path(&[
+            "--short".to_string(),
+            "--branch".to_string()
+        ]));
         assert!(!uses_compact_status_path(&["-s".to_string()]));
         assert!(!uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
@@ -2351,6 +2414,98 @@ mod tests {
         assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
     }
 
+    // -----------------------------------------------------------------
+    // Task #10 / upstream #1918: git diff must preserve the POSIX/git
+    // contract for programmatic consumers (PR #1981 pattern).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_passthrough_diff_machine_flags() {
+        // Machine-readable output flags must trigger raw passthrough — no
+        // compaction, no injected "--- Changes ---" header, no prepended
+        // --stat run that pollutes the output.
+        for flag in &[
+            "--stat",
+            "--numstat",
+            "--shortstat",
+            "--name-only",
+            "--name-status",
+            "--raw",
+            "-z",
+            "--check",
+            "--exit-code",
+            "--quiet",
+            "--patch",
+            "-p",
+            "--summary",
+            "--no-compact",
+            "--binary",
+            "--full-index",
+        ] {
+            assert!(
+                is_passthrough_diff(&[flag.to_string()]),
+                "{} must trigger raw passthrough",
+                flag
+            );
+        }
+    }
+
+    #[test]
+    fn test_passthrough_diff_prefix_flags() {
+        for flag in &[
+            "-U5",
+            "--unified=3",
+            "--output=/tmp/x.diff",
+            "--diff-filter=AM",
+            "--word-diff=color",
+        ] {
+            assert!(
+                is_passthrough_diff(&[flag.to_string()]),
+                "{} must trigger raw passthrough",
+                flag
+            );
+        }
+    }
+
+    #[test]
+    fn test_passthrough_diff_flag_anywhere_in_args() {
+        // The trigger flag can appear after revisions/paths.
+        let args = vec![
+            "HEAD~3".to_string(),
+            "--".to_string(),
+            "src/".to_string(),
+            "--name-only".to_string(),
+        ];
+        assert!(is_passthrough_diff(&args));
+    }
+
+    #[test]
+    fn test_plain_diff_stays_compact() {
+        // No machine flags → compact agent-facing format (the token-saving
+        // product behaviour). Revisions and --cached don't change that.
+        assert!(!is_passthrough_diff(&[]));
+        assert!(!is_passthrough_diff(&["HEAD~1".to_string()]));
+        assert!(!is_passthrough_diff(&["--cached".to_string()]));
+        assert!(!is_passthrough_diff(&["main...feature".to_string()]));
+        assert!(!is_passthrough_diff(&[
+            "--".to_string(),
+            "src/main.rs".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_diff_exit_code_semantics() {
+        // git diff exit codes: 0 = no differences, 1 = differences found
+        // (with --exit-code/--quiet), >1 = real error. Exit 1 must never be
+        // treated as a command failure (it previously caused stdout — the
+        // actual diff — to be dropped).
+        assert!(!diff_exit_is_error(0));
+        assert!(!diff_exit_is_error(1));
+        assert!(diff_exit_is_error(2));
+        assert!(diff_exit_is_error(128));
+        assert!(diff_exit_is_error(129));
+    }
+
     /// Dotfile that exists on disk → inject `--`.
     #[test]
     fn test_normalize_diff_args_dotfile_is_path() {
@@ -2487,7 +2642,10 @@ mod tests {
         // Empty path after colon — should still parse but treated as "no path".
         let empty_path = "abc123:";
         let (_, p) = empty_path.split_once(':').unwrap();
-        assert!(p.is_empty(), "empty path tail must be detectable so we fall back to passthrough");
+        assert!(
+            p.is_empty(),
+            "empty path tail must be detectable so we fall back to passthrough"
+        );
     }
 
     #[test]
@@ -2496,8 +2654,7 @@ mod tests {
         // --no-merges, so `git log --oneline -5` returned 5 *different*
         // commits (the merge-free tail) — a correctness bug AND a savings
         // regression (un-merge subjects ran longer than the merges).
-        let with_explicit_limit: Vec<String> =
-            vec!["--oneline".into(), "-5".into()];
+        let with_explicit_limit: Vec<String> = vec!["--oneline".into(), "-5".into()];
         assert!(
             !should_inject_no_merges(&with_explicit_limit, true),
             "user-set limit must NOT trigger --no-merges injection"
@@ -2525,7 +2682,8 @@ mod tests {
         // through to the `local` bucket and 24h-DB showed 0% savings.
         // Now filter_branch_output_with_mode(_, true) routes them to the
         // remote bucket and suppresses the empty `* ` header.
-        let output = "  origin/HEAD -> origin/main\n  origin/main\n  origin/develop\n  origin/feature-x\n";
+        let output =
+            "  origin/HEAD -> origin/main\n  origin/main\n  origin/develop\n  origin/feature-x\n";
         let result = filter_branch_output_with_mode(output, true);
 
         // No leading `* ` line (current is meaningless in -r mode).
@@ -2541,10 +2699,18 @@ mod tests {
             result
         );
         // Real branches present, summarised as `remote (<n>):`
-        assert!(result.contains("remote ("), "remote summary missing: {}", result);
+        assert!(
+            result.contains("remote ("),
+            "remote summary missing: {}",
+            result
+        );
         assert!(result.contains("main"), "main missing: {}", result);
         assert!(result.contains("develop"), "develop missing: {}", result);
-        assert!(result.contains("feature-x"), "feature-x missing: {}", result);
+        assert!(
+            result.contains("feature-x"),
+            "feature-x missing: {}",
+            result
+        );
     }
 
     #[test]
@@ -2553,7 +2719,8 @@ mod tests {
         // prefix, so `origin/feature/x` and `upstream/feature/x` collapsed
         // into one entry. In -r mode this silently hides a branch from a
         // second remote. Pin that both are now preserved.
-        let output = "  origin/main\n  origin/feature/topic\n  upstream/main\n  upstream/feature/topic\n";
+        let output =
+            "  origin/main\n  origin/feature/topic\n  upstream/main\n  upstream/feature/topic\n";
         let result = filter_branch_output_with_mode(output, true);
         // Both `feature/topic` entries must survive. They display as the
         // post-first-slash portion, so both lines render as `feature/topic`
@@ -2596,11 +2763,17 @@ mod tests {
         // (or --color=never). Pre-PR review caught this; check via the
         // detection used in `run_branch`.
         let args1: Vec<String> = vec!["-r".into(), "--no-color".into()];
-        assert!(args1.iter().any(|a| a == "--no-color" || a == "--color=never"));
+        assert!(args1
+            .iter()
+            .any(|a| a == "--no-color" || a == "--color=never"));
         let args2: Vec<String> = vec!["-a".into(), "--color=never".into()];
-        assert!(args2.iter().any(|a| a == "--no-color" || a == "--color=never"));
+        assert!(args2
+            .iter()
+            .any(|a| a == "--no-color" || a == "--color=never"));
         let args3: Vec<String> = vec!["-r".into()];
-        assert!(!args3.iter().any(|a| a == "--no-color" || a == "--color=never"));
+        assert!(!args3
+            .iter()
+            .any(|a| a == "--no-color" || a == "--color=never"));
     }
 
     #[test]
@@ -2700,7 +2873,8 @@ mod tests {
         // format_status_output turns that into "* HEAD (no branch)". The plain
         // status carries the real SHA, which must survive into the output.
         let porcelain = "## HEAD (no branch)\n M src/main.rs\n";
-        let raw = "HEAD detached at 1a2b3c4\nChanges not staged for commit:\n\tmodified:   src/main.rs\n";
+        let raw =
+            "HEAD detached at 1a2b3c4\nChanges not staged for commit:\n\tmodified:   src/main.rs\n";
         let mut formatted = format_status_output(porcelain);
         if let Some(detached) = extract_detached_head(raw) {
             formatted = formatted.replacen("* HEAD (no branch)", &format!("* {detached}"), 1);
@@ -2879,8 +3053,7 @@ A  added.rs
         // And token count too — that's what tracking actually measures.
         let baseline_tokens = full_stat.split_whitespace().count();
         let compact_tokens = compact.split_whitespace().count();
-        let savings =
-            100.0 - (compact_tokens as f64 / baseline_tokens as f64 * 100.0);
+        let savings = 100.0 - (compact_tokens as f64 / baseline_tokens as f64 * 100.0);
         assert!(
             savings > 0.0,
             "expected positive savings, got {:.1}% (baseline={} tokens, compact={} tokens)",
