@@ -304,6 +304,33 @@ fn for_each_line<R: Read>(reader: R, mut f: impl FnMut(String)) {
     }
 }
 
+/// Drive a `StdinFilter` from an arbitrary `Read` source, writing filtered
+/// lines to `writer`.
+///
+/// Extracted from the `StdinMode::Filter` spawned thread so the lossy
+/// byte-read path can be unit-tested without touching real `io::stdin()`.
+/// The caller (spawned thread) passes `io::stdin().lock()` as `reader`.
+///
+/// Uses `for_each_line` (byte-read + `from_utf8_lossy`) rather than
+/// `BufRead::lines()` so invalid UTF-8 bytes are replaced with U+FFFD
+/// instead of silently truncating the rest of the stream (council P1-3).
+///
+/// Write errors (child stdin closed because the child exited) are ignored
+/// per-line: the remaining input is drained to EOF rather than aborting,
+/// which keeps the semantics simple at the cost of reading stdin a little
+/// longer than strictly necessary after an early child exit.
+fn run_stdin_filter<R: Read, W: Write>(reader: R, writer: &mut W, filter: &mut dyn StdinFilter) {
+    for_each_line(reader, |line| {
+        if let Some(out) = filter.feed_line(&line) {
+            let _ = writeln!(writer, "{}", out);
+        }
+    });
+    let tail = filter.flush();
+    if !tail.is_empty() {
+        let _ = write!(writer, "{}", tail);
+    }
+}
+
 pub fn run_streaming(
     cmd: &mut Command,
     stdin_mode: StdinMode,
@@ -376,20 +403,7 @@ fn run_streaming_with_sink(
             Some(std::thread::spawn(move || {
                 let mut writer = BufWriter::new(child_stdin);
                 let stdin_handle = io::stdin();
-                for line in BufReader::new(stdin_handle.lock())
-                    .lines()
-                    .map_while(Result::ok)
-                {
-                    if let Some(out) = filter.feed_line(&line) {
-                        if writeln!(writer, "{}", out).is_err() {
-                            break;
-                        }
-                    }
-                }
-                let tail = filter.flush();
-                if !tail.is_empty() {
-                    write!(writer, "{}", tail).ok();
-                }
+                run_stdin_filter(stdin_handle.lock(), &mut writer, filter.as_mut());
             }))
         }
         StdinMode::Null => {
@@ -741,7 +755,10 @@ fn run_streaming_with_sink(
         }
 
         raw_stderr = stderr_thread.join().unwrap_or_else(|e| {
-            eprintln!("[contextcrawler] warning: stderr reader thread panicked: {:?}", e);
+            eprintln!(
+                "[contextcrawler] warning: stderr reader thread panicked: {:?}",
+                e
+            );
             String::new()
         });
     }
@@ -847,10 +864,7 @@ impl Default for CaptureLimits {
 /// Caps fire silently: the returned `CaptureResult` contains the
 /// truncated prefix and the child runs to completion. A timeout, by
 /// contrast, returns `Err` — the caller decides fallback.
-pub fn exec_capture_with_limits(
-    cmd: &mut Command,
-    limits: CaptureLimits,
-) -> Result<CaptureResult> {
+pub fn exec_capture_with_limits(cmd: &mut Command, limits: CaptureLimits) -> Result<CaptureResult> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -876,18 +890,14 @@ pub fn exec_capture_with_limits(
                 let _ = child.wait();
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                anyhow::bail!(
-                    "command exceeded wall-clock budget of {:?}",
-                    deadline
-                );
+                anyhow::bail!("command exceeded wall-clock budget of {:?}", deadline);
             }
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                return Err(anyhow::Error::from(e)
-                    .context("wait_timeout on child process failed"));
+                return Err(anyhow::Error::from(e).context("wait_timeout on child process failed"));
             }
         },
         None => child.wait().context("Failed to wait on child")?,
@@ -1607,10 +1617,7 @@ pub(crate) mod tests {
         // We use `yes` piped through `head` to bound the child's own work too.
         // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
-        cmd.args([
-            "-c",
-            "yes ABCDEFGHIJKLMNOPQRSTUVWXYZ | head -c 524288",
-        ]);
+        cmd.args(["-c", "yes ABCDEFGHIJKLMNOPQRSTUVWXYZ | head -c 524288"]);
         let r = exec_capture_with_limits(
             &mut cmd,
             CaptureLimits {
@@ -1696,7 +1703,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(r.truncated_stdout, "cap fired, flag must be set");
-        assert!(!r.truncated_stderr, "stderr was empty, flag must stay false");
+        assert!(
+            !r.truncated_stderr,
+            "stderr was empty, flag must stay false"
+        );
     }
 
     #[test]
@@ -1906,7 +1916,9 @@ pub(crate) mod tests {
             "filtered accumulator exceeded FILTERED_CAP, flag must be set"
         );
         assert!(
-            result.filtered.contains("[contextcrawler: output truncated at"),
+            result
+                .filtered
+                .contains("[contextcrawler: output truncated at"),
             "filtered buffer must carry the visible truncation marker"
         );
         assert_eq!(result.exit_code, 0);
@@ -2228,7 +2240,9 @@ pub(crate) mod tests {
             &result.filtered[result.filtered.len().saturating_sub(300)..]
         );
         assert!(
-            result.filtered.contains("[contextcrawler: output truncated at"),
+            result
+                .filtered
+                .contains("[contextcrawler: output truncated at"),
             "truncation marker must also be visible when both conditions fire"
         );
     }
@@ -2249,5 +2263,51 @@ pub(crate) mod tests {
         assert_eq!(got[0], "before");
         assert_eq!(got[2], "after", "line after invalid byte must survive");
         assert!(got[1].contains('\u{FFFD}'), "invalid byte became U+FFFD");
+    }
+
+    /// Minimal passthrough StdinFilter for exercising run_stdin_filter.
+    struct PassthroughStdinFilter;
+
+    impl StdinFilter for PassthroughStdinFilter {
+        fn feed_line(&mut self, line: &str) -> Option<String> {
+            Some(line.to_string())
+        }
+        fn flush(&mut self) -> String {
+            String::new()
+        }
+    }
+
+    #[test]
+    fn test_stdin_filter_preserves_lines_after_invalid_utf8() {
+        // Council P1-3 (flagged by all three voices): the StdinMode::Filter
+        // path used BufRead::lines().map_while(Result::ok), silently dropping
+        // everything after the first invalid-UTF-8 byte. run_stdin_filter
+        // must use the lossy byte-read path so later lines still reach the
+        // child process.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(b"line1\n");
+        input.extend_from_slice(&[0xFF, 0xFE, b'b', b'a', b'd', b'\n']); // invalid UTF-8
+        input.extend_from_slice(b"line3\n");
+
+        let mut filter = PassthroughStdinFilter;
+        let mut out: Vec<u8> = Vec::new();
+        run_stdin_filter(io::Cursor::new(input), &mut out, &mut filter);
+
+        let written = String::from_utf8_lossy(&out);
+        assert!(
+            written.contains("line1"),
+            "first line must pass through: {}",
+            written
+        );
+        assert!(
+            written.contains("line3"),
+            "line after invalid UTF-8 must reach the child (got: {})",
+            written
+        );
+        assert!(
+            written.contains('\u{FFFD}'),
+            "invalid bytes become U+FFFD: {}",
+            written
+        );
     }
 }
