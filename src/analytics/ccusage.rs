@@ -77,6 +77,7 @@ struct MonthlyResponse {
 
 #[derive(Debug, Deserialize)]
 struct MonthlyEntry {
+    #[serde(alias = "period")]
     month: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
@@ -140,10 +141,7 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
     let since = (chrono::Utc::now() - chrono::Duration::days(90))
         .format("%Y%m%d")
         .to_string();
-    cmd.arg(subcommand)
-        .arg("--json")
-        .arg("--since")
-        .arg(&since);
+    cmd.arg(subcommand).arg("--json").arg("--since").arg(&since);
 
     let result = match exec_capture(&mut cmd) {
         Err(e) => {
@@ -305,6 +303,35 @@ mod tests {
         }"#;
         let result = parse_json(json, Granularity::Monthly);
         assert!(result.is_err()); // Missing required fields like totalTokens
+    }
+
+    #[test]
+    fn test_parse_monthly_period_key_ccusage_v19() {
+        // ccusage >= 19.0 emits "period" instead of "month" — must not crash
+        let json = r#"{
+            "monthly": [
+                {
+                    "period": "2026-01",
+                    "inputTokens": 2000,
+                    "outputTokens": 1000,
+                    "cacheCreationTokens": 200,
+                    "cacheReadTokens": 400,
+                    "totalTokens": 3600,
+                    "totalCost": 24.68
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Monthly);
+        assert!(
+            result.is_ok(),
+            "Should parse 'period' key from ccusage >= 19.0: {:?}",
+            result.err()
+        );
+        let periods = result.expect("parse succeeded");
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-01");
+        assert_eq!(periods[0].metrics.total_cost, 24.68);
     }
 
     #[test]
