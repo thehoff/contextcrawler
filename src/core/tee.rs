@@ -104,8 +104,14 @@ fn cleanup_old_files(dir: &std::path::Path, max_files: usize) {
         return;
     }
 
-    // Sort by filename (which starts with epoch timestamp = chronological)
-    entries.sort_by_key(|e| e.file_name());
+    // Sort chronologically by mtime (filename fallback). Filename sort alone
+    // misorders across the seconds→milliseconds prefix transition and is a
+    // weaker signal than the filesystem timestamp. cached_key: stat each
+    // entry exactly once, not per-comparison.
+    entries.sort_by_cached_key(|e| {
+        let mtime = e.metadata().and_then(|m| m.modified()).ok();
+        (mtime, e.file_name())
+    });
 
     let to_remove = entries.len() - max_files;
     for entry in entries.iter().take(to_remove) {
@@ -153,13 +159,22 @@ fn write_tee_file(
 ) -> Option<PathBuf> {
     std::fs::create_dir_all(tee_dir).ok()?;
 
+    // Redact secrets on the FULL raw buffer, before truncation. Truncating
+    // first (or pre-trimming with any margin) can cut a secret so the regex
+    // never sees a complete match, leaving its prefix on disk in plaintext —
+    // a partial private key is still a leak. The cost is a linear regex scan
+    // over the whole output; memory stays flat (Cow only allocates on match)
+    // and tee only fires on failure paths, so correctness wins over CPU here.
+    let raw = crate::core::secret_redact::redact(raw);
+
     let slug = sanitize_slug(command_slug);
-    let epoch = std::time::SystemTime::now()
+    // Millisecond resolution: parallel commands failing in the same second
+    // must not collide on the recovery filename. A pre-1970 system clock
+    // degrades to epoch 0 rather than disabling recovery.
+    let epoch_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    let filename = format!("{}_{}.log", epoch, slug);
-    let filepath = tee_dir.join(filename);
+        .unwrap_or_default()
+        .as_millis();
 
     // Truncate at max_file_size (find a safe UTF-8 char boundary)
     let content = if raw.len() > max_file_size {
@@ -175,13 +190,26 @@ fn write_tee_file(
             max_file_size
         )
     } else {
-        raw.to_string()
+        raw.into_owned()
     };
 
-    // Write with restricted permissions and a symlink-safe open. Raw command
-    // output may contain secrets, so the file is owner-only (0600) and we
-    // refuse to follow a symlink planted at the target path.
-    write_tee_content(&filepath, content.as_bytes())?;
+    // Write with restricted permissions, never following symlinks and never
+    // overwriting an existing recovery file. Retry with a counter suffix
+    // ONLY on a name collision (AlreadyExists — same slug, same millisecond,
+    // or a planted symlink occupying the path); any other I/O error (disk
+    // full, permissions) aborts rather than spraying partial files.
+    let mut filepath = tee_dir.join(format!("{}_{}.log", epoch_ms, slug));
+    let mut counter = 0u32;
+    loop {
+        match write_tee_content(&filepath, content.as_bytes()) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && counter < 100 => {
+                counter += 1;
+                filepath = tee_dir.join(format!("{}_{}_{}.log", epoch_ms, slug, counter));
+            }
+            Err(_) => return None,
+        }
+    }
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
@@ -189,27 +217,49 @@ fn write_tee_file(
     Some(filepath)
 }
 
-/// Create a tee file with owner-only permissions, refusing to follow symlinks.
+/// Create a tee file with owner-only permissions, refusing to follow symlinks
+/// and refusing to overwrite an existing file (`create_new` = `O_CREAT|O_EXCL`).
+/// Returns the raw I/O error so the caller can distinguish a name collision
+/// (`AlreadyExists` — retryable) from disk-full/permission failures (abort).
 #[cfg(unix)]
-fn write_tee_content(path: &std::path::Path, bytes: &[u8]) -> Option<()> {
+fn write_tee_content(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true)
-        .create(true)
-        .truncate(true)
+        // O_EXCL: fail if the path already exists — including when it exists
+        // as a symlink (even dangling), so a planted link is never followed.
+        .create_new(true)
         .mode(0o600)
-        // O_NOFOLLOW: if the final path component is a symlink, fail rather
-        // than write through it to an attacker-chosen target.
+        // O_NOFOLLOW: defence in depth alongside O_EXCL.
         .custom_flags(libc::O_NOFOLLOW);
-    let mut f = opts.open(path).ok()?;
-    f.write_all(bytes).ok()?;
-    Some(())
+    let mut f = opts.open(path)?;
+    // If the write itself fails (disk full mid-write), unlink the partial
+    // file so it neither blocks future retries nor masquerades as a
+    // complete recovery file. Content is already redacted at this point,
+    // so this is hygiene, not leak prevention.
+    f.write_all(bytes).inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
 }
 
+/// Non-Unix fallback: `create_new` gives the same no-overwrite + no-symlink
+/// guarantees portably (O_CREAT|O_EXCL semantics). There is no 0o600
+/// equivalent without platform-specific ACL crates (new deps are forbidden);
+/// the tee directory lives under the user-profile data dir (%LOCALAPPDATA%
+/// on Windows), which is owner-private by default ACL, so exposure is
+/// directory-scoped rather than world-readable.
 #[cfg(not(unix))]
-fn write_tee_content(path: &std::path::Path, bytes: &[u8]) -> Option<()> {
-    std::fs::write(path, bytes).ok()
+fn write_tee_content(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    // Unlink partial files on a failed write (see Unix variant).
+    f.write_all(bytes).inspect_err(|_| {
+        let _ = std::fs::remove_file(path);
+    })
 }
 
 /// Write raw output to tee file if conditions are met.
@@ -550,6 +600,152 @@ directory = "/tmp/rtk-tee"
 
         let mode: TeeMode = serde_json::from_str(r#""never""#).unwrap();
         assert_eq!(mode, TeeMode::Never);
+    }
+
+    // --- Council blocker (2026-06-02): tee files must never carry plaintext
+    //     secrets, must not silently overwrite, must not follow symlinks ---
+
+    #[test]
+    fn test_write_tee_file_redacts_credentials() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let content = format!(
+            "{}\nAuthorization: Bearer eyJsecrettoken123\nTEA_TOKEN=147dd871deadbeef\n{}",
+            "x".repeat(300),
+            "y".repeat(300)
+        );
+        let result = write_tee_file(
+            &content,
+            "curl_api",
+            tmpdir.path(),
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+        );
+        let path = result.expect("tee file written");
+        let written = fs::read_to_string(&path).expect("read tee file");
+        assert!(
+            !written.contains("eyJsecrettoken123"),
+            "bearer token leaked to disk: {}",
+            written
+        );
+        assert!(
+            !written.contains("147dd871deadbeef"),
+            "env-var token leaked to disk: {}",
+            written
+        );
+        assert!(written.contains("<REDACTED>"), "redaction marker missing");
+        // Diagnostic padding preserved.
+        assert!(written.contains(&"x".repeat(300)));
+    }
+
+    #[test]
+    fn test_write_tee_file_redacts_json_output_secrets() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let content = format!(
+            r#"{}{{"Name": "prod/db", "SecretString": "{{\"password\":\"hunter2\"}}"}}"#,
+            "pad ".repeat(200)
+        );
+        let result = write_tee_file(
+            &content,
+            "aws_secretsmanager",
+            tmpdir.path(),
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+        );
+        let path = result.expect("tee file written");
+        let written = fs::read_to_string(&path).expect("read tee file");
+        assert!(
+            !written.contains("hunter2"),
+            "secretsmanager payload leaked to disk: {}",
+            written
+        );
+    }
+
+    #[test]
+    fn test_write_tee_file_no_silent_overwrite() {
+        // Burst of writes with the same slug (parallel commands failing in the
+        // same instant) must yield distinct recovery files, never overwrite.
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let mut paths = Vec::new();
+        for i in 0..5 {
+            let content = format!("write number {} {}", i, "z".repeat(600));
+            let path = write_tee_file(
+                &content,
+                "same_slug",
+                tmpdir.path(),
+                DEFAULT_MAX_FILE_SIZE,
+                20,
+            )
+            .expect("tee write");
+            paths.push((i, path));
+        }
+        // All paths distinct
+        let unique: std::collections::HashSet<_> = paths.iter().map(|(_, p)| p.clone()).collect();
+        assert_eq!(
+            unique.len(),
+            5,
+            "tee writes overwrote each other: {:?}",
+            paths
+        );
+        // Each file still holds its own content
+        for (i, path) in &paths {
+            let written = fs::read_to_string(path).expect("read tee file");
+            assert!(
+                written.contains(&format!("write number {} ", i)),
+                "file {} content clobbered",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_tee_file_redacts_secret_straddling_truncation_boundary() {
+        // A secret that starts just before the truncation cut and extends past
+        // it must never land on disk, even partially. This is why redaction
+        // runs on the full buffer BEFORE truncation (council round-3 blocker).
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let max_size = 1000usize;
+        // 950 bytes of padding, then a long bearer token that crosses the
+        // 1000-byte boundary, then more output.
+        let secret_value = format!("eyJStraddle{}", "S".repeat(200));
+        let content = format!(
+            "{}\nAuthorization: Bearer {}\ntrailing diagnostic output {}",
+            "p".repeat(950),
+            secret_value,
+            "t".repeat(600)
+        );
+        let path =
+            write_tee_file(&content, "straddle", tmpdir.path(), max_size, 20).expect("tee write");
+        let written = fs::read_to_string(&path).expect("read tee file");
+        assert!(
+            !written.contains("eyJStraddle"),
+            "boundary-straddling secret prefix leaked to disk: {}",
+            written
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_tee_content_refuses_symlink() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let target = tmpdir.path().join("target.txt");
+        fs::write(&target, "original").expect("write target");
+        let link = tmpdir.path().join("link.log");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let result = write_tee_content(&link, b"attacker content");
+        assert!(result.is_err(), "must refuse to write through a symlink");
+        // A planted symlink reports AlreadyExists, so the caller's retry
+        // loop steps past it to a counter-suffixed name instead of aborting.
+        assert_eq!(
+            result.expect_err("symlink write must fail").kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "symlink occupation must be retryable"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("read target"),
+            "original",
+            "symlink target must be untouched"
+        );
     }
 
     #[test]

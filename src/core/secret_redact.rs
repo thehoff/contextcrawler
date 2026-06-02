@@ -95,6 +95,54 @@ lazy_static! {
             .unwrap(),
             "${flag}<REDACTED>",
         ),
+        // 6. JSON credential fields in command *output* (API responses, aws cli,
+        //    curl). `"password": "v"`, `"SecretString": "..."`, `"SessionToken": ...`.
+        //    Tee recovery files carry raw output, so output shapes matter as much
+        //    as command shapes. Conservative name list; the value may contain
+        //    escaped quotes (nested JSON, e.g. secretsmanager SecretString).
+        //    Prefix/suffix around the credential word must be separated by `_`/`-`
+        //    so benign fields ("tokenizer", "secretary") keep their values.
+        //    camelCase compounds (accessToken, refreshToken, idToken, apiKey…)
+        //    are listed explicitly since they have no separator to anchor on.
+        (
+            Regex::new(
+                r#"(?xi)
+                "(?P<name>
+                    (?: [a-z0-9_-]* [_-] )?
+                    (?: password | passwd | secret | token | api[_-]?key
+                      | secret[_-]?access[_-]?key | session[_-]?token | private[_-]?key
+                      | client[_-]?secret | secret[_-]?string | secret[_-]?binary
+                      | access[_-]?token | refresh[_-]?token | id[_-]?token
+                      | auth[_-]?token | bearer[_-]?token
+                      | credentials?
+                    )
+                    (?: [_-] [a-z0-9_-]* )?
+                )"
+                \s* : \s*
+                "(?P<val>(?:[^"\\]|\\.)*)"
+                "#
+            )
+            .unwrap(),
+            r#""${name}": "<REDACTED>""#,
+        ),
+        // 7. PEM private key blocks (openssl/ssh-keygen output, leaked key files
+        //    cat'd to stdout). Whole block is the secret. Mixed-case label chars
+        //    so vendor variants of the BEGIN/END header all match. Body is
+        //    non-greedy any-char: encrypted PEMs carry armor headers
+        //    (`Proc-Type:`, `DEK-Info:`) that a base64-only body would miss,
+        //    and non-greedy + a required END footer means a truncated block
+        //    simply doesn't match (no risk of swallowing trailing output).
+        //    Known limitation: a truncated block (BEGIN, no END) followed by a
+        //    complete block over-redacts the text between them — the regex
+        //    crate has no lookaround to refuse crossing a second BEGIN, and
+        //    over-redaction of malformed-key output is the safe direction.
+        (
+            Regex::new(
+                r"-----BEGIN [A-Za-z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Za-z0-9 ]*PRIVATE KEY-----"
+            )
+            .unwrap(),
+            "<REDACTED_PRIVATE_KEY>",
+        ),
     ];
 }
 
@@ -129,7 +177,11 @@ mod tests {
         let cmd = r#"curl -H "Authorization: token 147dd871c9edab5848377af412b6575bca133169" https://x/api"#;
         let out = redact(cmd);
         assert!(!out.contains("147dd871"), "token leaked: {}", out);
-        assert!(out.contains("Authorization: token <REDACTED>"), "header malformed: {}", out);
+        assert!(
+            out.contains("Authorization: token <REDACTED>"),
+            "header malformed: {}",
+            out
+        );
     }
 
     #[test]
@@ -259,5 +311,188 @@ mod tests {
         let cmd = "echo 'how token rotation works'";
         let out = redact(cmd);
         assert_eq!(out, cmd);
+    }
+
+    // --- Output-shaped secrets (tee recovery files carry command *output*,
+    //     not just command strings — JSON API responses, aws cli, curl) ---
+
+    #[test]
+    fn json_credential_fields_are_redacted() {
+        let output = r#"{"username": "admin", "password": "hunter2", "token": "tok_abc123"}"#;
+        let out = redact(output);
+        assert!(!out.contains("hunter2"), "leaked: {}", out);
+        assert!(!out.contains("tok_abc123"), "leaked: {}", out);
+        // Benign fields preserved for diagnostic value.
+        assert!(
+            out.contains(r#""username": "admin""#),
+            "benign field mangled: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn aws_secretsmanager_payload_is_redacted() {
+        // `aws secretsmanager get-secret-value` output: the SecretString value
+        // is itself escaped JSON carrying credentials.
+        let output = r#"{"ARN": "arn:aws:secretsmanager:ap-southeast-2:123:secret:x", "Name": "prod/db", "SecretString": "{\"user\":\"admin\",\"password\":\"hunter2\"}", "VersionId": "v1"}"#;
+        let out = redact(output);
+        assert!(!out.contains("hunter2"), "leaked: {}", out);
+        assert!(
+            out.contains(r#""Name": "prod/db""#),
+            "benign field mangled: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn aws_sts_credentials_are_redacted() {
+        // `aws sts assume-role` / `get-session-token` output shape.
+        let output = r#"{"AccessKeyId": "AKIAIOSFODNN7EXAMPLE", "SecretAccessKey": "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", "SessionToken": "FwoGZXIvYXdzEJrLongOpaqueBlob"}"#;
+        let out = redact(output);
+        assert!(
+            !out.contains("wJalrXUtnFEMI"),
+            "secret access key leaked: {}",
+            out
+        );
+        assert!(
+            !out.contains("FwoGZXIvYXdzEJr"),
+            "session token leaked: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn pem_private_key_block_is_redacted() {
+        let output = "connecting...\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7qqq\nzzz999\n-----END RSA PRIVATE KEY-----\ndone";
+        let out = redact(output);
+        assert!(
+            !out.contains("MIIEpAIBAAKCAQEA7qqq"),
+            "private key leaked: {}",
+            out
+        );
+        assert!(
+            out.contains("<REDACTED_PRIVATE_KEY>"),
+            "marker missing: {}",
+            out
+        );
+        // Surrounding diagnostic output preserved.
+        assert!(out.contains("connecting..."));
+        assert!(out.contains("done"));
+    }
+
+    #[test]
+    fn benign_fields_with_credential_substrings_unchanged() {
+        // Council review (codex+agy): substring matches must not over-redact.
+        let output =
+            r#"{"tokenizer": "bert-base", "secretary": "Jane Smith", "tokenization": "bpe"}"#;
+        let out = redact(output);
+        assert!(
+            out.contains(r#""tokenizer": "bert-base""#),
+            "over-redacted: {}",
+            out
+        );
+        assert!(
+            out.contains(r#""secretary": "Jane Smith""#),
+            "over-redacted: {}",
+            out
+        );
+        assert!(
+            out.contains(r#""tokenization": "bpe""#),
+            "over-redacted: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn kebab_case_json_credentials_are_redacted() {
+        // Council review (agy): kebab-case keys are common in OAuth/k8s output.
+        let output =
+            r#"{"client-secret": "s3cr3t", "session-token": "tok123", "client-id": "public-app"}"#;
+        let out = redact(output);
+        assert!(!out.contains("s3cr3t"), "leaked: {}", out);
+        assert!(!out.contains("tok123"), "leaked: {}", out);
+        // client-id is an identifier, not a secret.
+        assert!(
+            out.contains(r#""client-id": "public-app""#),
+            "over-redacted: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn camelcase_oauth_tokens_are_redacted() {
+        // Council review (codex): OAuth response shapes use camelCase keys.
+        let output = r#"{"accessToken": "ya29.a0AfB_secret", "refreshToken": "1//0gREFRESH", "idToken": "eyJhbGciOi", "expiresIn": 3599}"#;
+        let out = redact(output);
+        assert!(!out.contains("ya29.a0AfB_secret"), "leaked: {}", out);
+        assert!(!out.contains("1//0gREFRESH"), "leaked: {}", out);
+        assert!(!out.contains("eyJhbGciOi"), "leaked: {}", out);
+        // Non-credential field preserved.
+        assert!(
+            out.contains(r#""expiresIn": 3599"#),
+            "over-redacted: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn openssh_pem_block_is_redacted() {
+        // Council review (agy): cover ssh-keygen OpenSSH-format headers.
+        let output = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----";
+        let out = redact(output);
+        assert!(!out.contains("b3BlbnNzaC1rZXk"), "leaked: {}", out);
+        assert!(out.contains("<REDACTED_PRIVATE_KEY>"));
+    }
+
+    #[test]
+    fn encrypted_pem_with_armor_headers_is_redacted() {
+        // Council round-4: encrypted private keys carry Proc-Type/DEK-Info
+        // armor headers between BEGIN and the base64 body — must still match.
+        let output = "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,8E2F...\n\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----";
+        let out = redact(output);
+        assert!(
+            !out.contains("MIIEowIBAAKCAQEA"),
+            "encrypted key body leaked: {}",
+            out
+        );
+        assert!(!out.contains("DEK-Info"), "armor header leaked: {}", out);
+        assert!(out.contains("<REDACTED_PRIVATE_KEY>"));
+    }
+
+    #[test]
+    fn truncated_pem_block_does_not_swallow_output() {
+        // A BEGIN with no END (truncated output) must not match at all —
+        // non-greedy + required footer means no swallowing of trailing text.
+        let output = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n... output truncated, no footer ...\nnext command output here";
+        let out = redact(output);
+        assert!(
+            out.contains("next command output here"),
+            "trailing output swallowed: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn truncated_pem_before_complete_block_over_redacts_safely() {
+        // Known limitation (council round-5, rejected fix): the regex crate
+        // has no lookaround, so a truncated block followed by a complete one
+        // redacts everything between the first BEGIN and the final END.
+        // Over-redaction is the safe direction — assert no key material leaks
+        // and the redaction marker is present.
+        let output = "-----BEGIN RSA PRIVATE KEY-----\ntruncated-no-end\nsome text between\n-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIIs\n-----END EC PRIVATE KEY-----";
+        let out = redact(output);
+        assert!(!out.contains("MHcCAQEEIIs"), "key material leaked: {}", out);
+        assert!(out.contains("<REDACTED_PRIVATE_KEY>"));
+    }
+
+    #[test]
+    fn benign_json_output_unchanged() {
+        // Ordinary JSON command output must pass through untouched (zero-copy).
+        let output =
+            r#"{"name": "contextcrawler", "version": "0.1.10", "files": ["a.rs", "b.rs"]}"#;
+        match redact(output) {
+            Cow::Borrowed(s) => assert_eq!(s, output),
+            Cow::Owned(o) => panic!("benign JSON was modified: {}", o),
+        }
     }
 }
