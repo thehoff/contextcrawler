@@ -216,7 +216,10 @@ pub fn run_gemini() -> Result<()> {
             // Malformed JSON — fail closed. The Gemini hook is the allow/deny
             // authority; bubbling an Err here exits non-zero with no decision,
             // which the harness treats as ALLOW (#111 G2).
-            let _ = writeln!(io::stderr(), "[contextcrawler hook] Failed to parse JSON input: {e}");
+            let _ = writeln!(
+                io::stderr(),
+                "[contextcrawler hook] Failed to parse JSON input: {e}"
+            );
             emit_gemini_deny("contextcrawler: hook payload was not valid JSON; denying");
             return Ok(());
         }
@@ -387,7 +390,7 @@ enum PayloadAction {
 /// computes this from the two gate verdicts so the wiring can be tested
 /// without spawning subprocesses. G1 finding #2 (#100).
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum GateDecision {
+pub(crate) enum GateDecision {
     /// Both gates clean (or disabled / no install actions). Proceed unchanged.
     Proceed,
     /// A gate wants the user prompted: downgrade any auto-allow to Ask.
@@ -405,7 +408,7 @@ enum GateDecision {
 /// `supply_chain_gate::check` calls (which DO spawn / hit the network) happen
 /// in `process_claude_payload_with`; this function only classifies their
 /// results. Precedence: a supply-chain `Block` (Deny) outranks any Ask.
-fn gate_decision(
+pub(crate) fn gate_decision(
     tirith_verdict: &tirith_gate::Verdict,
     sc_verdict: &supply_chain_gate::Verdict,
 ) -> GateDecision {
@@ -443,6 +446,65 @@ fn gate_decision(
     GateDecision::Proceed
 }
 
+/// Run the live defence-in-depth gates (Tirith + supply-chain) against a
+/// command string and classify the result. This is THE production gate
+/// wiring — shared by the Claude hook path (`process_claude_payload_with`)
+/// and the `contextcrawler proxy` CLI path (council P0-2: proxy previously
+/// bypassed both gates entirely).
+///
+/// Side effects: supply-chain event logging + Tirith downgrade audit lines.
+pub(crate) fn run_gates(cmd: &str) -> GateDecision {
+    let tirith_verdict = tirith_gate::check(cmd);
+    let sc_verdict = supply_chain_gate::check(cmd);
+    supply_chain_gate::log_event(cmd, &sc_verdict);
+    let decision = gate_decision(&tirith_verdict, &sc_verdict);
+    // Emit the Tirith downgrade audit line when (and only when) the
+    // classification is an Ask driven by Tirith — the pure `gate_decision`
+    // does no I/O, so the logging stays here on the production path.
+    if matches!(decision, GateDecision::Ask) {
+        if let Some((reason, tirith_json)) = tirith_gate::should_downgrade(&tirith_verdict) {
+            tirith_gate::log_downgrade(cmd, reason, tirith_json);
+        }
+    }
+    decision
+}
+
+/// Action for the `contextcrawler proxy` CLI path. Unlike the hook path,
+/// proxy has no interactive ask protocol — a gate `Ask` maps to a refusal
+/// with instructions for an explicit human override, and a gate `Deny` is
+/// a refusal that no override can bypass.
+pub(crate) enum ProxyGateOutcome {
+    /// Gates clean (or acknowledged Ask): execute the proxied command.
+    Run,
+    /// Refuse to execute. `exit_code` 126 = "command cannot execute".
+    Refuse { reason: String, exit_code: i32 },
+}
+
+/// Map a `GateDecision` to a proxy-path outcome.
+///
+/// `ack` is the explicit human acknowledgement
+/// (`CONTEXTCRAWLER_PROXY_ACK=1`): it overrides an `Ask` (the human has
+/// reviewed the flagged command and chosen to proceed) but never a `Deny`
+/// (supply-chain hard block).
+pub(crate) fn proxy_gate_outcome(decision: GateDecision, ack: bool) -> ProxyGateOutcome {
+    match decision {
+        GateDecision::Proceed => ProxyGateOutcome::Run,
+        GateDecision::Ask if ack => ProxyGateOutcome::Run,
+        GateDecision::Ask => ProxyGateOutcome::Refuse {
+            reason: "contextcrawler: a defence-in-depth gate (Tirith / supply-chain) flagged \
+                     this proxied command for review.\n\
+                     To proceed after reviewing it, re-run with CONTEXTCRAWLER_PROXY_ACK=1, \
+                     or inspect the verdict with `tirith why`."
+                .to_string(),
+            exit_code: 126,
+        },
+        GateDecision::Deny { reason } => ProxyGateOutcome::Refuse {
+            reason,
+            exit_code: 126,
+        },
+    }
+}
+
 fn process_claude_payload(v: &Value) -> PayloadAction {
     process_claude_payload_with(v, permissions::check_command)
 }
@@ -468,24 +530,11 @@ fn process_claude_payload_with(
     check: impl Fn(&str) -> PermissionVerdict,
 ) -> PayloadAction {
     // Production: compute the gate decision from the live Tirith +
-    // supply-chain checks. Tests inject a deterministic `GateDecision` via
+    // supply-chain checks (shared `run_gates` wiring — also used by the
+    // proxy path). Tests inject a deterministic `GateDecision` via
     // `process_claude_payload_with_gate` so the no-rewrite Ask path (#111)
     // can be exercised without spawning the gate binaries.
-    process_claude_payload_with_gate(v, check, |cmd| {
-        let tirith_verdict = tirith_gate::check(cmd);
-        let sc_verdict = supply_chain_gate::check(cmd);
-        supply_chain_gate::log_event(cmd, &sc_verdict);
-        let decision = gate_decision(&tirith_verdict, &sc_verdict);
-        // Emit the Tirith downgrade audit line when (and only when) the
-        // classification is an Ask driven by Tirith — the pure `gate_decision`
-        // does no I/O, so the logging stays here on the production path.
-        if matches!(decision, GateDecision::Ask) {
-            if let Some((reason, tirith_json)) = tirith_gate::should_downgrade(&tirith_verdict) {
-                tirith_gate::log_downgrade(cmd, reason, tirith_json);
-            }
-        }
-        decision
-    })
+    process_claude_payload_with_gate(v, check, run_gates)
 }
 
 /// `process_claude_payload_with` with the gate decision injectable. The
@@ -529,8 +578,7 @@ fn process_claude_payload_with_gate(
         // unchecked, defeating the entire permission gate. Only the `Deny`
         // verdict changes here; `Ask`/`Allow`/`Ignore` are untouched.
         return PayloadAction::Deny {
-            reason: "contextcrawler: command blocked by permission deny rule; denying"
-                .to_string(),
+            reason: "contextcrawler: command blocked by permission deny rule; denying".to_string(),
             audit_tag: "deny:deny_rule",
             cmd: cmd.to_string(),
         };
@@ -685,7 +733,10 @@ pub fn run_claude() -> Result<()> {
         Ok(v) => v,
         Err(e) => {
             // Malformed JSON — fail closed.
-            let _ = writeln!(io::stderr(), "[contextcrawler hook] Failed to parse JSON input: {e}");
+            let _ = writeln!(
+                io::stderr(),
+                "[contextcrawler hook] Failed to parse JSON input: {e}"
+            );
             emit_claude_deny("contextcrawler: hook payload was not valid JSON; denying");
             return Ok(());
         }
@@ -1145,7 +1196,10 @@ mod tests {
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
         // permissionDecision is only set when an explicit allow rule matches;
         // with default-to-ask semantics (no rules configured), it is absent.
-        assert_eq!(hook["permissionDecisionReason"], "contextcrawler auto-rewrite");
+        assert_eq!(
+            hook["permissionDecisionReason"],
+            "contextcrawler auto-rewrite"
+        );
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
     }
@@ -1360,6 +1414,62 @@ mod tests {
         );
     }
 
+    // --- Proxy-path gate wiring (council P0-2 blocker, task #2) ---
+    // The proxy CLI path has no interactive ask protocol, so GateDecision
+    // maps to run/refuse with an explicit env-var acknowledgement override.
+
+    /// Clean gates → proxy runs the command.
+    #[test]
+    fn test_proxy_gate_proceed_runs() {
+        assert!(matches!(
+            proxy_gate_outcome(GateDecision::Proceed, false),
+            ProxyGateOutcome::Run
+        ));
+    }
+
+    /// A gate Ask with no acknowledgement → refuse with exit 126 and
+    /// instructions naming the override env var.
+    #[test]
+    fn test_proxy_gate_ask_refuses_without_ack() {
+        match proxy_gate_outcome(GateDecision::Ask, false) {
+            ProxyGateOutcome::Refuse { reason, exit_code } => {
+                assert_eq!(exit_code, 126);
+                assert!(
+                    reason.contains("CONTEXTCRAWLER_PROXY_ACK"),
+                    "refusal must name the override env var: {}",
+                    reason
+                );
+            }
+            ProxyGateOutcome::Run => panic!("Ask without ack must refuse"),
+        }
+    }
+
+    /// A gate Ask with the explicit human acknowledgement → runs.
+    #[test]
+    fn test_proxy_gate_ask_runs_with_explicit_ack() {
+        assert!(matches!(
+            proxy_gate_outcome(GateDecision::Ask, true),
+            ProxyGateOutcome::Run
+        ));
+    }
+
+    /// A hard Deny (supply-chain block) is never overridable by the ack env.
+    #[test]
+    fn test_proxy_gate_deny_refuses_even_with_ack() {
+        match proxy_gate_outcome(
+            GateDecision::Deny {
+                reason: "supply-chain block: malicious package".to_string(),
+            },
+            true,
+        ) {
+            ProxyGateOutcome::Refuse { reason, exit_code } => {
+                assert_eq!(exit_code, 126);
+                assert!(reason.contains("supply-chain block"));
+            }
+            ProxyGateOutcome::Run => panic!("Deny must refuse even with ack"),
+        }
+    }
+
     /// Tirith `Block` always downgrades to Ask (no opt-in needed for a
     /// positive flag).
     #[test]
@@ -1404,7 +1514,11 @@ mod tests {
             |_| GateDecision::Ask,
         );
         match action {
-            PayloadAction::Ask { audit_tag, cmd, reason } => {
+            PayloadAction::Ask {
+                audit_tag,
+                cmd,
+                reason,
+            } => {
                 assert_eq!(audit_tag, "ask:gate_no_rewrite");
                 assert_eq!(cmd, "htop");
                 assert!(reason.contains("defence-in-depth gate"));
@@ -1513,7 +1627,8 @@ mod tests {
             "contextcrawler git status"
         );
         assert!(
-            v.pointer("/hookSpecificOutput/permissionDecision").is_none()
+            v.pointer("/hookSpecificOutput/permissionDecision")
+                .is_none()
                 || v["hookSpecificOutput"]["permissionDecision"] != "deny",
             "disabled gates must never emit a deny"
         );
@@ -1652,7 +1767,12 @@ mod tests {
                 .open(&log_path)
                 .unwrap();
             let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-            writeln!(file, "{} | rewrite | git status | contextcrawler git status", ts).unwrap();
+            writeln!(
+                file,
+                "{} | rewrite | git status | contextcrawler git status",
+                ts
+            )
+            .unwrap();
         }
 
         let content = std::fs::read_to_string(&log_path).unwrap();
@@ -1719,8 +1839,8 @@ mod tests {
         // not an error exit (which the harness treats as ALLOW).
         for bad in ["{not json", "", "null}", "{\"tool_name\":}"] {
             let out = run_gemini_inner(bad);
-            let v: Value = serde_json::from_str(&out)
-                .expect("hook output must itself be valid JSON");
+            let v: Value =
+                serde_json::from_str(&out).expect("hook output must itself be valid JSON");
             assert_eq!(
                 v["decision"], "deny",
                 "malformed Gemini payload {bad:?} must fail closed with a deny"

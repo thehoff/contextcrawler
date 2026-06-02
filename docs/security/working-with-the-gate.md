@@ -134,6 +134,17 @@ rule rather than a host (for example `pipe_to_interpreter`), pin it with
 For something more durable, `tirith policy init` generates a per-repo
 `.tirith/policy.yaml`.
 
+## The proxy path is gated too
+
+`contextcrawler proxy <cmd>` bypasses output *filtering*, not the security
+gate. The same Tirith + supply-chain checks run before the proxied command
+executes. When a gate flags a proxied command, proxy refuses with exit 126:
+
+- A gate **ask** (Tirith flag, unvettable install) can be overridden after
+  review: re-run with `CONTEXTCRAWLER_PROXY_ACK=1`.
+- A gate **block** (supply-chain hard block) cannot be overridden by the
+  ack variable — restructure the command or use `tirith trust`.
+
 ## Turning the gate off
 
 A last resort, when restructuring and allowlisting are both impractical:
@@ -142,6 +153,7 @@ A last resort, when restructuring and allowlisting are both impractical:
 |---|---|
 | `CONTEXTCRAWLER_TIRITH_DISABLED=1` | Bypass the Tirith gate entirely. |
 | `CONTEXTCRAWLER_SUPPLY_CHAIN=off` | Bypass the supply-chain gate. |
+| `CONTEXTCRAWLER_PROXY_ACK=1` | Acknowledge a gate *ask* on one proxied command (does not bypass blocks). |
 
 These are scoped to the process environment they are set in. The
 contextcrawler hook re-reads them on every invocation, so a change takes
