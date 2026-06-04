@@ -2310,8 +2310,22 @@ fn matches_override(pkg: &str, patterns: &[String]) -> bool {
     false
 }
 
+/// Whether a verdict is worth persisting to the supply-chain event log.
+///
+/// `Verdict::Skip` means "gate disabled or no install command found" — it fires
+/// for *every* ordinary shell command (grep/git/ls/...), so logging it is pure
+/// noise that grows the log unbounded with zero analytic value (issue #190).
+/// Real gate decisions (`Allow`/`Block`/`Ask`/`Unavailable`) are always kept.
+pub(crate) fn should_log(verdict: &Verdict) -> bool {
+    !matches!(verdict, Verdict::Skip)
+}
+
 /// Append a gate event to the local log for `contextcrawler security --supply-chain-log`.
 pub fn log_event(cmd: &str, verdict: &Verdict) {
+    // Suppress the no-install `Skip` firehose (#190) before any I/O.
+    if !should_log(verdict) {
+        return;
+    }
     let Some(data_dir) = dirs::data_local_dir() else {
         return;
     };
@@ -2429,6 +2443,17 @@ mod tests {
 
     fn names(install: &ParsedInstall) -> Vec<&str> {
         install.packages.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    #[test]
+    fn should_log_suppresses_skip_keeps_real_verdicts() {
+        // #190: `Skip` fires for every non-install command — must NOT be logged.
+        assert!(!should_log(&Verdict::Skip), "Skip is the no-install firehose");
+        // Every real gate decision must still be persisted.
+        assert!(should_log(&Verdict::Allow));
+        assert!(should_log(&Verdict::Block(vec![])));
+        assert!(should_log(&Verdict::Ask(vec![])));
+        assert!(should_log(&Verdict::Unavailable("offline".into())));
     }
 
     #[test]
