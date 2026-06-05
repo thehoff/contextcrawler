@@ -537,6 +537,135 @@ mod tests {
         );
     }
 
+    // --- SEC: background `&` and newline separator bypass ---
+    // Reproduces the confirmed HIGH bug: a single `&` (background) and an
+    // unquoted newline did not split the command, so a denied sub-command
+    // merged into one segment whose prefix was benign (`echo`) never matched.
+
+    #[test]
+    fn test_background_amp_separator_denied() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo hi & rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny,
+            "background `&` must split so the rm -rf segment is denied"
+        );
+    }
+
+    #[test]
+    fn test_newline_separator_denied() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo hi\nrm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny,
+            "an unquoted newline must split so the rm -rf segment is denied"
+        );
+    }
+
+    #[test]
+    fn test_background_amp_separator_ask() {
+        // The same gap applied to ask rules.
+        let ask = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo hi & rm -rf /", &[], &ask, &[]),
+            PermissionVerdict::Ask,
+            "background `&` must split so the rm -rf segment triggers ask"
+        );
+    }
+
+    #[test]
+    fn test_newline_separator_ask() {
+        let ask = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo hi\nrm -rf /", &[], &ask, &[]),
+            PermissionVerdict::Ask,
+            "newline must split so the rm -rf segment triggers ask"
+        );
+    }
+
+    #[test]
+    fn test_amp_then_allowed_chain_demotes() {
+        // Allow must require EVERY `&`-separated segment to match.
+        let allow = vec!["echo *".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo hi & rm -rf /", &[], &[], &allow),
+            PermissionVerdict::Default,
+            "an unallowed background segment must demote the chain off Allow"
+        );
+    }
+
+    #[test]
+    fn test_existing_separators_unchanged() {
+        // Regression guard: &&, ;, | still split exactly as before.
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo a && rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("echo a ; rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("echo a | rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+        // Benign chains are not over-blocked.
+        assert_eq!(
+            check_command_with_rules("echo a && echo b", &deny, &[], &[]),
+            PermissionVerdict::Default
+        );
+        assert_eq!(
+            check_command_with_rules("echo a ; echo b", &deny, &[], &[]),
+            PermissionVerdict::Default
+        );
+        assert_eq!(
+            check_command_with_rules("echo a | grep b", &deny, &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_redirect_amp_not_mis_split() {
+        // `2>&1` / `>&2` redirections must NOT be treated as a background `&`
+        // separator — the redirect stays attached to its command and the
+        // benign command is not denied.
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("cargo test 2>&1", &deny, &[], &[]),
+            PermissionVerdict::Default,
+            "2>&1 redirect must not split or trip the deny rule"
+        );
+        assert_eq!(
+            check_command_with_rules("echo err >&2", &deny, &[], &[]),
+            PermissionVerdict::Default,
+            ">&2 redirect must not split or trip the deny rule"
+        );
+        // And a real deny after a redirect+background is still caught.
+        assert_eq!(
+            check_command_with_rules("cargo test 2>&1 & rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny,
+            "redirect then background `&` then denied cmd must still deny"
+        );
+    }
+
+    #[test]
+    fn test_quoted_amp_and_newline_not_split() {
+        // A quoted `&` or newline is literal text — must NOT split, so a deny
+        // rule does not fire on text that is not a separate command.
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules(r#"echo "hi & rm -rf /""#, &deny, &[], &[]),
+            PermissionVerdict::Default,
+            "quoted `&` is literal, not a separator"
+        );
+        assert_eq!(
+            check_command_with_rules("echo \"hi\nrm -rf /\"", &deny, &[], &[]),
+            PermissionVerdict::Default,
+            "quoted newline is literal, not a separator"
+        );
+    }
+
     #[test]
     fn test_ask_verdict() {
         let ask = vec!["git push".to_string()];

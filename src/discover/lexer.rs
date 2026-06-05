@@ -226,6 +226,24 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 });
                 current_start = byte_pos;
             }
+            '\n' | '\r' => {
+                // An unquoted newline (or carriage return) is a shell command
+                // terminator, semantically equivalent to `;`. We emit it as a
+                // Shellism control token (value "\n") so permission segmentation
+                // (`split_on_operators`) can treat it as a separator and check
+                // each line against deny/ask rules independently. It is NOT an
+                // Operator (that would change the rewrite path's classification)
+                // and quoted/heredoc newlines never reach here — the quote
+                // handling above consumes them first.
+                flush_arg(&mut tokens, &mut current, current_start);
+                tokens.push(ParsedToken {
+                    kind: TokenKind::Shellism,
+                    value: "\n".into(),
+                    offset: byte_pos,
+                });
+                byte_pos += char_len;
+                current_start = byte_pos;
+            }
             c if c.is_whitespace() => {
                 flush_arg(&mut tokens, &mut current, current_start);
                 byte_pos += c.len_utf8();
@@ -291,6 +309,22 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
                 }
                 if stop_at_pipe {
                     return results;
+                }
+                seg_start = tok.offset + tok.value.len();
+            }
+            // A standalone background `&` and an unquoted newline are command
+            // separators just like `;`/`&&`/`||`. The lexer classifies both as
+            // Shellism control tokens (values "&" and "\n"); split on them so
+            // permission checking validates each sub-command independently.
+            // SECURITY: without this, `echo hi & rm -rf /` and
+            // `echo hi\nrm -rf /` collapse into one segment whose prefix is
+            // `echo`, so a `rm -rf` deny/ask rule never fires. `&&`/`>&`/`2>&1`
+            // are NOT this case — `&&` is an Operator and the redirect forms are
+            // Redirect tokens, neither of which has Shellism value "&".
+            TokenKind::Shellism if tok.value == "&" || tok.value == "\n" => {
+                let segment = trimmed[seg_start..tok.offset].trim();
+                if !segment.is_empty() {
+                    results.push(segment);
                 }
                 seg_start = tok.offset + tok.value.len();
             }
@@ -1244,6 +1278,121 @@ mod tests {
     fn test_split_on_operators_empty() {
         assert!(split_on_operators("", false).is_empty());
         assert!(split_on_operators("  ", true).is_empty());
+    }
+
+    // --- SEC: background `&` and newline as command separators ---
+    // A standalone `&` (background) and an unquoted newline must split a
+    // compound command so permission rules check each sub-command. Without
+    // this, `echo hi & rm -rf /` is one segment whose prefix is `echo`,
+    // letting a `rm -rf` deny rule slip past.
+
+    #[test]
+    fn test_background_amp_is_shellism_token() {
+        let tokens = tokenize("echo hi & rm -rf /");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.kind == TokenKind::Shellism && t.value == "&"),
+            "standalone & must be a Shellism token"
+        );
+    }
+
+    #[test]
+    fn test_newline_is_shellism_token() {
+        let tokens = tokenize("echo hi\nrm -rf /");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.kind == TokenKind::Shellism && t.value == "\n"),
+            "unquoted newline must be a Shellism control token"
+        );
+    }
+
+    #[test]
+    fn test_split_on_background_amp() {
+        assert_eq!(
+            split_on_operators("echo hi & rm -rf /", false),
+            vec!["echo hi", "rm -rf /"]
+        );
+    }
+
+    #[test]
+    fn test_split_on_newline() {
+        assert_eq!(
+            split_on_operators("echo hi\nrm -rf /", false),
+            vec!["echo hi", "rm -rf /"]
+        );
+    }
+
+    #[test]
+    fn test_split_on_crlf_newline() {
+        // \r\n must split exactly once, not produce an empty middle segment.
+        assert_eq!(
+            split_on_operators("echo hi\r\nrm -rf /", false),
+            vec!["echo hi", "rm -rf /"]
+        );
+    }
+
+    #[test]
+    fn test_split_on_multiple_newlines() {
+        assert_eq!(
+            split_on_operators("a\nb\nc", false),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn test_amp_split_respects_stop_at_pipe() {
+        // `&` still splits even on the rewrite (stop_at_pipe) path.
+        assert_eq!(
+            split_on_operators("echo a & echo b", true),
+            vec!["echo a", "echo b"]
+        );
+    }
+
+    #[test]
+    fn test_redirect_amp_not_split_as_background() {
+        // `2>&1`, `>&2`, `&>` are Redirect tokens, NOT a background `&` — they
+        // must NOT cause a permission split.
+        assert_eq!(
+            split_on_operators("cargo test 2>&1", false),
+            vec!["cargo test 2>&1"]
+        );
+        assert_eq!(
+            split_on_operators("echo err >&2", false),
+            vec!["echo err >&2"]
+        );
+        assert_eq!(
+            split_on_operators("cargo test &>/dev/null", false),
+            vec!["cargo test &>/dev/null"]
+        );
+    }
+
+    #[test]
+    fn test_double_amp_not_double_handled() {
+        // `&&` is one Operator token, not two background `&` separators.
+        assert_eq!(
+            split_on_operators("echo a && echo b", false),
+            vec!["echo a", "echo b"]
+        );
+    }
+
+    #[test]
+    fn test_quoted_amp_not_split() {
+        // `&` inside quotes is literal text, not a separator.
+        assert_eq!(
+            split_on_operators(r#"echo "a & b""#, false),
+            vec![r#"echo "a & b""#]
+        );
+    }
+
+    #[test]
+    fn test_quoted_newline_not_split() {
+        // A newline inside double quotes is literal text, not a separator.
+        assert_eq!(
+            split_on_operators("echo \"a\nb\"", false),
+            vec!["echo \"a\nb\""]
+        );
     }
 
     // --- extract_substitutions (SEC-C2) ---
