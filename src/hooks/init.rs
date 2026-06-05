@@ -561,13 +561,26 @@ fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) ->
     }
 }
 
+/// Resolve the final write target: if `path` is a symlink, follow it so the
+/// atomic rename lands on the real file and the link itself is preserved.
+///
+/// `fs::canonicalize` resolves symlink chains (and any relative components) to
+/// the underlying file. It fails when the path does not yet exist (e.g. a
+/// first-time write), in which case we fall back to the original path — exactly
+/// the behaviour we want for creating a brand-new regular file.
+fn resolve_atomic_target(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
+/// Follows symlinks so the link itself is preserved.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let parent = path.parent().with_context(|| {
+    let target = resolve_atomic_target(path);
+    let parent = target.parent().with_context(|| {
         format!(
             "Cannot write to {}: path has no parent directory",
-            path.display()
+            target.display()
         )
     })?;
 
@@ -580,11 +593,12 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         .write_all(content.as_bytes())
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
 
-    // Atomic rename
-    temp_file.persist(path).with_context(|| {
+    // Atomic rename onto the resolved target (the real file behind any symlink),
+    // so an existing symlink is written through rather than clobbered.
+    temp_file.persist(&target).with_context(|| {
         format!(
             "Failed to atomically replace {} (disk full?)",
-            path.display()
+            target.display()
         )
     })?;
 
@@ -6746,6 +6760,53 @@ mod tests {
         assert!(file_path.exists());
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content);
+    }
+
+    // Writing through an absolute symlink must preserve the link and update the
+    // real file behind it — not clobber the symlink with a regular file.
+    // (Guards hoff-profile's managed-block symlinked settings.)
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let target_path = temp.path().join("real-settings.json");
+        let link_path = temp.path().join("settings.json");
+
+        fs::write(&target_path, "{}").expect("seed target file");
+        symlink(&target_path, &link_path).expect("create symlink");
+
+        atomic_write(&link_path, "{\"hooks\":{}}").unwrap();
+
+        let meta = fs::symlink_metadata(&link_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must survive");
+        let written = fs::read_to_string(&target_path).unwrap();
+        assert_eq!(written, "{\"hooks\":{}}");
+    }
+
+    // Same guarantee for a relative symlink — canonicalize resolves the
+    // relative target before the rename lands.
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_relative_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let subdir = temp.path().join("real");
+        fs::create_dir(&subdir).unwrap();
+        let target_path = subdir.join("settings.json");
+        let link_path = temp.path().join("settings.json");
+
+        fs::write(&target_path, "{}").expect("seed target file");
+        symlink(Path::new("real/settings.json"), &link_path).expect("create relative symlink");
+
+        atomic_write(&link_path, "{\"patched\":true}").unwrap();
+
+        let meta = fs::symlink_metadata(&link_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must survive");
+        let written = fs::read_to_string(&target_path).unwrap();
+        assert_eq!(written, "{\"patched\":true}");
     }
 
     // Test for preserve_order round-trip
