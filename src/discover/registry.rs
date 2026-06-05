@@ -585,6 +585,107 @@ fn segment_stdout_is_redirected(cmd: &str) -> bool {
         .any(|t| t.kind == TokenKind::Redirect && redirect_affects_stdout(&t.value))
 }
 
+/// Collapse bash line continuations (`\<newline>`, incl. CRLF/CR) to a single
+/// space so a continuation-broken command still matches a rewrite rule (upstream
+/// rtk-ai/rtk 2543be5 / #1564). Claude Code emits these for long invocations,
+/// e.g. `git diff \<NL>HEAD~1`. Mirrors the same normalisation the supply-chain
+/// gate already applies on its own path. `Cow::Borrowed` fast-path: no alloc
+/// when the command has no continuation.
+///
+/// Quote-aware: a `\<newline>` INSIDE a single- or double-quoted span is left
+/// untouched. This matters for shell wrappers — `bash -c 'cargo \<LF>test'`:
+/// bash treats `\<LF>` literally inside single quotes (NOT a continuation), so
+/// collapsing it would mutate the inner script that `unwrap_shell_wrapper` later
+/// extracts, producing a DIFFERENT executed command. Only genuine unquoted
+/// continuations are collapsed, preserving the original 2543be5 behaviour for
+/// `git diff \<LF>HEAD~1`. (Conservative: we leave double-quoted spans alone too,
+/// rather than emulating bash's exact in-double-quote removal — an unchanged
+/// quoted body is always safe downstream.)
+///
+/// Gate safety: the security gates run on the raw, pre-rewrite string in
+/// `hook_cmd::run_gates`, so this normalisation never affects what Tirith /
+/// supply-chain sees — it only changes filter selection.
+fn collapse_line_continuations(s: &str) -> Cow<'_, str> {
+    // Fast path: no backslash at all → cannot contain a continuation.
+    if !s.contains('\\') {
+        return Cow::Borrowed(s);
+    }
+
+    // Determine whether any UNQUOTED continuation exists; if not, borrow.
+    if !has_unquoted_continuation(s) {
+        return Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        // Outside any quote, a backslash directly before a newline (LF/CRLF/CR)
+        // is a continuation: drop the surrounding horizontal whitespace already
+        // emitted, emit a single space, and skip the continuation bytes.
+        if !in_single && !in_double && c == b'\\' {
+            if let Some(skip) = continuation_len(&bytes[i..]) {
+                // Trim trailing spaces/tabs we just pushed, then emit one space.
+                while matches!(out.as_bytes().last(), Some(b' ') | Some(b'\t')) {
+                    out.pop();
+                }
+                out.push(' ');
+                i += skip;
+                // Skip leading horizontal whitespace after the newline.
+                while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        match c {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    Cow::Owned(out)
+}
+
+/// Length in bytes of a continuation sequence (`\` + `\r\n` | `\n` | `\r`)
+/// starting at `b[0] == b'\\'`, or `None` if `b` does not start with one.
+fn continuation_len(b: &[u8]) -> Option<usize> {
+    if b.first() != Some(&b'\\') {
+        return None;
+    }
+    match b.get(1) {
+        Some(b'\r') if b.get(2) == Some(&b'\n') => Some(3), // \ CR LF
+        Some(b'\n') | Some(b'\r') => Some(2),               // \ LF | \ CR
+        _ => None,
+    }
+}
+
+/// Whether `s` contains a line continuation OUTSIDE single/double quotes.
+fn has_unquoted_continuation(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if !in_single && !in_double && continuation_len(&bytes[i..]).is_some() {
+            return true;
+        }
+        match c {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
@@ -604,24 +705,6 @@ fn segment_stdout_is_redirected(cmd: &str) -> bool {
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
 /// else. Matching is literal, not pattern-based: configure the exact concrete
 /// prefix you use.
-lazy_static! {
-    /// Bash line continuation: a backslash immediately before a newline
-    /// (LF, CRLF, or legacy CR), plus any surrounding horizontal whitespace,
-    /// collapses to a single space.
-    static ref LINE_CONTINUATION_RE: Regex =
-        Regex::new(r"[ \t]*\\(?:\r\n|\n|\r)[ \t]*").unwrap();
-}
-
-/// Collapse bash line continuations (`\<newline>`, incl. CRLF/CR) to a single
-/// space so a continuation-broken command still matches a rewrite rule (upstream
-/// rtk-ai/rtk 2543be5 / #1564). Claude Code emits these for long invocations,
-/// e.g. `git diff \<NL>HEAD~1`. Mirrors the same normalisation the supply-chain
-/// gate already applies on its own path. `Cow::Borrowed` fast-path: no alloc
-/// when the command has no continuation.
-fn collapse_line_continuations(s: &str) -> Cow<'_, str> {
-    LINE_CONTINUATION_RE.replace_all(s, " ")
-}
-
 pub fn rewrite_command(
     cmd: &str,
     excluded: &[String],
@@ -4990,5 +5073,61 @@ mod tests {
     #[test]
     fn test_collapse_line_continuations_collapses_to_single_space() {
         assert_eq!(collapse_line_continuations("git diff \\\nHEAD~1"), "git diff HEAD~1");
+    }
+
+    // --- quote-aware continuation collapse (FIX 3) ----------------------
+
+    #[test]
+    fn test_collapse_preserves_single_quoted_backslash_newline() {
+        // bash treats `\<LF>` literally inside single quotes — it is NOT a
+        // continuation. The body must be left byte-for-byte intact so
+        // `unwrap_shell_wrapper` extracts the script the user actually wrote.
+        let input = "bash -c 'cargo \\\ntest'";
+        let out = collapse_line_continuations(input);
+        assert_eq!(out, input);
+        // No allocation needed when the only continuation is quoted.
+        match out {
+            Cow::Borrowed(_) => {}
+            Cow::Owned(_) => panic!("quoted-only continuation should borrow, not mutate"),
+        }
+    }
+
+    #[test]
+    fn test_collapse_preserves_double_quoted_backslash_newline() {
+        // Conservative: double-quoted spans are left untouched too.
+        let input = "echo \"a \\\nb\"";
+        assert_eq!(collapse_line_continuations(input), input);
+    }
+
+    #[test]
+    fn test_collapse_unquoted_still_collapses_with_quotes_present() {
+        // An UNQUOTED continuation collapses even when quoted text is also
+        // present elsewhere (quote state correctly closed before the `\<LF>`).
+        assert_eq!(
+            collapse_line_continuations("echo 'hi' \\\nthere"),
+            "echo 'hi' there"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bash_c_single_quoted_continuation_not_mutated() {
+        // End-to-end: a single-quoted wrapper body with a literal `\<LF>` is a
+        // compound/odd inner script → unwrap_shell_wrapper bails → raw
+        // passthrough (None). The key property is that the inner body is NOT
+        // silently rewritten into a different command.
+        assert_eq!(
+            rewrite_command_no_prefixes("bash -c 'cargo \\\ntest'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_unquoted_continuation_still_collapses_regression() {
+        // #2543be5 non-regression: an UNQUOTED `\<LF>` continuation still
+        // collapses so the command matches a rewrite rule.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff \\\nHEAD~1", &[]),
+            Some("contextcrawler git diff HEAD~1".into())
+        );
     }
 }
