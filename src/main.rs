@@ -2192,6 +2192,79 @@ fn run_grep_passthrough_labelled(args: &[String], route: &str) -> Result<i32> {
     }
 }
 
+/// Run a context-flag grep call (`-A`/`-B`/`-C`) through rg, CAPTURE the
+/// output, and filter it (issue #193). The old behaviour inherited stdout
+/// straight to the terminal — zero token savings on the single highest-yield
+/// grep shape (recursive search with surrounding context). Here we capture
+/// rg's grouped output and cap it via `grep_cmd::filter_context_output` using
+/// the same `[limits]` knobs as the non-context path. The `no_bloat` guard
+/// ensures a small result is never inflated by the framing.
+///
+/// Falls back to a raw passthrough run if rg cannot be located or capture
+/// fails, so the user always gets their matches (RTK fallback discipline).
+fn run_grep_context_filtered(args: &[String]) -> Result<i32> {
+    let raw_command = args.join(" ");
+    let timer = core::tracking::TimedExecution::start();
+    let user_args = &args[1..];
+
+    // Reject `--pre`, `--pre-glob`, `--search-zip` / `-z` before they reach rg
+    // — they enable arbitrary code execution per file. See issue #32.
+    if let Err(msg) = core::utils::check_forbidden_rg_args(user_args) {
+        eprintln!("{}", msg);
+        return Ok(2);
+    }
+
+    // rtk-backed filtering needs rg's grouped, machine-parseable output. If rg
+    // is not on PATH, fall back to the raw passthrough (system grep) path —
+    // we can't reliably filter arbitrary system-grep context output.
+    if which::which("rg").is_err() {
+        return run_grep_passthrough_labelled(args, "context passthrough (no rg)");
+    }
+
+    // `secure_rg_command` strips RIPGREP_CONFIG_PATH/_FILE from the inherited
+    // env so a tainted parent can't hijack this rg invocation via a config
+    // file containing `--pre`. See issue #32.
+    let mut cmd = core::utils::secure_rg_command("rg");
+    cmd.args(user_args);
+
+    let captured = match core::stream::exec_capture(&mut cmd) {
+        Ok(c) => c,
+        Err(_) => {
+            // Capture failed (spawn error, timeout): fall back to raw so the
+            // user is never left without output.
+            return run_grep_passthrough_labelled(args, "context passthrough (capture failed)");
+        }
+    };
+
+    let raw_stdout = captured.stdout;
+    let exit_code = captured.exit_code;
+
+    // No matches: emit nothing but surface real errors (bad regex, etc.).
+    if raw_stdout.trim().is_empty() {
+        if exit_code == 2 && !captured.stderr.trim().is_empty() {
+            eprintln!("{}", captured.stderr.trim());
+        }
+        timer.track(&raw_command, "rtk grep (context)", &raw_stdout, "");
+        return Ok(exit_code);
+    }
+
+    let limits = core::config::limits();
+    let (filtered, _groups) = grep_cmd::filter_context_output(
+        &raw_stdout,
+        limits.grep_max_results,
+        limits.grep_max_per_file,
+    );
+
+    // no_bloat: never let the framing cost more than the raw output saves.
+    let emitted = core::runner::no_bloat(&raw_stdout, &filtered);
+    print!("{}", emitted);
+    if !captured.stderr.trim().is_empty() && exit_code == 2 {
+        eprintln!("{}", captured.stderr.trim());
+    }
+    timer.track(&raw_command, "rtk grep (context)", &raw_stdout, emitted);
+    Ok(exit_code)
+}
+
 fn main() {
     // SIGPIPE fix (#startup-crash): Rust sets SIGPIPE to SIG_IGN by default,
     // so a broken pipe on stdout returns EPIPE instead of terminating the
@@ -2988,11 +3061,20 @@ fn run_cli() -> Result<i32> {
                     return run_grep_passthrough_labelled(&full, "quiet passthrough");
                 }
                 GrepPreprocess::Passthrough(stripped) => {
-                    // Context-flag passthrough: rtk-backed grep can't honour
-                    // -A/-B/-C, so route the (now stripped) args to rg.
                     let mut full = Vec::with_capacity(stripped.len() + 1);
                     full.push("grep".to_string());
                     full.extend(stripped);
+                    // Issue #193: context-flag calls (`-A`/`-B`/`-C`) are the
+                    // single highest-yield grep shape (861 of 1629 fallbacks).
+                    // rg understands them natively and emits grouped output we
+                    // CAN filter — capture it and cap per-file/global instead
+                    // of inheriting raw (zero savings). `-H`/value-flag calls
+                    // (no context flag) stay on the raw passthrough: their
+                    // output is single-line and reordering value flags is
+                    // unsafe, so there's nothing to group/cap.
+                    if has_grep_context_flag(&full) {
+                        return run_grep_context_filtered(&full);
+                    }
                     return run_grep_format_passthrough(&full);
                 }
                 GrepPreprocess::Stripped(stripped) => {

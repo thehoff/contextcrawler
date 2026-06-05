@@ -215,6 +215,100 @@ pub fn run(
     Ok(exit_code)
 }
 
+/// Filter rg/grep *context* output (`-A`/`-B`/`-C` runs) without destroying
+/// the per-match grouping. Plain grep_cmd::run parses every line as
+/// `file:line:content`, which mangles context lines (`file-line-content`) and
+/// the `--` group separators rg emits between matches. So context output is
+/// handled here instead: we keep whole match-groups intact and cap how many
+/// groups we emit per file and overall, using the same `[limits]` knobs as the
+/// non-context path (`grep_max_results`, `grep_max_per_file`).
+///
+/// Returns `(filtered, group_count)`. The caller applies `no_bloat` against the
+/// raw output so the filter can never inflate a small result.
+pub fn filter_context_output(
+    raw: &str,
+    max_results: usize,
+    max_per_file: usize,
+) -> (String, usize) {
+    // rg/grep emit a literal `--` line between context groups. Split on it to
+    // recover discrete match-groups, each a contiguous block of lines.
+    let groups: Vec<&str> = raw
+        .split("\n--\n")
+        .map(|g| g.trim_matches('\n'))
+        .filter(|g| !g.is_empty())
+        .collect();
+
+    let total_groups = groups.len();
+    if total_groups == 0 {
+        return (String::new(), 0);
+    }
+
+    // Attribute each group to a file using its first match line. rg context
+    // lines use `file-line-` and match lines use `file:line:`; the leading
+    // `file` token is identical, so we split on the first `:` or `-` that is
+    // followed by a digit run (the line number).
+    let mut per_file_seen: HashMap<String, usize> = HashMap::new();
+    let mut shown = 0usize;
+    let mut out = String::new();
+    let mut emitted_groups = 0usize;
+
+    for group in &groups {
+        if shown >= max_results {
+            break;
+        }
+        let file = group_file(group);
+        let count = per_file_seen.entry(file).or_insert(0);
+        if *count >= max_per_file {
+            continue;
+        }
+        *count += 1;
+        if emitted_groups > 0 {
+            out.push_str("--\n");
+        }
+        out.push_str(group);
+        out.push('\n');
+        emitted_groups += 1;
+        shown += 1;
+    }
+
+    if total_groups > emitted_groups {
+        out.push_str(&format!("[+{} more groups]\n", total_groups - emitted_groups));
+    }
+
+    (out, total_groups)
+}
+
+/// Extract the leading `file` token from the first line of a context group.
+/// rg lines look like `path/to/file.rs:42:match` (match) or
+/// `path/to/file.rs-41-context` (context). Windows drive letters (`C:`) are
+/// not a concern here — rg emits forward-slash relative paths by default.
+fn group_file(group: &str) -> String {
+    let first = group.lines().next().unwrap_or("");
+    // Find the separator that introduces the line number: the first `:` or `-`
+    // immediately followed by ASCII digits. Anything before it is the path.
+    let bytes = first.as_bytes();
+    for i in 0..bytes.len() {
+        let c = bytes[i];
+        if (c == b':' || c == b'-')
+            && bytes
+                .get(i + 1)
+                .map(|n| n.is_ascii_digit())
+                .unwrap_or(false)
+        {
+            // Bucket on the RAW path, not the compacted display form
+            // (council/Codex finding, #193). filter_context_output keys its
+            // per-file cap on this string AND emits the verbatim group text,
+            // so compacting here would let two distinct files that collapse to
+            // the same short display path share a counter and wrongly truncate
+            // each other. compact_path is for display only — used by the
+            // non-context filter, not here.
+            return first[..i].to_string();
+        }
+    }
+    // No line-number separator found (unusual): bucket the whole raw line.
+    first.to_string()
+}
+
 // `has_format_flag_raw` is the OsString-typed sibling of the existing
 // `grep_format_flag_present(&[String])` used by main.rs. Currently only
 // exercised by the unit tests below; keep it so we have one helper per
@@ -517,6 +611,142 @@ mod tests {
         let rtk_output = "200 matches in 200 files:\n\n[+200 more]\n";
         assert!(rtk_output.len() < raw_output.len());
         assert_eq!(runner::no_bloat(&raw_output, rtk_output), rtk_output);
+    }
+
+    // --- issue #193: context-output filtering ---
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_context_filter_groups_and_caps() {
+        // Synthetic context output: 5 groups across 2 files, `--` separated.
+        let raw = "a.rs-1-ctx\na.rs:2:hit\na.rs-3-ctx\n--\n\
+                   a.rs-4-ctx\na.rs:5:hit\n--\n\
+                   a.rs-6-ctx\na.rs:7:hit\n--\n\
+                   b.rs-1-ctx\nb.rs:2:hit\n--\n\
+                   b.rs-3-ctx\nb.rs:4:hit\n";
+        // Cap 2 per file, 200 global → 2 from a.rs + 2 from b.rs = 4 of 5.
+        let (out, total) = filter_context_output(raw, 200, 2);
+        assert_eq!(total, 5, "should count all 5 groups");
+        assert!(out.contains("a.rs:2:hit"));
+        assert!(out.contains("b.rs:2:hit"));
+        // The third a.rs group (line 7) is dropped by the per-file cap.
+        assert!(!out.contains("a.rs:7:hit"), "per-file cap must drop 3rd a.rs group");
+        assert!(out.contains("[+1 more groups]"), "must indicate truncation");
+    }
+
+    #[test]
+    fn test_context_filter_global_cap() {
+        // 4 groups, global cap of 2 → exactly 2 emitted + truncation note.
+        let raw = "a.rs:1:x\n--\nb.rs:1:x\n--\nc.rs:1:x\n--\nd.rs:1:x\n";
+        let (out, total) = filter_context_output(raw, 2, 25);
+        assert_eq!(total, 4);
+        assert!(out.contains("[+2 more groups]"));
+    }
+
+    #[test]
+    fn test_context_filter_empty() {
+        let (out, total) = filter_context_output("", 200, 25);
+        assert_eq!(total, 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_group_file_extracts_path() {
+        assert_eq!(group_file("src/foo.rs:42:hit"), "src/foo.rs");
+        assert_eq!(group_file("src/foo.rs-41-ctx"), "src/foo.rs");
+        // First line of a multi-line group decides the file.
+        assert_eq!(group_file("src/bar.rs-1-ctx\nsrc/bar.rs:2:hit"), "src/bar.rs");
+    }
+
+    // Council/Codex finding (#193): group_file must bucket on the RAW path, not
+    // the compacted display form. A long path is returned verbatim — never
+    // collapsed — so the per-file cap counts the real file.
+    #[test]
+    fn test_group_file_returns_raw_long_path() {
+        let long = "src/a/very/deeply/nested/directory/structure/here/module_one.rs";
+        assert!(long.len() > 50, "fixture must exceed compact_path threshold");
+        assert_eq!(group_file(&format!("{}:42:hit", long)), long);
+    }
+
+    // Council/Codex finding (#193): two DISTINCT long files that compact to the
+    // same short display form must NOT share a per-file counter. With the old
+    // compacted-key bug they collided into one bucket and truncated each other.
+    #[test]
+    fn test_context_filter_distinct_files_compact_collision() {
+        // Both paths share parts[0]="src" and the final two segments
+        // "shared/file.rs", so compact_path collapses BOTH to
+        // "src/.../shared/file.rs" — identical display, distinct real files.
+        let a = "src/alpha/branchx/deeply/nested/path/shared/file.rs";
+        let b = "src/omega/branchx/deeply/nested/path/shared/file.rs";
+        assert_eq!(
+            compact_path(a),
+            compact_path(b),
+            "test premise: the two paths must compact to the same display form"
+        );
+        assert_ne!(a, b, "but they are distinct real files");
+
+        // 2 groups in file a, 2 in file b. Per-file cap of 2 must keep ALL
+        // FOUR — neither file may steal the other's budget.
+        let raw = format!(
+            "{a}-1-ctx\n{a}:2:hit\n--\n{a}-3-ctx\n{a}:4:hit\n--\n\
+             {b}-1-ctx\n{b}:2:hit\n--\n{b}-3-ctx\n{b}:4:hit\n",
+            a = a,
+            b = b
+        );
+        let (out, total) = filter_context_output(&raw, 200, 2);
+        assert_eq!(total, 4);
+        // All four groups present, no truncation marker.
+        assert!(out.contains(&format!("{}:2:hit", a)));
+        assert!(out.contains(&format!("{}:4:hit", a)));
+        assert!(out.contains(&format!("{}:2:hit", b)));
+        assert!(out.contains(&format!("{}:4:hit", b)));
+        assert!(
+            !out.contains("more groups"),
+            "distinct files must not truncate each other (raw-path bucketing)"
+        );
+    }
+
+    #[test]
+    fn test_context_filter_snapshot() {
+        // The repo has no `insta` dependency (the cli-testing rule describes
+        // the ideal, but no module wires it up), so this is a deterministic
+        // golden-form assertion instead: stable framing on a real fixture.
+        let input = include_str!("../../../tests/fixtures/grep_context_raw.txt");
+        let (output, total) = filter_context_output(input, 200, 25);
+        // Output must be strictly smaller than the raw fixture.
+        assert!(output.len() < input.len());
+        // Framing invariant: a truncated result ends with the "more groups"
+        // marker, and groups are `--`-separated.
+        if total > 0 && output.contains("[+") {
+            assert!(output.trim_end().ends_with("more groups]"));
+        }
+        assert!(output.contains("--\n"), "groups stay --separated");
+        // First emitted group is preserved verbatim (no mangling).
+        let first_group = input.split("\n--\n").next().unwrap().trim_matches('\n');
+        assert!(
+            output.starts_with(first_group),
+            "first group must be emitted verbatim"
+        );
+    }
+
+    #[test]
+    fn test_context_filter_token_savings() {
+        // Real `grep -rn -C2 lazy_static src/cmds/` output. The per-file cap
+        // collapses the many same-file context groups; assert >=60% savings.
+        let input = include_str!("../../../tests/fixtures/grep_context_raw.txt");
+        // Use a tight per-file cap (3) to model a focused agent search; the
+        // default config cap is 25 but recursive same-file hits dominate here.
+        let (output, _total) = filter_context_output(input, 200, 3);
+        let savings =
+            100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "context grep filter: expected >=60% savings, got {:.1}%",
+            savings
+        );
     }
 
     #[test]
