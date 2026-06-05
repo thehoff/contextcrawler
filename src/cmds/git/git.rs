@@ -1241,6 +1241,30 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     cmd
 }
 
+/// Build the compact `git commit` summary from git's first output line, e.g.
+/// `[main abc1234] msg` → `ok abc1234`. Pure and panic-safe.
+///
+/// The hash is the last whitespace-separated token before `]`, which is correct
+/// for plain commits, `[main (root-commit) abc1234]`, and localized markers
+/// like `[master（根提交） fb597ec]` (Chinese locale). The short-hash uses
+/// `chars().take(7)` and `get()` rather than byte slicing, so a non-ASCII
+/// branch name or marker can never slice inside a multibyte char.
+/// (upstream rtk-ai/rtk c5ec92f — fixes a SIGABRT panic; the fork builds
+/// `panic="abort"`, so the old `&hash[..7]` byte slice was a hard crash.)
+fn commit_compact_line(first_line: Option<&str>) -> String {
+    if let Some(line) = first_line {
+        if let Some(bracket_end) = line.find(']') {
+            let bracket_content = line.get(1..bracket_end).unwrap_or("");
+            let hash = bracket_content.split_whitespace().next_back().unwrap_or("");
+            if !hash.is_empty() && hash.len() >= 7 {
+                let short_hash: String = hash.chars().take(7).collect();
+                return format!("ok {}", short_hash);
+            }
+        }
+    }
+    "ok".to_string()
+}
+
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1261,21 +1285,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let raw_output = format!("{}\n{}", stdout, stderr);
 
     if output.status.success() {
-        // Extract commit hash from output like "[main abc1234] message"
-        let compact = if let Some(line) = stdout.lines().next() {
-            if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
-                if !hash.is_empty() && hash.len() >= 7 {
-                    format!("ok {}", &hash[..7.min(hash.len())])
-                } else {
-                    "ok".to_string()
-                }
-            } else {
-                "ok".to_string()
-            }
-        } else {
-            "ok".to_string()
-        };
+        let compact = commit_compact_line(stdout.lines().next());
 
         println!("{}", compact);
 
@@ -2149,6 +2159,33 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_compact_line_plain_and_root_commit() {
+        assert_eq!(commit_compact_line(Some("[main abc1234] add thing")), "ok abc1234");
+        assert_eq!(
+            commit_compact_line(Some("[main (root-commit) fb597ec] Initial commit")),
+            "ok fb597ec"
+        );
+    }
+
+    #[test]
+    fn commit_compact_line_multibyte_locale_does_not_panic() {
+        // upstream c5ec92f: under a Chinese locale git prints the localized
+        // root-commit marker. The old `&hash[..7]` byte slice panicked here
+        // (SIGABRT with panic=abort). The hash is still the last token before ']'.
+        let line = "[master（根提交） fb597ec] Initial commit";
+        assert_eq!(commit_compact_line(Some(line)), "ok fb597ec");
+    }
+
+    #[test]
+    fn commit_compact_line_edge_cases() {
+        assert_eq!(commit_compact_line(None), "ok");
+        assert_eq!(commit_compact_line(Some("")), "ok"); // no bracket
+        assert_eq!(commit_compact_line(Some("[main short] msg")), "ok"); // hash < 7
+        // A bare multibyte hash-position token shorter than 7 bytes is still safe.
+        assert_eq!(commit_compact_line(Some("[主] x")), "ok");
+    }
 
     #[test]
     fn test_git_cmd_no_global_args() {
