@@ -276,30 +276,84 @@ const FILTERED_CAP: usize = RAW_CAP;
 /// generous headroom for a transient terminal hiccup while capping memory.
 const SINK_CHANNEL_CAP: usize = 8192;
 
+/// Hard ceiling on a single line buffered by [`for_each_line`].
+///
+/// `read_until(b'\n', ..)` is unbounded: a child that emits a single
+/// newline-free flood (minified JS/CSS, a base64 blob, `cat huge.bin`,
+/// binary output) would otherwise be read whole into one `Vec<u8>` before
+/// any [`RAW_CAP`] check — every caller checks the cap *after* the line is
+/// materialised — so a multi-GB line OOMs the host. We bound the per-line
+/// read at `RAW_CAP` (the same ceiling every caller enforces on the whole
+/// stream): a line longer than this is truncated to the cap, the over-long
+/// remainder is drained to the next newline (or EOF) WITHOUT buffering, and
+/// the next call resumes on the following line. Normal newline-terminated
+/// lines are unaffected — they are delivered intact.
+const MAX_LINE_BYTES: usize = RAW_CAP;
+
 /// Read a child stream line-by-line as raw bytes, yielding lossy-UTF-8 strings.
 ///
 /// `BufRead::lines()` is strict UTF-8 and `.map_while(Result::ok)` silently
 /// stops at the first non-UTF-8 byte, truncating the rest of the child's
 /// output. Reading bytes and converting with `from_utf8_lossy` preserves every
 /// line (replacing invalid bytes with U+FFFD) instead of dropping output.
+///
+/// The per-line read is bounded at [`MAX_LINE_BYTES`] so a newline-free flood
+/// cannot allocate without limit. See [`MAX_LINE_BYTES`].
 fn for_each_line<R: Read>(reader: R, mut f: impl FnMut(String)) {
     let mut buf = BufReader::new(reader);
     let mut bytes: Vec<u8> = Vec::new();
     loop {
         bytes.clear();
-        match buf.read_until(b'\n', &mut bytes) {
+        // Bound the read: take at most MAX_LINE_BYTES + 1 so we can tell a
+        // line that exactly fills the cap (still terminated) from one that
+        // overran it. `read_until` on the limited reader stops at the first
+        // newline or at the byte budget, whichever comes first.
+        let mut limited = (&mut buf).take(MAX_LINE_BYTES as u64 + 1);
+        match limited.read_until(b'\n', &mut bytes) {
             Ok(0) => break, // EOF
             Ok(_) => {
-                // Trim a trailing \n (and \r) to match BufRead::lines() semantics.
                 if bytes.last() == Some(&b'\n') {
+                    // Trim a trailing \n (and \r) to match BufRead::lines() semantics.
                     bytes.pop();
                     if bytes.last() == Some(&b'\r') {
                         bytes.pop();
                     }
+                } else if bytes.len() > MAX_LINE_BYTES {
+                    // Over-long, newline-free line: we read the cap plus one
+                    // probe byte. Drop the probe so the emitted line is exactly
+                    // MAX_LINE_BYTES, then drain the rest of this line (to the
+                    // next newline or EOF) WITHOUT buffering it so memory stays
+                    // bounded. The next iteration resumes on the following line.
+                    bytes.pop();
+                    drain_to_newline(&mut buf);
                 }
+                // else: EOF reached before the cap and before a newline — emit
+                // the final unterminated line as-is.
                 f(String::from_utf8_lossy(&bytes).into_owned());
             }
             Err(_) => break,
+        }
+    }
+}
+
+/// Discard bytes from `buf` up to and including the next newline (or EOF)
+/// without buffering them. Used by [`for_each_line`] to throw away the tail of
+/// a line that exceeded [`MAX_LINE_BYTES`], so a newline-free flood cannot grow
+/// memory past the cap. Reads through the `BufRead`'s internal buffer only —
+/// no per-line allocation.
+fn drain_to_newline<R: BufRead>(buf: &mut R) {
+    loop {
+        let (found, consumed) = match buf.fill_buf() {
+            Ok([]) => return, // EOF
+            Ok(slice) => match slice.iter().position(|&b| b == b'\n') {
+                Some(idx) => (true, idx + 1), // consume through the newline
+                None => (false, slice.len()),
+            },
+            Err(_) => return,
+        };
+        buf.consume(consumed);
+        if found {
+            return;
         }
     }
 }
@@ -1884,6 +1938,99 @@ pub(crate) mod tests {
         let mut got = Vec::new();
         for_each_line(io::Cursor::new(&input[..]), |l| got.push(l));
         assert_eq!(got, vec!["only-line"]);
+    }
+
+    // -----------------------------------------------------------------
+    // OOM hardening: a newline-free flood must NOT be buffered whole.
+    // `read_until` was unbounded, so a single multi-GB line (minified
+    // JS, base64 blob, `cat huge.bin`) was materialised before any
+    // RAW_CAP check fired. for_each_line now bounds each line at
+    // MAX_LINE_BYTES and drains the overrun without buffering.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_for_each_line_caps_newline_free_flood() {
+        // A line MUCH longer than the cap, with no newline at all, followed
+        // by a normal terminated line. The flood must be truncated to exactly
+        // MAX_LINE_BYTES (never the full input), and the following line must
+        // still arrive intact — proving the overrun was drained, not buffered.
+        let flood_len = MAX_LINE_BYTES + 5_000_000; // ~5 MiB past the cap
+        let mut input = vec![b'a'; flood_len];
+        input.push(b'\n');
+        input.extend_from_slice(b"next-line\n");
+
+        let mut got: Vec<String> = Vec::new();
+        for_each_line(io::Cursor::new(input), |l| got.push(l));
+
+        assert_eq!(got.len(), 2, "expected the capped flood line + next line");
+        // The over-long line is capped at exactly MAX_LINE_BYTES — NOT the
+        // full ~15 MiB input. This is the OOM guard.
+        assert_eq!(
+            got[0].len(),
+            MAX_LINE_BYTES,
+            "newline-free flood must be capped at MAX_LINE_BYTES, got {} bytes",
+            got[0].len()
+        );
+        assert!(got[0].bytes().all(|b| b == b'a'));
+        // The line after the flood was drained correctly and arrives intact.
+        assert_eq!(got[1], "next-line");
+    }
+
+    #[test]
+    fn test_for_each_line_line_exactly_at_cap_is_intact() {
+        // A line whose payload is exactly MAX_LINE_BYTES and IS newline
+        // terminated must be delivered whole (the +1 probe budget lets us
+        // read the newline without tripping the overrun path).
+        let mut input = vec![b'b'; MAX_LINE_BYTES];
+        input.push(b'\n');
+        input.extend_from_slice(b"after\n");
+
+        let mut got: Vec<String> = Vec::new();
+        for_each_line(io::Cursor::new(input), |l| got.push(l));
+
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].len(), MAX_LINE_BYTES, "exact-cap line must be intact");
+        assert_eq!(got[1], "after");
+    }
+
+    #[test]
+    fn test_for_each_line_drains_flood_at_eof_without_trailing_newline() {
+        // Over-long, newline-free line that runs straight to EOF: must be
+        // capped and must not loop forever or buffer the whole thing.
+        let flood_len = MAX_LINE_BYTES + 1_000_000;
+        let input = vec![b'c'; flood_len];
+
+        let mut got: Vec<String> = Vec::new();
+        for_each_line(io::Cursor::new(input), |l| got.push(l));
+
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].len(),
+            MAX_LINE_BYTES,
+            "EOF flood must be capped at MAX_LINE_BYTES, got {}",
+            got[0].len()
+        );
+    }
+
+    #[test]
+    fn test_drain_to_newline_consumes_through_newline() {
+        // Cursor positioned at start of an over-long tail; drain to the next
+        // newline and confirm subsequent reads resume after it.
+        let mut buf = BufReader::new(io::Cursor::new(&b"junk-tail\nkept"[..]));
+        drain_to_newline(&mut buf);
+        let mut rest = Vec::new();
+        buf.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"kept");
+    }
+
+    #[test]
+    fn test_drain_to_newline_stops_at_eof_without_newline() {
+        // No newline at all — drain must terminate at EOF, not spin.
+        let mut buf = BufReader::new(io::Cursor::new(&b"no-newline-here"[..]));
+        drain_to_newline(&mut buf);
+        let mut rest = Vec::new();
+        buf.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "drain should consume to EOF");
     }
 
     // -----------------------------------------------------------------
