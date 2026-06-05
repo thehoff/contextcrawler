@@ -348,6 +348,23 @@ fn run_cargo_filtered<F>(
 where
     F: Fn(&str) -> String,
 {
+    run_cargo_filtered_tc(subcommand, None, args, verbose, filter_fn)
+}
+
+/// As `run_cargo_filtered`, with an optional rustup `+toolchain` selector that
+/// is inserted as cargo's first argument (rustup requires it to lead). The
+/// selector is validated by the caller (`is_valid_toolchain`) so it cannot
+/// smuggle a flag or shell metacharacter.
+fn run_cargo_filtered_tc<F>(
+    subcommand: &str,
+    toolchain: Option<&str>,
+    args: &[String],
+    verbose: u8,
+    filter_fn: F,
+) -> Result<i32>
+where
+    F: Fn(&str) -> String,
+{
     let restored_args = restore_double_dash(args);
 
     // Reject `--config target.*.runner=...`, `--config build.rustc-wrapper=...`
@@ -363,6 +380,10 @@ where
     // / RUSTFLAGS / CARGO_HOME / etc. from the inherited env so a tainted
     // parent can't hijack this invocation. See issue #34.
     let mut cmd = secure_cargo_command();
+    // rustup `+toolchain` selector must be cargo's first argument.
+    if let Some(tc) = toolchain {
+        cmd.arg(tc);
+    }
     // Force colour off so failure-pattern matching (`error:` / `FAILED`) is not
     // defeated by ANSI-wrapped output from a tainted env (issue #100, G5#4).
     // `strip_ansi` below is the belt-and-braces second line of defence.
@@ -392,6 +413,18 @@ fn run_cargo_streamed(
     verbose: u8,
     filter: Box<dyn StreamFilter>,
 ) -> Result<i32> {
+    run_cargo_streamed_tc(subcommand, None, args, verbose, filter)
+}
+
+/// As `run_cargo_streamed`, with an optional validated rustup `+toolchain`
+/// selector inserted as cargo's first argument.
+fn run_cargo_streamed_tc(
+    subcommand: &str,
+    toolchain: Option<&str>,
+    args: &[String],
+    verbose: u8,
+    filter: Box<dyn StreamFilter>,
+) -> Result<i32> {
     let restored_args = restore_double_dash(args);
 
     // See run_cargo_filtered above — same deny-list + env strip for #34.
@@ -401,6 +434,10 @@ fn run_cargo_streamed(
     }
 
     let mut cmd = secure_cargo_command();
+    // rustup `+toolchain` selector must be cargo's first argument.
+    if let Some(tc) = toolchain {
+        cmd.arg(tc);
+    }
     // See run_cargo_filtered — force colour off so ANSI can't defeat the
     // streamed failure detection (issue #100, G5#4).
     cmd.arg("--color=never");
@@ -1308,7 +1345,92 @@ fn filter_cargo_clippy(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Validate a rustup `+toolchain` selector. Accepts `+<word>` where the body is
+/// alphanumeric plus `._-` (covers `nightly`, `stable`, `1.75.0`,
+/// `nightly-2024-01-01`, `stable-x86_64-unknown-linux-gnu`). Rejects anything
+/// that could smuggle a flag or shell metacharacter — defence in depth even
+/// though argv values are not re-parsed by a shell.
+fn is_valid_toolchain(tok: &str) -> bool {
+    match tok.strip_prefix('+') {
+        Some(body) => {
+            // First char must be alphanumeric so a `+-…` token can't be read as
+            // a flag; the rest may include `._-` for dated/target toolchains.
+            // Mirrors the `CARGO_TOOLCHAIN_OPT` regex in discover::registry.
+            let mut chars = body.chars();
+            match chars.next() {
+                Some(first) if first.is_ascii_alphanumeric() => chars
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+                _ => false,
+            }
+        }
+        None => false,
+    }
+}
+
+/// Map a cargo subcommand string to its filtered runner, threading an optional
+/// validated `+toolchain` selector. Returns `None` for subcommands we don't
+/// filter so the caller can fall back to raw passthrough.
+fn run_filtered_subcommand(
+    subcommand: &str,
+    toolchain: Option<&str>,
+    args: &[String],
+    verbose: u8,
+) -> Option<Result<i32>> {
+    let result = match subcommand {
+        "build" => run_cargo_streamed_tc(
+            "build",
+            toolchain,
+            args,
+            verbose,
+            Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+        ),
+        "test" => run_cargo_streamed_tc(
+            "test",
+            toolchain,
+            args,
+            verbose,
+            Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
+        ),
+        "check" => run_cargo_streamed_tc(
+            "check",
+            toolchain,
+            args,
+            verbose,
+            Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+        ),
+        "clippy" => run_cargo_filtered_tc("clippy", toolchain, args, verbose, filter_cargo_clippy),
+        "install" => {
+            run_cargo_filtered_tc("install", toolchain, args, verbose, filter_cargo_install)
+        }
+        "nextest" => {
+            run_cargo_filtered_tc("nextest", toolchain, args, verbose, filter_cargo_nextest)
+        }
+        _ => return None,
+    };
+    Some(result)
+}
+
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    // rustup `+toolchain` form: `cargo +nightly test ...`. clap routes the
+    // leading `+toolchain` token here (external subcommand) instead of to the
+    // filtered Test/Build/etc. variants. Recover the savings: if the next token
+    // is a subcommand we filter, re-dispatch to the filtered runner with the
+    // toolchain threaded as cargo's first argument. Anything else (unknown
+    // subcommand, non-UTF-8 args) falls through to raw passthrough below.
+    if let (Some(first), Some(second)) = (args.first(), args.get(1)) {
+        if let (Some(tc), Some(sub)) = (first.to_str(), second.to_str()) {
+            if is_valid_toolchain(tc) {
+                let rest: Option<Vec<String>> =
+                    args[2..].iter().map(|a| a.to_str().map(str::to_owned)).collect();
+                if let Some(rest) = rest {
+                    if let Some(result) = run_filtered_subcommand(sub, Some(tc), &rest, verbose) {
+                        return result;
+                    }
+                }
+            }
+        }
+    }
+
     // Scan the arg list as best-effort strings — argv coming in as
     // OsString may not be valid UTF-8 on weird filesystems, but
     // `--config K=V` payloads are always ASCII so `to_string_lossy()`
@@ -1329,6 +1451,27 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- rustup +toolchain selector validation ---
+
+    #[test]
+    fn test_is_valid_toolchain_accepts_common_forms() {
+        assert!(is_valid_toolchain("+nightly"));
+        assert!(is_valid_toolchain("+stable"));
+        assert!(is_valid_toolchain("+1.75.0"));
+        assert!(is_valid_toolchain("+nightly-2024-01-01"));
+        assert!(is_valid_toolchain("+stable-x86_64-unknown-linux-gnu"));
+    }
+
+    #[test]
+    fn test_is_valid_toolchain_rejects_smuggling() {
+        assert!(!is_valid_toolchain("nightly")); // no leading +
+        assert!(!is_valid_toolchain("+")); // empty body
+        assert!(!is_valid_toolchain("+--config")); // flag chars
+        assert!(!is_valid_toolchain("+a b")); // space
+        assert!(!is_valid_toolchain("+a;rm")); // metacharacter
+        assert!(!is_valid_toolchain("+$(x)")); // substitution chars
+    }
 
     // --- #100 G5#4: ANSI-wrapped failure lines must still be detected ---
 

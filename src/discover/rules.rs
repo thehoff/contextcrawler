@@ -53,7 +53,11 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
+        // `(?:\+\S+\s+)?` tolerates a rustup `+toolchain` selector
+        // (`cargo +nightly test`). `normalise_command` strips it before the
+        // classifier runs, but accepting it inline keeps classification robust
+        // regardless of normalisation order. Subcommand stays in capture 1.
+        pattern: r"^cargo\s+(?:\+\S+\s+)?(build|test|clippy|check|fmt|install)",
         rtk_cmd: "contextcrawler cargo",
         rewrite_prefixes: &["cargo"],
         category: "Cargo",

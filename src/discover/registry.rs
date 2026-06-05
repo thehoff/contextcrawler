@@ -66,6 +66,16 @@ lazy_static! {
     // `git -c "core.editor=vim -w" merge` — `\S+` alone stops at the inner space.
     static ref GIT_GLOBAL_OPT: Regex =
         Regex::new(r#"^(?:(?:-C\s+(?:"[^"]+"|'[^']+'|\S+)|-c\s+(?:"[^"]+"|'[^']+'|\S+)|--git-dir(?:=(?:"[^"]+"|'[^']+'|\S+)|\s+(?:"[^"]+"|'[^']+'|\S+))|--work-tree(?:=(?:"[^"]+"|'[^']+'|\S+)|\s+(?:"[^"]+"|'[^']+'|\S+))|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+"#).unwrap();
+    // rustup `+toolchain` selector after `cargo` (e.g. `cargo +nightly test`,
+    // `cargo +stable build`). Stripped during `normalise_command` so the
+    // classifier sees the bare `cargo <subcommand>` and the rule pattern matches.
+    // The toolchain token is preserved in the rewrite path (`cmd_part_norm`)
+    // so the executed command keeps its toolchain selector — mirrors how the
+    // git `-C <dir>` global opt is stripped for classification but re-prepended
+    // in the rewrite. Restricted to `+<word/.-/>` so it can never smuggle a
+    // flag or shell metacharacter.
+    static ref CARGO_TOOLCHAIN_OPT: Regex =
+        Regex::new(r"^\+[A-Za-z0-9][A-Za-z0-9._-]*\s+").unwrap();
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
@@ -282,6 +292,20 @@ fn strip_git_global_opts(cmd: &str) -> String {
     format!("git {}", stripped.trim())
 }
 
+/// Strip the rustup `+toolchain` selector after `cargo` (#cargo-toolchain).
+/// `cargo +nightly test` → `cargo test`, preserving the rest. Returns the
+/// original string unchanged if not a cargo command or no `+toolchain` present.
+/// Classification-only: the rewrite path keeps the selector so the spawned
+/// command still runs against the requested toolchain.
+fn strip_cargo_toolchain(cmd: &str) -> String {
+    if !cmd.starts_with("cargo ") {
+        return cmd.to_string();
+    }
+    let after_cargo = &cmd[6..]; // skip "cargo "
+    let stripped = CARGO_TOOLCHAIN_OPT.replace(after_cargo, "");
+    format!("cargo {}", stripped.trim())
+}
+
 /// Normalise a command for classifier/rewriter input so the same form is
 /// seen by `classify_command`, `rewrite_segment_inner`, and the
 /// `is_excluded` check (#83):
@@ -294,6 +318,7 @@ fn normalise_command(cmd: &str) -> String {
     let stripped = strip_absolute_path(&stripped);
     let stripped = ENV_PREFIX.replace(&stripped, "").to_string();
     let stripped = strip_git_global_opts(stripped.trim());
+    let stripped = strip_cargo_toolchain(stripped.trim());
     strip_golangci_global_opts(&stripped)
 }
 
@@ -1695,6 +1720,59 @@ mod tests {
 
     #[test]
     fn test_rewrite_cargo_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test", &[]),
+            Some("contextcrawler cargo test".into())
+        );
+    }
+
+    // --- cargo +toolchain (rustup selector) ---
+
+    #[test]
+    fn test_classify_cargo_toolchain() {
+        // `cargo +nightly test` classifies the SAME as `cargo test`: the
+        // selector is stripped for classification (capture 1 = "test").
+        assert_eq!(
+            classify_command("cargo +nightly test"),
+            Classification::Supported {
+                rtk_equivalent: "contextcrawler cargo",
+                category: "Cargo",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cargo_toolchain_preserved() {
+        // `cargo +nightly test` rewrites like `cargo test` but KEEPS `+nightly`
+        // so the spawned command runs against the requested toolchain.
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo +nightly test", &[]),
+            Some("contextcrawler cargo +nightly test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo +stable build --release", &[]),
+            Some("contextcrawler cargo +stable build --release".into())
+        );
+    }
+
+    #[test]
+    fn test_strip_cargo_toolchain_helper() {
+        assert_eq!(strip_cargo_toolchain("cargo +nightly test"), "cargo test");
+        assert_eq!(
+            strip_cargo_toolchain("cargo +1.75.0 build --release"),
+            "cargo build --release"
+        );
+        // Non-regression: a plain cargo command is untouched.
+        assert_eq!(strip_cargo_toolchain("cargo test"), "cargo test");
+        // Non-regression: not a cargo command — left alone.
+        assert_eq!(strip_cargo_toolchain("git status"), "git status");
+    }
+
+    #[test]
+    fn test_rewrite_cargo_no_toolchain_unchanged() {
+        // Non-regression: plain `cargo test` still rewrites as before.
         assert_eq!(
             rewrite_command_no_prefixes("cargo test", &[]),
             Some("contextcrawler cargo test".into())
