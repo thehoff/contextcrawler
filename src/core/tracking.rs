@@ -494,6 +494,16 @@ impl Tracker {
             "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
             [],
         );
+        // Migration: add inflation_tokens column (#196). `saved_tokens` is
+        // floored at zero by `saturating_sub`, so a filter that emits MORE
+        // tokens than it consumed records as "0% saved" and the regression is
+        // invisible. This column records the net overflow (output - input,
+        // floored at zero) honestly so inflation is measurable without making
+        // `saved_tokens` signed (which would break unsigned SUM aggregations).
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN inflation_tokens INTEGER DEFAULT 0",
+            [],
+        );
         // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
         let has_nulls: bool = conn
             .query_row(
@@ -632,7 +642,8 @@ impl Tracker {
                 saved_tokens INTEGER NOT NULL,
                 savings_pct REAL NOT NULL,
                 exec_time_ms INTEGER DEFAULT 0,
-                project_path TEXT DEFAULT ''
+                project_path TEXT DEFAULT '',
+                inflation_tokens INTEGER DEFAULT 0
             )",
             [],
         )?;
@@ -707,6 +718,10 @@ impl Tracker {
         } else {
             0.0
         };
+        // #196: when a filter emits more than it consumed, `saved` is floored
+        // at 0 and the regression vanishes from the headline stats. Record the
+        // overflow separately so it stays measurable (`SELECT SUM(inflation_tokens)`).
+        let inflation = output_tokens.saturating_sub(input_tokens);
 
         let project_path = current_project_path_string(); // added: record cwd
 
@@ -716,8 +731,8 @@ impl Tracker {
         let rtk_cmd = scrub_secrets(rtk_cmd);
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms, inflation_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", // added: project_path, inflation_tokens (#196)
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
@@ -727,7 +742,8 @@ impl Tracker {
                 output_tokens as i64,
                 saved as i64,
                 pct,
-                exec_time_ms as i64
+                exec_time_ms as i64,
+                inflation as i64 // added (#196)
             ],
         )?;
 
@@ -872,6 +888,22 @@ impl Tracker {
     #[allow(dead_code)]
     pub fn get_summary(&self) -> Result<GainSummary> {
         self.get_summary_filtered(None) // delegate to filtered variant
+    }
+
+    /// Total tokens by which filters INFLATED output beyond input (#196).
+    ///
+    /// `saved_tokens` is floored at zero (`saturating_sub`), so a filter that
+    /// emits more than it consumed shows as "0% saved" and the regression is
+    /// invisible in the headline stats. This is the honest measure of that
+    /// overflow across all recorded commands.
+    #[allow(dead_code)]
+    pub fn total_inflation_tokens(&self) -> Result<usize> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(inflation_tokens), 0) FROM commands",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(total as usize)
     }
 
     /// Get summary statistics filtered by project path. // added
@@ -1934,6 +1966,23 @@ mod tests {
     /// env-mutating test (issue #69). This single shared lock is the real
     /// serialisation point; every env-touching test must hold it.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn inflation_tokens_captured_when_filter_inflates() {
+        // #196: a filter that emits MORE than it consumed must record the
+        // overflow in inflation_tokens, while saved_tokens stays floored at 0.
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        t.record("git log", "rtk git log", 100, 30, 0).unwrap(); // saves 70
+        t.record("grep x", "rtk fallback: grep x", 10, 25, 0)
+            .unwrap(); // inflates by 15
+        assert_eq!(
+            t.total_inflation_tokens().unwrap(),
+            15,
+            "the 15-token overflow must be recorded honestly"
+        );
+        // saved_tokens is still floored: only the saving row contributes.
+        assert_eq!(t.get_summary().unwrap().total_saved, 70);
+    }
 
     #[test]
     fn scrub_redacts_password_flag_with_equals() {
