@@ -81,7 +81,9 @@ lazy_static! {
     // to the native `head`/`tail` binary — which already handles multi-file with
     // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_LINES_SPACE: Regex = Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
@@ -767,7 +769,7 @@ fn rewrite_compound(
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_N_SPACE, &*HEAD_LINES, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
@@ -2270,6 +2272,33 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
             Some("contextcrawler read src/lib.rs --max-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_space_flag() {
+        // `head -n 5 file` — space form, parity with `tail -n 5 file`.
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 5 src/main.rs", &[]),
+            Some("contextcrawler read src/main.rs --max-lines 5".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_space_flag() {
+        // `head --lines 7 file` — space form, parity with `tail --lines 7 file`.
+        assert_eq!(
+            rewrite_command_no_prefixes("head --lines 7 src/lib.rs", &[]),
+            Some("contextcrawler read src/lib.rs --max-lines 7".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_space_multi_file_skipped() {
+        // Non-regression: multi-file `head -n N a b` still skips (single-file only).
+        assert_eq!(
+            rewrite_command_no_prefixes("head -n 5 /tmp/a /tmp/b", &[]),
+            None
         );
     }
 
