@@ -2,6 +2,7 @@
 
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
+use std::borrow::Cow;
 
 use super::lexer::{extract_substitutions, split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
@@ -576,12 +577,33 @@ fn segment_stdout_is_redirected(cmd: &str) -> bool {
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
 /// else. Matching is literal, not pattern-based: configure the exact concrete
 /// prefix you use.
+lazy_static! {
+    /// Bash line continuation: a backslash immediately before a newline
+    /// (LF, CRLF, or legacy CR), plus any surrounding horizontal whitespace,
+    /// collapses to a single space.
+    static ref LINE_CONTINUATION_RE: Regex =
+        Regex::new(r"[ \t]*\\(?:\r\n|\n|\r)[ \t]*").unwrap();
+}
+
+/// Collapse bash line continuations (`\<newline>`, incl. CRLF/CR) to a single
+/// space so a continuation-broken command still matches a rewrite rule (upstream
+/// rtk-ai/rtk 2543be5 / #1564). Claude Code emits these for long invocations,
+/// e.g. `git diff \<NL>HEAD~1`. Mirrors the same normalisation the supply-chain
+/// gate already applies on its own path. `Cow::Borrowed` fast-path: no alloc
+/// when the command has no continuation.
+fn collapse_line_continuations(s: &str) -> Cow<'_, str> {
+    LINE_CONTINUATION_RE.replace_all(s, " ")
+}
+
 pub fn rewrite_command(
     cmd: &str,
     excluded: &[String],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    let trimmed = cmd.trim();
+    // Normalise line continuations BEFORE matching (upstream 2543be5): a
+    // `\<NL>`-broken command would otherwise fall through to raw passthrough.
+    let normalized = collapse_line_continuations(cmd);
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -4803,5 +4825,63 @@ mod tests {
     fn issue_195_rewrite_bare_sh_not_wrapper_unaffected() {
         // `sh script.sh` is not a `-c` wrapper — must stay raw (ignored prefix).
         assert_eq!(rewrite_command_no_prefixes("sh script.sh", &[]), None);
+    }
+
+    // --- line-continuation handling (upstream 2543be5 / #1564) ----------
+
+    #[test]
+    fn test_rewrite_internal_backslash_newline_matches_single_line() {
+        // Claude Code emits long commands with a `\<NL>` between the subcommand
+        // and its args; must rewrite to the same thing as the single-line form.
+        let multiline = rewrite_command_no_prefixes("git diff \\\nHEAD~1 --stat", &[]);
+        let single = rewrite_command_no_prefixes("git diff HEAD~1 --stat", &[]);
+        assert_eq!(multiline, Some("contextcrawler git diff HEAD~1 --stat".into()));
+        assert_eq!(multiline, single);
+    }
+
+    #[test]
+    fn test_rewrite_leading_backslash_newline() {
+        assert_eq!(
+            rewrite_command_no_prefixes("\\\ngit diff HEAD~1", &[]),
+            Some("contextcrawler git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_leading_backslash_crlf() {
+        assert_eq!(
+            rewrite_command_no_prefixes("\\\r\ngit diff HEAD~1", &[]),
+            Some("contextcrawler git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_backslash_newline_with_indent() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git \\\n    diff HEAD~1", &[]),
+            Some("contextcrawler git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_no_line_continuation_unchanged() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff HEAD~1", &[]),
+            Some("contextcrawler git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_collapse_line_continuations_borrows_when_no_match() {
+        // Zero-alloc fast path: no continuation → borrowed, not owned.
+        match collapse_line_continuations("git diff HEAD~1") {
+            Cow::Borrowed(_) => {}
+            Cow::Owned(_) => panic!("expected Cow::Borrowed for input without continuations"),
+        }
+    }
+
+    #[test]
+    fn test_collapse_line_continuations_collapses_to_single_space() {
+        assert_eq!(collapse_line_continuations("git diff \\\nHEAD~1"), "git diff HEAD~1");
     }
 }
