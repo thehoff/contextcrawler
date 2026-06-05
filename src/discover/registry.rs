@@ -75,6 +75,28 @@ lazy_static! {
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
+    // #195: shell-wrapper prefix. Matches `sh`/`bash`/`zsh` followed by a
+    // combined `-c`/`-lc`/`-ic` etc. flag whose effect is "read the script
+    // from the next argument", then an opening quote. The flag class is
+    // restricted to letters that combine harmlessly with `-c` (`l` login,
+    // `i` interactive, `e`/`x` debug). A flag we don't model (e.g.
+    // `-o pipefail`, `-s`, separate `-l -c`) fails to match → no unwrap.
+    // Capture 1 = the opening quote char so the inner span and matching
+    // closing quote can be located by `unwrap_shell_wrapper`.
+    static ref SHELL_WRAPPER_PREFIX: Regex =
+        Regex::new(r#"^(?:sh|bash|zsh)\s+-[liex]*c\s+(['"])"#).unwrap();
+    // #195: `sudo` carrying flags before the inner command. Bare `sudo ` (no
+    // flags) is already handled by ENV_PREFIX; this catches `sudo -u user`,
+    // `sudo -E`, `sudo -H -u user`, etc. so the inner command can be
+    // classified/filtered while the spawned command KEEPS sudo (privileges
+    // intact). Each alternative is one flag-with-its-argument or a value-less
+    // flag; value-taking forms are listed FIRST so they win the leftmost match:
+    //   `-u user` / `--user=user` / `--user user`  (and -g/-p/-C/-h/-r/-t/-U)
+    //   `-E`, `-H`, `-k`, `-n`, `-b`, `-s`, `-i` ... value-less short flags
+    // A flag we don't model ends the run → no strip → raw passthrough (safe).
+    static ref SUDO_FLAGS_PREFIX: Regex = Regex::new(
+        r#"^sudo\s+(?:(?:-[ugpChrtU]|--(?:user|group|prompt|close-from|host|role|type|other-user))(?:=\S+\s+|\s+\S+\s+)|-[EHknbsiABPS]+\s+|--(?:preserve-env|set-home|reset-timestamp|non-interactive|background|shell|login|askpass|preserve-groups)\s+)+"#
+    ).unwrap();
 }
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
@@ -809,6 +831,23 @@ fn rewrite_segment_inner(
         return None;
     }
 
+    // #195: `sudo` with flags (`sudo -u user <cmd>`). Strip the `sudo …`
+    // prefix for classification but RE-PREPEND it so the spawned command still
+    // runs with the requested privileges. This MUST run before the ENV_PREFIX
+    // block below: ENV_PREFIX matches a bare leading `sudo ` only, so it would
+    // otherwise strip `sudo ` and leave the orphan flags (`-u user <cmd>`)
+    // which never classify. Bare `sudo <cmd>` (no flags) still falls through to
+    // the ENV_PREFIX handling.
+    if let Some(m) = SUDO_FLAGS_PREFIX.find(trimmed) {
+        let prefix = trimmed[..m.end()].trim_end();
+        let rest = trimmed[m.end()..].trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+        return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
+    }
+
     let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
     if !env_prefix.is_empty() {
         // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
@@ -847,6 +886,30 @@ fn rewrite_segment_inner(
             return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
                 .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
+    }
+
+    // #195: shell-wrapper unwrap. `sh -c 'git log'` / `bash -lc 'cargo test'`
+    // with a SINGLE simple inner command — rewrite the inner and re-wrap so
+    // its output gets filtered. Compound inner scripts (pipes, &&, subst,
+    // redirects, globs, nested quotes) return None from `unwrap_shell_wrapper`
+    // and fall through to raw passthrough. The gates already saw the full raw
+    // wrapper string in `hook_cmd::run_gates` before this rewrite runs, so this
+    // is filter-selection only and never bypasses Tirith / supply-chain.
+    if let Some((prefix, quote, inner)) = unwrap_shell_wrapper(trimmed) {
+        // Recurse on the inner command. Only re-wrap if it actually rewrote to
+        // something different — otherwise leave the wrapper raw (None).
+        if let Some(rewritten_inner) =
+            rewrite_segment_inner(inner, excluded, transparent_prefixes, depth + 1)
+        {
+            if rewritten_inner != inner {
+                // `unwrap_shell_wrapper` guarantees the inner had no quote of
+                // either kind, and the rewrite only prepends `contextcrawler `
+                // / re-uses the inner's own (quote-free) args, so the rewritten
+                // inner cannot contain `quote`. Safe to re-wrap verbatim.
+                return Some(format!("{}{}{}", prefix, rewritten_inner, quote));
+            }
+        }
+        return None;
     }
 
     // #166: if ANY redirect on this segment diverts stdout away from the
@@ -964,6 +1027,62 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+/// #195: A `sh -c '<inner>'` / `bash -lc "<inner>"` wrapper whose inner
+/// script is a SINGLE simple command. Returns `(prefix, quote, inner)` so the
+/// caller can rewrite `inner` and re-wrap as `<prefix><quote><rewritten><quote>`.
+///
+/// Conservative by design — returns `None` (raw passthrough) for anything that
+/// isn't trivially safe to rewrite:
+/// - flags we don't model (`-o pipefail`, `-s`, separate `-l -c`)
+/// - any shell metacharacter in the inner script: `&`, `|`, `;`, `$`,
+///   backtick, `<`, `>`, `(`, `)`, `{`, `}`, newline, backslash, glob `*?[`,
+///   or a quote of either kind. The presence of ANY of these means the inner
+///   is a compound script / substitution / redirect, NOT a single command —
+///   rewriting it would change semantics, so we leave the whole thing raw.
+///
+/// This is a FILTER-SELECTION decision only. The security gates have already
+/// run on the full raw `sh -c '...'` string in `hook_cmd::run_gates` before
+/// any rewrite is attempted (#195), so unwrapping never bypasses Tirith /
+/// supply-chain.
+fn unwrap_shell_wrapper(cmd: &str) -> Option<(&str, char, &str)> {
+    let caps = SHELL_WRAPPER_PREFIX.captures(cmd)?;
+    let m = caps.get(0)?;
+    let quote = caps.get(1)?.as_str().chars().next()?;
+
+    // The opening quote is the last byte of the prefix match. The inner span
+    // runs from there to the matching closing quote, which must be the final
+    // non-whitespace char of the command (a single quoted argument, nothing
+    // after it).
+    let prefix = &cmd[..m.end()];
+    let after_quote = &cmd[m.end()..];
+
+    // Everything after the inner script must be exactly the closing quote
+    // (optionally followed by trailing whitespace). Find the closing quote.
+    let close_rel = after_quote.find(quote)?;
+    let inner = &after_quote[..close_rel];
+    let tail = after_quote[close_rel + quote.len_utf8()..].trim();
+    if !tail.is_empty() {
+        return None;
+    }
+
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    // Reject anything that isn't a single simple command. Any of these means
+    // the inner is compound / has substitutions / redirects / globs / nested
+    // quotes — too risky to rewrite, leave raw.
+    const UNSAFE: &[char] = &[
+        '&', '|', ';', '$', '`', '<', '>', '(', ')', '{', '}', '\n', '\\', '*', '?', '[', '\'', '"',
+    ];
+    if inner.chars().any(|c| UNSAFE.contains(&c)) {
+        return None;
+    }
+
+    Some((prefix, quote, inner))
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -4434,14 +4553,16 @@ mod tests {
         );
     }
 
-    /// Nested shells (`sh -lc '...'`) currently bypass rewrite — assert
-    /// that explicitly so the safer-than-rewriting-blindly behaviour
-    /// noted in the issue is locked in.
+    /// #195 supersedes the original #166 stance for the SIMPLE single-command
+    /// case: `sh -lc 'git status'` now unwraps and rewrites the inner command
+    /// (re-wrapped in the shell) so its output is filtered. The conservative
+    /// "bypass" behaviour is retained for compound inner scripts — see
+    /// `issue_195_rewrite_sh_c_compound_passthrough`.
     #[test]
-    fn issue_166_nested_shell_bypasses_rewrite() {
+    fn issue_166_195_nested_shell_simple_command_is_rewritten() {
         assert_eq!(
             rewrite_command_no_prefixes("sh -lc 'git status'", &[]),
-            None
+            Some("sh -lc 'contextcrawler git status'".into())
         );
     }
 
@@ -4528,5 +4649,159 @@ mod tests {
             rewrite_command_no_prefixes("git log | tee f > /dev/null", &[]),
             None
         );
+    }
+
+    // --- #195: wrapper-command unwrap (sh -c / bash -lc / sudo flags) ---
+
+    #[test]
+    fn issue_195_unwrap_sh_c_single_quote() {
+        assert_eq!(
+            unwrap_shell_wrapper("sh -c 'git status'"),
+            Some(("sh -c '", '\'', "git status"))
+        );
+    }
+
+    #[test]
+    fn issue_195_unwrap_bash_lc_double_quote() {
+        assert_eq!(
+            unwrap_shell_wrapper(r#"bash -lc "cargo test""#),
+            Some((r#"bash -lc ""#, '"', "cargo test"))
+        );
+    }
+
+    #[test]
+    fn issue_195_unwrap_zsh_ic() {
+        assert_eq!(
+            unwrap_shell_wrapper("zsh -ic 'git log'"),
+            Some(("zsh -ic '", '\'', "git log"))
+        );
+    }
+
+    #[test]
+    fn issue_195_unwrap_compound_and_returns_none() {
+        // `a && b` is a compound script — must NOT unwrap.
+        assert_eq!(unwrap_shell_wrapper("sh -c 'git add . && cargo test'"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_pipe_returns_none() {
+        assert_eq!(unwrap_shell_wrapper("sh -c 'git log | head'"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_semicolon_returns_none() {
+        assert_eq!(unwrap_shell_wrapper("bash -c 'cd /tmp; ls'"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_subst_returns_none() {
+        assert_eq!(unwrap_shell_wrapper("sh -c 'echo $(date)'"), None);
+        assert_eq!(unwrap_shell_wrapper("sh -c 'git log `whoami`'"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_redirect_returns_none() {
+        assert_eq!(unwrap_shell_wrapper("sh -c 'git log > out.txt'"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_glob_returns_none() {
+        assert_eq!(unwrap_shell_wrapper("sh -c 'ls *.rs'"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_trailing_token_returns_none() {
+        // A bare positional arg after the quoted script ($0/extra args) — the
+        // inner isn't the whole command; refuse to unwrap.
+        assert_eq!(unwrap_shell_wrapper("sh -c 'git status' extra"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_unmodelled_flag_returns_none() {
+        // `-o pipefail` is not a flag we model — leave raw.
+        assert_eq!(unwrap_shell_wrapper("bash -o pipefail -c 'git log'"), None);
+        // Separate `-l -c` (not combined) — not modelled.
+        assert_eq!(unwrap_shell_wrapper("bash -l -c 'git log'"), None);
+        // `-s` reads from stdin, not an arg — not a wrapper we unwrap.
+        assert_eq!(unwrap_shell_wrapper("sh -s 'git log'"), None);
+    }
+
+    #[test]
+    fn issue_195_unwrap_empty_inner_returns_none() {
+        assert_eq!(unwrap_shell_wrapper("sh -c ''"), None);
+    }
+
+    #[test]
+    fn issue_195_rewrite_sh_c_git_log() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sh -c 'git log'", &[]),
+            Some("sh -c 'contextcrawler git log'".into())
+        );
+    }
+
+    #[test]
+    fn issue_195_rewrite_bash_lc_cargo_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes(r#"bash -lc "cargo test""#, &[]),
+            Some(r#"bash -lc "contextcrawler cargo test""#.into())
+        );
+    }
+
+    #[test]
+    fn issue_195_rewrite_sh_c_compound_passthrough() {
+        // Compound inner must NOT rewrite — stays raw (None).
+        assert_eq!(
+            rewrite_command_no_prefixes("sh -c 'git add . && cargo test'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn issue_195_rewrite_sh_c_unsupported_inner_passthrough() {
+        // Single but unsupported inner (`htop`) — nothing to rewrite, raw.
+        assert_eq!(rewrite_command_no_prefixes("sh -c 'htop'", &[]), None);
+    }
+
+    #[test]
+    fn issue_195_rewrite_sudo_flag_user_ls() {
+        // `sudo -u x ls` — strip sudo+flags for classification, KEEP sudo on
+        // the spawned command (privileges preserved).
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo -u x ls", &[]),
+            Some("sudo -u x contextcrawler ls".into())
+        );
+    }
+
+    #[test]
+    fn issue_195_rewrite_sudo_bare_still_works() {
+        // Regression: bare `sudo <cmd>` (handled by ENV_PREFIX) unaffected.
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo docker ps", &[]),
+            Some("sudo contextcrawler docker ps".into())
+        );
+    }
+
+    #[test]
+    fn issue_195_rewrite_sudo_value_less_flags() {
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo -E -H -u root cargo test", &[]),
+            Some("sudo -E -H -u root contextcrawler cargo test".into())
+        );
+    }
+
+    #[test]
+    fn issue_195_rewrite_sudo_sh_c_combo() {
+        // `sudo sh -c 'git log'` — sudo (bare, via ENV_PREFIX) then the shell
+        // wrapper unwrap. sudo + wrapper both preserved.
+        assert_eq!(
+            rewrite_command_no_prefixes("sudo sh -c 'git log'", &[]),
+            Some("sudo sh -c 'contextcrawler git log'".into())
+        );
+    }
+
+    #[test]
+    fn issue_195_rewrite_bare_sh_not_wrapper_unaffected() {
+        // `sh script.sh` is not a `-c` wrapper — must stay raw (ignored prefix).
+        assert_eq!(rewrite_command_no_prefixes("sh script.sh", &[]), None);
     }
 }
