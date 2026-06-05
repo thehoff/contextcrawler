@@ -20,6 +20,26 @@ runs. Tirith returns one of:
 A separate supply-chain gate inspects `npm`/`pip`-class install commands;
 it is opt-in via `~/.config/contextcrawler/supply-chain.toml`.
 
+## Read the prompt — it tells you how to allow it
+
+When the gate downgrades a command to Ask, ContextCrawler now fills the
+permission prompt (and the legacy `rewrite` path's stderr) with the offending
+host, the rules that fired, and a copy-paste fix — `--scope repo` first, then
+`--scope user` for everywhere:
+
+```
+contextcrawler: Tirith flagged this command before it ran.
+  rules: plain_http_to_sink, private_network_access
+  host gitea.example.com:
+    trust here:       tirith trust add gitea.example.com --scope repo
+    trust everywhere: tirith trust add gitea.example.com --scope user
+  review: tirith trust last   ·   why: tirith why
+```
+
+Only the host is ever shown — never the path/query/credentials. Pattern-only
+rules (e.g. `pipe_to_interpreter`) have no host to trust, so the hint points
+you at `tirith why` instead (these are the false-positive-prone ones).
+
 ## Diagnose what fired
 
 When a command is blocked, find out which rule matched before changing

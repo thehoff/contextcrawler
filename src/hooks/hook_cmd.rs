@@ -396,7 +396,11 @@ pub(crate) enum GateDecision {
     /// A gate wants the user prompted: downgrade any auto-allow to Ask.
     /// Either a Tirith downgrade, or the supply-chain gate could not verify
     /// (`Unavailable` — fail closed).
-    Ask,
+    ///
+    /// `suggestion` carries an optional copy-paste trust hint built from the
+    /// Tirith verdict (#197) — `Some` for a Tirith block with a resolvable
+    /// host/rule, `None` for supply-chain Asks or unparseable verdicts.
+    Ask { suggestion: Option<String> },
     /// The supply-chain gate hard-blocked the command. Fail closed with a
     /// Claude `deny` verdict — reuses the #102 `PayloadAction::Deny`.
     Deny { reason: String },
@@ -423,15 +427,19 @@ pub(crate) fn gate_decision(
     // downgrade to Ask. `should_downgrade` already honours the opt-in
     // (`CONTEXTCRAWLER_TIRITH_REQUIRED`) — when tirith is not required and is
     // merely unavailable it returns `None`, so this is a no-op by default.
-    if tirith_gate::should_downgrade(tirith_verdict).is_some() {
-        return GateDecision::Ask;
+    if let Some((_reason, tirith_json)) = tirith_gate::should_downgrade(tirith_verdict) {
+        // Build the copy-paste trust hint (#197) from the verdict when we have
+        // one. `suggest_trust` is pure string parsing, so this keeps
+        // `gate_decision` I/O-free and unit-testable.
+        let suggestion = tirith_json.and_then(tirith_gate::suggest_trust);
+        return GateDecision::Ask { suggestion };
     }
 
     // Supply-chain `Unavailable` — registry/OSV lookup failed. The gate is
     // opt-in (`supply_chain.enabled`); once enabled we fail CLOSED: prompt
     // the user rather than wave the install through on a network blip.
     if let supply_chain_gate::Verdict::Unavailable(_) = sc_verdict {
-        return GateDecision::Ask;
+        return GateDecision::Ask { suggestion: None };
     }
 
     // Supply-chain `Ask` — an install verb was detected but its package set
@@ -439,7 +447,7 @@ pub(crate) fn gate_decision(
     // hard failure, but we fail CLOSED: prompt the user to confirm the
     // unvetted set rather than wave it through. See #111 G1.
     if let supply_chain_gate::Verdict::Ask(_) = sc_verdict {
-        return GateDecision::Ask;
+        return GateDecision::Ask { suggestion: None };
     }
 
     // Tirith Allow/Unavailable-not-required, supply-chain Skip/Allow.
@@ -461,7 +469,7 @@ pub(crate) fn run_gates(cmd: &str) -> GateDecision {
     // Emit the Tirith downgrade audit line when (and only when) the
     // classification is an Ask driven by Tirith — the pure `gate_decision`
     // does no I/O, so the logging stays here on the production path.
-    if matches!(decision, GateDecision::Ask) {
+    if matches!(decision, GateDecision::Ask { .. }) {
         if let Some((reason, tirith_json)) = tirith_gate::should_downgrade(&tirith_verdict) {
             tirith_gate::log_downgrade(cmd, reason, tirith_json);
         }
@@ -489,8 +497,8 @@ pub(crate) enum ProxyGateOutcome {
 pub(crate) fn proxy_gate_outcome(decision: GateDecision, ack: bool) -> ProxyGateOutcome {
     match decision {
         GateDecision::Proceed => ProxyGateOutcome::Run,
-        GateDecision::Ask if ack => ProxyGateOutcome::Run,
-        GateDecision::Ask => ProxyGateOutcome::Refuse {
+        GateDecision::Ask { .. } if ack => ProxyGateOutcome::Run,
+        GateDecision::Ask { .. } => ProxyGateOutcome::Refuse {
             reason: "contextcrawler: a defence-in-depth gate (Tirith / supply-chain) flagged \
                      this proxied command for review.\n\
                      To proceed after reviewing it, re-run with CONTEXTCRAWLER_PROXY_ACK=1, \
@@ -548,6 +556,9 @@ fn process_claude_payload_with_gate(
     // Set by the defence-in-depth gates below: when a gate returns Ask, the
     // permission `Allow` must be suppressed so Claude Code prompts the user.
     let mut gate_ask = false;
+    // Copy-paste trust hint built from the Tirith verdict (#197), surfaced in
+    // the Ask permission reason so the user can act on the flag.
+    let mut gate_suggestion: Option<String> = None;
     // Distinguish "legitimately no command to rewrite" (Ignore — correct)
     // from "malformed payload shape" (Deny — fail closed, #100 G2).
     let cmd = match v.pointer("/tool_input/command") {
@@ -592,11 +603,12 @@ fn process_claude_payload_with_gate(
     // default behaviour is byte-for-byte unchanged.
     match gate(cmd) {
         GateDecision::Proceed => {}
-        GateDecision::Ask => {
+        GateDecision::Ask { suggestion } => {
             // A gate wants the user prompted. Force the rewrite path to Ask
             // by overriding the permission verdict — a gate Ask must win over
             // a permissions `Allow` so Claude Code prompts.
             gate_ask = true;
+            gate_suggestion = suggestion;
         }
         GateDecision::Deny { reason } => {
             // Supply-chain hard block — fail closed with the #102 deny
@@ -624,10 +636,15 @@ fn process_claude_payload_with_gate(
                 // a gate false-positive on a bare un-rewritable command (e.g.
                 // `ls`) is then a visible prompt, not a silent block.
                 let _ = writeln!(io::stderr(), "{}", gate_no_rewrite_ask_log(cmd));
+                // Prefer the tailored trust hint (#197) when we have one; fall
+                // back to the generic line otherwise.
+                let reason = gate_suggestion.take().unwrap_or_else(|| {
+                    "contextcrawler: a defence-in-depth gate flagged this command \
+                     — review before allowing"
+                        .to_string()
+                });
                 return PayloadAction::Ask {
-                    reason: "contextcrawler: a defence-in-depth gate flagged this command \
-                             — review before allowing"
-                        .to_string(),
+                    reason,
                     audit_tag: "ask:gate_no_rewrite",
                     cmd: cmd.to_string(),
                 };
@@ -647,9 +664,16 @@ fn process_claude_payload_with_gate(
         ti
     };
 
+    // When a gate flagged this (rewritable) command, surface the tailored
+    // trust hint (#197) as the reason the user sees in the Ask prompt;
+    // otherwise it's a clean auto-rewrite.
+    let decision_reason = match (gate_ask, gate_suggestion.take()) {
+        (true, Some(hint)) => hint,
+        _ => "contextcrawler auto-rewrite".to_string(),
+    };
     let mut hook_output = json!({
         "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "contextcrawler auto-rewrite",
+        "permissionDecisionReason": decision_reason,
         "updatedInput": updated_input
     });
 
@@ -1387,7 +1411,8 @@ mod tests {
             &TirithVerdict::Allow,
             &ScVerdict::Unavailable("registry timeout".into()),
         );
-        assert_eq!(d, GateDecision::Ask);
+        // supply-chain Ask carries no trust hint (that's Tirith-only).
+        assert_eq!(d, GateDecision::Ask { suggestion: None });
     }
 
     /// Both gates clean → Proceed unchanged.
@@ -1431,7 +1456,7 @@ mod tests {
     /// instructions naming the override env var.
     #[test]
     fn test_proxy_gate_ask_refuses_without_ack() {
-        match proxy_gate_outcome(GateDecision::Ask, false) {
+        match proxy_gate_outcome(GateDecision::Ask { suggestion: None }, false) {
             ProxyGateOutcome::Refuse { reason, exit_code } => {
                 assert_eq!(exit_code, 126);
                 assert!(
@@ -1448,7 +1473,7 @@ mod tests {
     #[test]
     fn test_proxy_gate_ask_runs_with_explicit_ack() {
         assert!(matches!(
-            proxy_gate_outcome(GateDecision::Ask, true),
+            proxy_gate_outcome(GateDecision::Ask { suggestion: None }, true),
             ProxyGateOutcome::Run
         ));
     }
@@ -1474,13 +1499,34 @@ mod tests {
     /// positive flag).
     #[test]
     fn test_gate_decision_tirith_block_is_ask() {
+        // Empty verdict body → no resolvable host → Ask with no hint.
         let d = gate_decision(
             &TirithVerdict::Block {
                 tirith_json: "{}".into(),
             },
             &ScVerdict::Skip,
         );
-        assert_eq!(d, GateDecision::Ask);
+        assert_eq!(d, GateDecision::Ask { suggestion: None });
+    }
+
+    #[test]
+    fn test_gate_decision_tirith_block_carries_trust_hint() {
+        // #197: a verdict with a host-bearing finding produces a trust hint.
+        let json = r#"{"action":"block","findings":[
+            {"rule_id":"plain_http_to_sink","evidence":[{"type":"url","raw":"http://gitea.example.com:3000/x"}]}
+        ]}"#;
+        let d = gate_decision(
+            &TirithVerdict::Block {
+                tirith_json: json.into(),
+            },
+            &ScVerdict::Skip,
+        );
+        match d {
+            GateDecision::Ask {
+                suggestion: Some(hint),
+            } => assert!(hint.contains("tirith trust add gitea.example.com --scope repo")),
+            other => panic!("expected Ask with hint, got {other:?}"),
+        }
     }
 
     /// Precedence: a supply-chain `Block` outranks a Tirith Ask.
@@ -1511,7 +1557,7 @@ mod tests {
         let action = process_claude_payload_with_gate(
             &v,
             |_| PermissionVerdict::Default,
-            |_| GateDecision::Ask,
+            |_| GateDecision::Ask { suggestion: None },
         );
         match action {
             PayloadAction::Ask {
@@ -1522,6 +1568,33 @@ mod tests {
                 assert_eq!(audit_tag, "ask:gate_no_rewrite");
                 assert_eq!(cmd, "htop");
                 assert!(reason.contains("defence-in-depth gate"));
+            }
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    /// #197: when the gate Ask carries a trust suggestion, it must surface as
+    /// the Ask `reason` the user sees — not the generic fallback line.
+    #[test]
+    fn test_gate_ask_suggestion_surfaces_in_reason() {
+        let v = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "htop" }
+        });
+        let hint = "trust here: tirith trust add example.com --scope repo";
+        let action = process_claude_payload_with_gate(
+            &v,
+            |_| PermissionVerdict::Default,
+            |_| GateDecision::Ask {
+                suggestion: Some(hint.to_string()),
+            },
+        );
+        match action {
+            PayloadAction::Ask { reason, .. } => {
+                assert!(
+                    reason.contains("tirith trust add example.com --scope repo"),
+                    "the trust hint must reach the user-visible reason, got: {reason}"
+                );
             }
             other => panic!("expected Ask, got {other:?}"),
         }
@@ -1540,7 +1613,7 @@ mod tests {
         let action = process_claude_payload_with_gate(
             &v,
             |_| PermissionVerdict::Default,
-            |_| GateDecision::Ask,
+            |_| GateDecision::Ask { suggestion: None },
         );
         let emitted = match action {
             PayloadAction::Ask { reason, .. } => json!({
@@ -1572,7 +1645,7 @@ mod tests {
         let action = process_claude_payload_with_gate(
             &v,
             |_| PermissionVerdict::Allow,
-            |_| GateDecision::Ask,
+            |_| GateDecision::Ask { suggestion: None },
         );
         match action {
             PayloadAction::Rewrite { output, .. } => {

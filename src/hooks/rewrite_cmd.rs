@@ -53,6 +53,11 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
                             "required but unavailable"
                         }
                     );
+                    // Surface the copy-paste trust hint (#197) so the operator
+                    // can allowlist the host without digging through logs.
+                    if let Some(hint) = tirith_json.and_then(tirith_gate::suggest_trust) {
+                        eprintln!("{hint}");
+                    }
                     tirith_gate::log_downgrade(cmd, reason, tirith_json);
                     print!("{}", rewritten);
                     let _ = std::io::stdout().flush();

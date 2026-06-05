@@ -533,6 +533,151 @@ pub fn run_security_dashboard(all: bool, json: bool) -> anyhow::Result<i32> {
     Ok(0)
 }
 
+/// Extract a bare host from a URL or host-ish token, dropping scheme,
+/// userinfo, port, path and query.
+///
+/// SECURITY-critical: this is what gets shown to the user in the permission
+/// prompt and what we hand to `tirith trust add`. It must NEVER return the
+/// path, query, or userinfo — a URL like `https://user:tok@host/p?key=secret`
+/// can carry credentials, and only `host` may surface. Returns `None` if no
+/// plausible host remains.
+fn extract_host(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Drop scheme (`https://`, `http://`, …).
+    let s = s.split_once("://").map(|(_, rest)| rest).unwrap_or(s);
+    // The authority ends at the first '/', '?' or '#'. This drops path+query
+    // (and any credentials hidden in them) before anything else.
+    let authority = s.split(['/', '?', '#']).next().unwrap_or("");
+    // Drop userinfo (`user:pass@host`).
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    // Drop a trailing `:port` (only when the suffix is all digits, so an
+    // IPv6-ish or odd token isn't truncated mid-host).
+    let host = host_port
+        .rsplit_once(':')
+        .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        .map(|(h, _)| h)
+        .unwrap_or(host_port);
+    // Strip IPv6 brackets: `[fe80::1]` -> `fe80::1`.
+    let host = host
+        .strip_prefix('[')
+        .map_or(host, |inner| inner.strip_suffix(']').unwrap_or(inner));
+    // Strip an IPv6 zone id (`%eth0`): an interface name is network-topology
+    // metadata, not a host, and the "host only" contract forbids it surfacing
+    // (council/mmax #197). `split('%').next()` keeps everything before the
+    // first '%' and is a no-op for the common no-'%' hostname.
+    let host = host.split('%').next().unwrap_or(host);
+    let host = host.trim();
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(host.to_string())
+}
+
+/// Build a copy-paste Tirith trust suggestion from a block verdict JSON, to be
+/// surfaced in the Ask permission reason so the user can act on the flag
+/// without digging through logs (#197).
+///
+/// Returns `None` when the JSON has no actionable findings or cannot be parsed
+/// — the caller then falls back to the generic Ask reason.
+///
+/// SECURITY: only host names reach the output (see [`extract_host`]); the full
+/// command and any credentials in a URL are never echoed here.
+///
+/// SCRUB-SAFETY: this runs on the *pre-scrub* verdict JSON (the redaction in
+/// [`log_downgrade`] happens on its own copy). That is safe by construction,
+/// not by ordering: the only fields read are `rule_id` (an identifier) and
+/// `url`-type `evidence.raw` (passed through [`extract_host`], which yields a
+/// host or nothing). No other evidence field is ever copied into the output,
+/// so a credential cannot flow through even if new evidence shapes appear.
+pub fn suggest_trust(tirith_json: &str) -> Option<String> {
+    // Cap on hosts listed so a pathological verdict can't produce a wall of
+    // trust lines in the prompt.
+    const MAX_HOSTS: usize = 5;
+
+    let parsed: serde_json::Value = serde_json::from_str(tirith_json.trim()).ok()?;
+    let findings = parsed.get("findings")?.as_array()?;
+
+    let mut rules: Vec<String> = Vec::new();
+    let mut hosts: Vec<String> = Vec::new();
+    let mut any_pattern_only = false;
+
+    for f in findings {
+        let rule = f.get("rule_id").and_then(|r| r.as_str()).unwrap_or("");
+        // Accept only identifier-shaped rule ids. A crafted rule_id with
+        // newlines/control chars would otherwise inject extra lines into the
+        // user-visible hint (council/Codex #197). Real Tirith ids look like
+        // `pipe_to_interpreter` / `schemeless_to_sink`.
+        let rule_ok = !rule.is_empty()
+            && rule
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if rule_ok && !rules.iter().any(|r| r == rule) {
+            rules.push(rule.to_string());
+        }
+        let mut finding_has_host = false;
+        if let Some(ev) = f.get("evidence").and_then(|e| e.as_array()) {
+            for e in ev {
+                if e.get("type").and_then(|t| t.as_str()) != Some("url") {
+                    continue;
+                }
+                if let Some(host) = e
+                    .get("raw")
+                    .and_then(|r| r.as_str())
+                    .and_then(extract_host)
+                {
+                    finding_has_host = true;
+                    if !hosts.iter().any(|h| h == &host) {
+                        hosts.push(host);
+                    }
+                }
+            }
+        }
+        if !finding_has_host {
+            any_pattern_only = true;
+        }
+    }
+
+    if rules.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("contextcrawler: Tirith flagged this command before it ran.\n");
+    out.push_str(&format!("  rules: {}\n", rules.join(", ")));
+
+    for host in hosts.iter().take(MAX_HOSTS) {
+        out.push_str(&format!("  host {host}:\n"));
+        out.push_str(&format!(
+            "    trust here:       tirith trust add {host} --scope repo\n"
+        ));
+        out.push_str(&format!(
+            "    trust everywhere: tirith trust add {host} --scope user\n"
+        ));
+    }
+    if hosts.len() > MAX_HOSTS {
+        out.push_str(&format!("  (+{} more host(s))\n", hosts.len() - MAX_HOSTS));
+    }
+
+    if hosts.is_empty() {
+        // Pattern-only findings (e.g. pipe_to_interpreter) have no host to
+        // trust — and are the shape most prone to false positives. Point at
+        // inspection rather than fabricating a trust target.
+        out.push_str("  no host to trust (pattern rule) — may be a false positive.\n");
+        out.push_str("  inspect: tirith why\n");
+    } else {
+        if any_pattern_only {
+            out.push_str("  (some findings are pattern rules with no host — see tirith why)\n");
+        }
+        out.push_str("  review: tirith trust last   ·   why: tirith why\n");
+    }
+    Some(out)
+}
+
 /// Minimal JSON string escape for our log lines.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -556,6 +701,110 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn extract_host_strips_scheme_port_path_query_userinfo() {
+        // SECURITY: path/query/userinfo must never survive — they can carry creds.
+        assert_eq!(
+            extract_host("https://user:tok@gitea.example.com:3000/p?key=secret"),
+            Some("gitea.example.com".to_string())
+        );
+        assert_eq!(
+            extract_host("http://192.0.2.10:3000/api/v1/repos/x"),
+            Some("192.0.2.10".to_string())
+        );
+        assert_eq!(extract_host("192.0.2.10"), Some("192.0.2.10".to_string()));
+        assert_eq!(extract_host("json.tool"), Some("json.tool".to_string()));
+        assert_eq!(extract_host(""), None);
+        assert_eq!(extract_host("has space"), None);
+    }
+
+    #[test]
+    fn extract_host_never_returns_userinfo() {
+        // Targeted: credentials in userinfo must never survive, on their own.
+        let h = extract_host("https://admin:s3cr3t-token@internal.host/p").unwrap();
+        assert_eq!(h, "internal.host");
+        assert!(!h.contains("admin"));
+        assert!(!h.contains("s3cr3t"));
+    }
+
+    #[test]
+    fn extract_host_strips_ipv6_brackets_and_zone_id() {
+        // #197 (mmax): an IPv6 zone id is an interface name (topology), not a
+        // host — it must not surface. Brackets are stripped too.
+        assert_eq!(
+            extract_host("https://[fe80::1%eth0]:8080/p"),
+            Some("fe80::1".to_string())
+        );
+        assert_eq!(extract_host("[::1]"), Some("::1".to_string()));
+    }
+
+    #[test]
+    fn suggest_trust_never_echoes_credentials_from_url() {
+        let json = r#"{"action":"block","findings":[
+            {"rule_id":"plain_http_to_sink","evidence":[{"type":"url","raw":"https://admin:tok3n@vault.example.com/secret?k=v"}]}
+        ]}"#;
+        let out = suggest_trust(json).expect("should suggest");
+        assert!(out.contains("vault.example.com"));
+        assert!(!out.contains("admin"), "userinfo must not leak: {out}");
+        assert!(!out.contains("tok3n"), "credential must not leak: {out}");
+        assert!(!out.contains("secret"), "path must not leak: {out}");
+    }
+
+    #[test]
+    fn suggest_trust_builds_host_lines_repo_then_user() {
+        let json = r#"{"action":"block","findings":[
+            {"rule_id":"plain_http_to_sink","evidence":[{"type":"url","raw":"http://gitea.example.com:3000/x.git"}]},
+            {"rule_id":"private_network_access","evidence":[{"type":"url","raw":"http://gitea.example.com:3000/x.git"}]}
+        ]}"#;
+        let out = suggest_trust(json).expect("should suggest");
+        // Both rules surfaced, host de-duped to one block, repo before user.
+        assert!(out.contains("plain_http_to_sink"));
+        assert!(out.contains("private_network_access"));
+        let repo_at = out.find("--scope repo").unwrap();
+        let user_at = out.find("--scope user").unwrap();
+        assert!(repo_at < user_at, "repo scope must be suggested before user scope");
+        assert_eq!(
+            out.matches("tirith trust add gitea.example.com --scope repo").count(),
+            1,
+            "host must be de-duplicated across findings"
+        );
+        // Never leak the path.
+        assert!(!out.contains("x.git"), "path must not leak into the suggestion");
+    }
+
+    #[test]
+    fn suggest_trust_pattern_only_points_at_why_no_fake_host() {
+        let json = r#"{"action":"block","findings":[
+            {"rule_id":"pipe_to_interpreter","evidence":[{"type":"command_pattern","matched":"curl x | sh"}]}
+        ]}"#;
+        let out = suggest_trust(json).expect("should suggest");
+        assert!(out.contains("pipe_to_interpreter"));
+        assert!(out.contains("tirith why"));
+        assert!(!out.contains("trust add"), "no host → no fabricated trust target");
+    }
+
+    #[test]
+    fn suggest_trust_rejects_injected_rule_id() {
+        // #197 (Codex): a rule_id with a newline must not inject extra lines.
+        // A valid finding rides alongside so a suggestion is still produced —
+        // proving the injected id is dropped while legitimate content survives.
+        let json = r#"{"action":"block","findings":[
+            {"rule_id":"evil\n  malicious: line","evidence":[{"type":"url","raw":"http://h.example.com/"}]},
+            {"rule_id":"plain_http_to_sink","evidence":[{"type":"url","raw":"http://h.example.com/"}]}
+        ]}"#;
+        let out = suggest_trust(json).expect("the valid finding yields a suggestion");
+        assert!(!out.contains("malicious"), "injected rule_id must be dropped: {out}");
+        assert!(out.contains("plain_http_to_sink"), "valid rule still surfaces");
+        assert!(out.contains("h.example.com"), "valid host still surfaces");
+    }
+
+    #[test]
+    fn suggest_trust_none_on_garbage_or_empty() {
+        assert!(suggest_trust("not json").is_none());
+        assert!(suggest_trust(r#"{"action":"block"}"#).is_none());
+        assert!(suggest_trust(r#"{"action":"block","findings":[]}"#).is_none());
+    }
 
     #[test]
     fn read_file_tail_returns_whole_small_file() {
