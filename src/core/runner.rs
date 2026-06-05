@@ -94,10 +94,93 @@ impl<'a> RunOptions<'a> {
     }
 }
 
+pub type CaptureFilter<'a> = Box<dyn Fn(&str) -> String + 'a>;
+pub type ExitAwareCaptureFilter<'a> = Box<dyn Fn(&str, i32) -> String + 'a>;
+
 pub enum RunMode<'a> {
-    Filtered(Box<dyn Fn(&str) -> String + 'a>),
+    Filtered(CaptureFilter<'a>),
+    /// Like `Filtered`, but the filter is also handed the child's exit code so
+    /// it can avoid reporting success on a non-zero exit (issue: upstream
+    /// f69ad6e — a failed `go build` with no recognised error line was printing
+    /// "Go build: Success" while the real exit code was non-zero).
+    FilteredWithExit(ExitAwareCaptureFilter<'a>),
     Streamed(Box<dyn StreamFilter + 'a>),
     Passthrough,
+}
+
+/// Shared capture-filter execution path used by both `Filtered` and
+/// `FilteredWithExit`. The filter receives the captured text and the child's
+/// exit code; exit-blind filters simply ignore the second argument. The
+/// no-bloat guard (issue #95) and exit-code propagation (RTK rule #5) are
+/// applied identically for both modes.
+fn run_captured_filter<F>(
+    mut cmd: Command,
+    tool_name: &str,
+    cmd_label: &str,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+    timer: tracking::TimedExecution,
+) -> Result<i32>
+where
+    F: Fn(&str, i32) -> String,
+{
+    let stdin_mode = if opts.inherit_stdin {
+        StdinMode::Inherit
+    } else {
+        StdinMode::Null
+    };
+    let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
+        .with_context(|| format!("Failed to run {}", tool_name))?;
+
+    let exit_code = result.exit_code;
+    let raw = &result.raw;
+    let raw_stdout = &result.raw_stdout;
+
+    if opts.skip_filter_on_failure && exit_code != 0 {
+        if !result.raw_stdout.trim().is_empty() {
+            print!("{}", result.raw_stdout);
+        }
+        if !result.raw_stderr.trim().is_empty() {
+            eprint!("{}", result.raw_stderr);
+        }
+        timer.track(cmd_label, &format!("contextcrawler {}", cmd_label), raw, raw);
+        return Ok(exit_code);
+    }
+
+    let text_to_filter = if opts.filter_stdout_only {
+        raw_stdout
+    } else {
+        raw
+    };
+    let filtered = filter_fn(text_to_filter, exit_code);
+
+    let raw_for_tracking = if opts.filter_stdout_only {
+        raw_stdout
+    } else {
+        raw
+    };
+
+    // No-bloat guard (issue #95): if the filtered output is the same
+    // size or larger than the raw it was tracked against, the filter
+    // is costing more than it saves — emit the raw output instead so
+    // print and track agree and savings never go negative.
+    let emitted = no_bloat(raw_for_tracking, &filtered);
+
+    if let Some(label) = opts.tee_label {
+        print_with_hint(emitted, raw, label, exit_code);
+    } else if opts.no_trailing_newline {
+        print!("{}", emitted);
+    } else {
+        println!("{}", emitted);
+    }
+
+    timer.track(
+        cmd_label,
+        &format!("contextcrawler {}", cmd_label),
+        raw_for_tracking,
+        emitted,
+    );
+    Ok(exit_code)
 }
 
 pub fn run(
@@ -111,65 +194,22 @@ pub fn run(
     let cmd_label = format!("{} {}", tool_name, args_display);
 
     match mode {
-        RunMode::Filtered(filter_fn) => {
-            let stdin_mode = if opts.inherit_stdin {
-                StdinMode::Inherit
-            } else {
-                StdinMode::Null
-            };
-            let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::CaptureOnly)
-                .with_context(|| format!("Failed to run {}", tool_name))?;
-
-            let exit_code = result.exit_code;
-            let raw = &result.raw;
-            let raw_stdout = &result.raw_stdout;
-
-            if opts.skip_filter_on_failure && exit_code != 0 {
-                if !result.raw_stdout.trim().is_empty() {
-                    print!("{}", result.raw_stdout);
-                }
-                if !result.raw_stderr.trim().is_empty() {
-                    eprint!("{}", result.raw_stderr);
-                }
-                timer.track(&cmd_label, &format!("contextcrawler {}", cmd_label), raw, raw);
-                return Ok(exit_code);
-            }
-
-            let text_to_filter = if opts.filter_stdout_only {
-                raw_stdout
-            } else {
-                raw
-            };
-            let filtered = filter_fn(text_to_filter);
-
-            let raw_for_tracking = if opts.filter_stdout_only {
-                raw_stdout
-            } else {
-                raw
-            };
-
-            // No-bloat guard (issue #95): if the filtered output is the same
-            // size or larger than the raw it was tracked against, the filter
-            // is costing more than it saves — emit the raw output instead so
-            // print and track agree and savings never go negative.
-            let emitted = no_bloat(raw_for_tracking, &filtered);
-
-            if let Some(label) = opts.tee_label {
-                print_with_hint(emitted, raw, label, exit_code);
-            } else if opts.no_trailing_newline {
-                print!("{}", emitted);
-            } else {
-                println!("{}", emitted);
-            }
-
-            timer.track(
-                &cmd_label,
-                &format!("contextcrawler {}", cmd_label),
-                raw_for_tracking,
-                emitted,
-            );
-            Ok(exit_code)
-        }
+        RunMode::Filtered(filter_fn) => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            move |text, _exit_code| filter_fn(text),
+            opts,
+            timer,
+        ),
+        RunMode::FilteredWithExit(filter_fn) => run_captured_filter(
+            cmd,
+            tool_name,
+            &cmd_label,
+            move |text, exit_code| filter_fn(text, exit_code),
+            opts,
+            timer,
+        ),
         RunMode::Streamed(filter) => {
             let stdin_mode = if opts.inherit_stdin {
                 StdinMode::Inherit
@@ -222,6 +262,30 @@ where
         tool_name,
         args_display,
         RunMode::Filtered(Box::new(filter_fn)),
+        opts,
+    )
+}
+
+/// Like [`run_filtered`], but the filter additionally receives the child's
+/// exit code. Use this when a filter's summary message must not contradict the
+/// real exit status (e.g. a build filter that should never print "Success" on
+/// a non-zero exit). Exit-code propagation is unchanged — the child's code is
+/// still returned verbatim (RTK rule #5).
+pub fn run_filtered_with_exit<F>(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    filter_fn: F,
+    opts: RunOptions<'_>,
+) -> Result<i32>
+where
+    F: Fn(&str, i32) -> String,
+{
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::FilteredWithExit(Box::new(filter_fn)),
         opts,
     )
 }

@@ -110,11 +110,11 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go build {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "go build",
         &args.join(" "),
-        filter_go_build,
+        filter_go_build_with_exit,
         crate::core::runner::RunOptions::with_tee("go_build"),
     )
 }
@@ -609,8 +609,23 @@ fn is_go_test_failure_line(line: &str) -> bool {
         || line.starts_with("at ")
 }
 
-/// Filter go build output - show only errors
+/// Filter go build output - show only errors.
+///
+/// Exit-blind convenience wrapper kept for callers/tests that only have the
+/// output text. Treats the build as successful (exit 0) when no error line is
+/// recognised. Prefer [`filter_go_build_with_exit`] on the live runner path so
+/// the success message can never contradict a non-zero exit status.
 pub(crate) fn filter_go_build(output: &str) -> String {
+    filter_go_build_with_exit(output, 0)
+}
+
+/// Exit-aware variant of [`filter_go_build`]. When no line is recognised as a
+/// build error, the message is chosen by the real exit code: "Success" only on
+/// exit 0, otherwise a neutral failure message that surfaces the raw output.
+/// This closes the "lying success" gap (upstream f69ad6e): a failed `go build`
+/// whose stderr matches none of the error heuristics no longer prints
+/// "Go build: Success" while the runner propagates a non-zero exit.
+pub(crate) fn filter_go_build_with_exit(output: &str, exit_code: i32) -> String {
     let mut errors: Vec<String> = Vec::new();
 
     for line in output.lines() {
@@ -621,7 +636,11 @@ pub(crate) fn filter_go_build(output: &str) -> String {
     }
 
     if errors.is_empty() {
-        return "Go build: Success".to_string();
+        return if exit_code == 0 {
+            "Go build: Success".to_string()
+        } else {
+            format_go_build_failure(output, exit_code)
+        };
     }
 
     let mut result = String::new();
@@ -634,6 +653,38 @@ pub(crate) fn filter_go_build(output: &str) -> String {
 
     if errors.len() > 20 {
         result.push_str(&format!("\n... +{} more errors\n", errors.len() - 20));
+    }
+
+    result.trim().to_string()
+}
+
+/// Build a neutral failure message for a non-zero `go build` exit that emitted
+/// no line our error heuristics recognised. Surfaces whatever output there was
+/// (capped) so the failure is actionable rather than swallowed.
+fn format_go_build_failure(output: &str, exit_code: i32) -> String {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return format!("Go build: failed (exit {})", exit_code);
+    }
+
+    let mut result = String::new();
+    result.push_str(&format!("Go build: failed (exit {})\n", exit_code));
+    result.push_str("═══════════════════════════════════════\n");
+
+    for (i, line) in lines.iter().take(20).enumerate() {
+        result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 120)));
+    }
+
+    if lines.len() > 20 {
+        result.push_str(&format!(
+            "\n... +{} more output lines\n",
+            lines.len() - 20
+        ));
     }
 
     result.trim().to_string()
@@ -900,6 +951,61 @@ mod tests {
         let result = filter_go_build(output);
         assert!(result.contains("Go build"));
         assert!(result.contains("Success"));
+    }
+
+    #[test]
+    fn test_filter_go_build_with_exit_zero_reports_success() {
+        // Successful build (exit 0), no recognised error line → "Success".
+        let result = filter_go_build_with_exit("", 0);
+        assert_eq!(result, "Go build: Success");
+    }
+
+    #[test]
+    fn test_filter_go_build_nonzero_exit_never_reports_success() {
+        // Failed build (non-zero exit) whose output matches none of the error
+        // heuristics must NOT claim success — it must report the failure and
+        // surface the opaque output so the user can act on it.
+        let output = "opaque go build failure from stderr";
+        let result = filter_go_build_with_exit(output, 1);
+
+        assert!(
+            !result.contains("Success"),
+            "non-zero exit must never report Success, got: {}",
+            result
+        );
+        assert!(
+            result.contains("Go build: failed (exit 1)"),
+            "expected failure message, got: {}",
+            result
+        );
+        assert!(
+            result.contains("opaque go build failure"),
+            "failure message should surface the raw output, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_build_nonzero_exit_no_output() {
+        // Failed build with literally no output still must not lie.
+        let result = filter_go_build_with_exit("", 2);
+        assert_eq!(result, "Go build: failed (exit 2)");
+    }
+
+    #[test]
+    fn test_filter_go_build_with_exit_recognised_errors_unchanged() {
+        // A failed build WITH recognised error lines shows the errors exactly
+        // as before — the exit code does not alter the error path.
+        let output = r#"# example.com/foo
+main.go:10:5: undefined: missingFunc
+main.go:15:2: cannot use x (type int) as type string"#;
+
+        let result = filter_go_build_with_exit(output, 1);
+        assert!(result.contains("2 errors"));
+        assert!(result.contains("undefined: missingFunc"));
+        assert!(result.contains("cannot use x"));
+        assert!(!result.contains("Success"));
+        assert!(!result.contains("failed (exit"));
     }
 
     #[test]
