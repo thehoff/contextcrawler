@@ -6,6 +6,7 @@
 //! a real terminal where a human reads the output and the tee file gives the
 //! LLM a way to recover the raw response.
 
+use crate::cmds::cloud::web_cmd;
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::{
@@ -75,6 +76,36 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 fn filter_curl_output(raw: &str, is_tty: bool) -> FilterResult<'_> {
     let trimmed = raw.trim();
+
+    // HTML bodies: run through the chrome-stripping extractor so a page that is
+    // mostly nav / script / styling collapses to its readable text. This is the
+    // largest raw-token recovery opportunity for curl (#194) — agentic callers
+    // capture HTML pages and only the prose matters.
+    //
+    // Extraction is lossy (it discards markup), so it is gated two ways:
+    //   1. `runner::no_bloat` — if the extracted text is not actually smaller
+    //      than the raw body (tiny / markup-light pages), emit the raw body.
+    //   2. Empty result — a page with no extractable text (all chrome) falls
+    //      back to raw rather than printing nothing.
+    // Both guards uphold the fallback rule: never block or starve the user.
+    if web_cmd::is_html(trimmed) {
+        let extracted = web_cmd::extract_content(trimmed);
+        // no_bloat guard: only keep the extraction when it is genuinely fewer
+        // tokens than the raw body, and only when it is non-empty. Comparing the
+        // estimates directly (rather than `runner::no_bloat`, which needs both
+        // arms to share a lifetime) keeps the borrow on `trimmed` for the
+        // passthrough case.
+        if !extracted.trim().is_empty()
+            && tracking::estimate_tokens(&extracted) < tracking::estimate_tokens(trimmed)
+        {
+            return FilterResult {
+                content: Cow::Owned(extracted),
+                tee_hint: None,
+            };
+        }
+        // Extraction didn't help (empty, or not smaller): fall through to the
+        // generic passthrough/truncation path so the user still sees the body.
+    }
 
     // Heuristic: looks like a top-level JSON document. Numbers / booleans / null
     // are always under MAX_RESPONSE_SIZE so they don't need detection here.
@@ -197,6 +228,102 @@ fn minify_json(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    // --- #194: HTML response bodies routed through the chrome-stripping
+    // extractor. The big curl token-recovery opportunity. ---
+
+    #[test]
+    fn test_filter_curl_html_is_extracted() {
+        // A page that is mostly chrome (nav/footer/script) collapses to its
+        // readable text. Works regardless of TTY — agentic callers pipe.
+        let html = r#"<!DOCTYPE html>
+<html>
+<head><script>var t=1;</script><style>body{color:red}</style></head>
+<body>
+  <nav><a href="/">Home</a><a href="/about">About</a></nav>
+  <main>
+    <h1>Article Title</h1>
+    <p>The single paragraph of actual content that matters.</p>
+  </main>
+  <footer>Copyright 2026 Example Corp. All rights reserved.</footer>
+</body>
+</html>"#;
+        for is_tty in [true, false] {
+            let result = filter_curl_output(html, is_tty);
+            assert!(
+                result.content.contains("Article Title"),
+                "extracted content kept (tty={is_tty})"
+            );
+            assert!(result.content.contains("actual content that matters"));
+            assert!(!result.content.contains("var t=1"), "script stripped");
+            assert!(!result.content.contains("Home"), "nav stripped");
+            assert!(!result.content.contains("Copyright"), "footer stripped");
+            assert!(result.tee_hint.is_none());
+            assert!(matches!(result.content, Cow::Owned(_)));
+        }
+    }
+
+    #[test]
+    fn test_filter_curl_real_html_fixture_savings() {
+        // Real captured page (https://www.rust-lang.org/). HTML extraction must
+        // hit >=60% token savings per the project's filter contract.
+        let raw = include_str!("../../../tests/fixtures/curl/html_page_raw.html");
+        let result = filter_curl_output(raw, false);
+        let raw_tokens = count_tokens(raw);
+        let out_tokens = count_tokens(&result.content);
+        let savings = 100.0 - (out_tokens as f64 / raw_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "HTML extraction expected >=60% token savings, got {savings:.1}% \
+             (raw={raw_tokens} -> out={out_tokens})"
+        );
+        assert!(result.tee_hint.is_none());
+    }
+
+    #[test]
+    fn test_filter_curl_real_json_fixture_savings() {
+        // Real captured GitHub API response (pretty-printed). Lossless minify
+        // strips insignificant whitespace and must remain valid JSON.
+        let raw = include_str!("../../../tests/fixtures/curl/json_response_raw.json");
+        let result = filter_curl_output(raw, false);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&result.content).is_ok(),
+            "minified JSON must stay parseable"
+        );
+        assert!(
+            result.content.len() < raw.len(),
+            "pretty JSON must shrink after minify"
+        );
+        let raw_val: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let out_val: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(raw_val, out_val, "minify is lossless");
+    }
+
+    #[test]
+    fn test_filter_curl_html_no_extractable_text_falls_back() {
+        // HTML with no real text content: extraction is empty, so we fall back
+        // to the generic passthrough (never print nothing).
+        let html = "<!DOCTYPE html><html><body><nav><a href=\"/\">x</a></nav></body></html>";
+        let result = filter_curl_output(html, false);
+        // Non-TTY + under cap → borrowed passthrough of the raw body.
+        assert_eq!(&*result.content, html.trim());
+    }
+
+    #[test]
+    fn test_filter_curl_html_small_body_still_extracts() {
+        // Even a tiny page strips its tags — stripping markup always reduces
+        // the char/4 token estimate, so the no_bloat guard keeps the extraction.
+        let html = "<html><body>hi there</body></html>";
+        let result = filter_curl_output(html, false);
+        assert_eq!(&*result.content, "hi there");
+        assert!(matches!(result.content, Cow::Owned(_)));
+        // Guard sanity: extraction really is the smaller of the two.
+        assert!(tracking::estimate_tokens(&result.content) < tracking::estimate_tokens(html));
+    }
 
     #[test]
     fn test_filter_curl_json_small_no_tee_hint() {
