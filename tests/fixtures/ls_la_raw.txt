@@ -1,0 +1,25 @@
+total 1168
+drwxr-xr-x 148 root   root      12288 Jun  5 06:40 .
+drwxr-xr-x  23 root   root       4096 Jun  1 12:50 ..
+-rw-------   1 root   root          0 Aug  5  2025 .pwd.lock
+-rw-r--r--   1 root   root        862 Aug  5  2025 .resolv.conf.systemd-resolved.bak
+-rw-r--r--   1 root   root        208 Aug  5  2025 .updated
+drwxr-xr-x   4 root   root       4096 Aug  5  2025 ModemManager
+drwxr-xr-x   8 root   root       4096 Jun  1 10:55 NetworkManager
+drwxr-xr-x   2 root   root       4096 Apr 23 06:20 PackageKit
+drwxr-xr-x   2 root   root       4096 Dec 12 03:19 UPower
+drwxr-xr-x  11 root   root       4096 Jun  1 10:55 X11
+-rw-r--r--   1 root   root       3444 Jul  5  2023 adduser.conf
+drwxr-xr-x   3 root   root       4096 Jun  1 10:55 alsa
+drwxr-xr-x   2 root   root       4096 Jun  2 12:45 alternatives
+drwxr-xr-x   3 root   root       4096 May 12 04:52 apache2
+-rw-r--r--   1 root   root        433 Apr  8  2024 apg.conf
+drwxr-xr-x   2 root   root       4096 May 12 04:38 apparmor
+drwxr-xr-x  10 root   root      12288 Jun  2 15:03 apparmor.d
+drwxr-xr-x   4 root   root       4096 Jun  1 10:55 apport
+drwxr-xr-x   9 root   root       4096 Dec 12 03:17 apt
+drwxr-xr-x   3 root   root       4096 Jun  1 10:55 avahi
+-rw-r--r--   1 root   root       2319 Mar 31  2024 bash.bashrc
+-rw-r--r--   1 root   root         45 Aug  5  2025 bash_completion
+drwxr-xr-x   2 root   root       4096 Aug  5  2025 bash_completion.d
+-rw-r--r--   1 root   root        367 Aug  2  2022 bindresvport.blacklist
