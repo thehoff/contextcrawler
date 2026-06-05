@@ -347,6 +347,37 @@ lazy_static! {
         r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pipx)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install)['"]?\s+([^|;&<>\r\n]+)"#
     )
     .unwrap();
+    // #144 — bun (JS/TS → npm registry). Subcommand set mirrors npm:
+    // `bun install <pkg>`, `bun add <pkg>`, `bun i <pkg>`.
+    static ref BUN_RE: Regex = Regex::new(
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:bun)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:i|install|add)['"]?\s+([^|;&<>\r\n]+)"#
+    )
+    .unwrap();
+    // #144 — PDM (Python → PyPI). `pdm add <pkg>` is the package-bearing
+    // form; `pdm install` / `pdm sync` are bare-lockfile (handled below).
+    static ref PDM_RE: Regex = Regex::new(
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pdm)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:add)['"]?\s+([^|;&<>\r\n]+)"#
+    )
+    .unwrap();
+    // #144 — Pipenv (Python → PyPI). `pipenv install <pkg>` is dual: bare =
+    // lockfile (handled below), with a pkg = package-bearing (this regex).
+    static ref PIPENV_RE: Regex = Regex::new(
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pipenv)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install)['"]?\s+([^|;&<>\r\n]+)"#
+    )
+    .unwrap();
+    // #144 — conda. Mapped to PyPI as the closest bucket, but ALWAYS surfaced
+    // as unvettable (packages resolve from conda channels, not PyPI). Covers
+    // `conda install <pkg>` and `conda create -n <env> <pkg>`.
+    static ref CONDA_RE: Regex = Regex::new(
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:conda)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install|create)['"]?\s+([^|;&<>\r\n]+)"#
+    )
+    .unwrap();
+    // #144 — mamba (conda drop-in). Same caveat as conda — unvettable. Covers
+    // `mamba install <pkg>` AND `mamba create -n <env> <pkg>` (mirrors CONDA_RE).
+    static ref MAMBA_RE: Regex = Regex::new(
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:mamba)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install|create)['"]?\s+([^|;&<>\r\n]+)"#
+    )
+    .unwrap();
 }
 
 /// Tokenise a shell command into (offset, token-text) pairs.
@@ -1089,14 +1120,38 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     let mut claimed: std::collections::BTreeMap<usize, usize> =
         std::collections::BTreeMap::new();
 
-    let ordered = [
-        (&*UV_RE, Ecosystem::Pypi),
-        (&*NPM_RE, Ecosystem::Npm),
-        (&*PNPM_RE, Ecosystem::Npm),
-        (&*YARN_RE, Ecosystem::Npm),
-        (&*PIP_RE, Ecosystem::Pypi),
-        (&*POETRY_RE, Ecosystem::Pypi),
-        (&*PIPX_RE, Ecosystem::Pypi),
+    // Each entry: (regex, ecosystem, conda_caveat). `conda_caveat` is
+    // `Some(msg)` ONLY for conda/mamba (#144): their packages resolve from
+    // conda channels, not PyPI, so vetting the parsed names against PyPI
+    // would be wrong. We map them to `Ecosystem::Pypi` as the closest bucket
+    // but FORCE `unvettable: Some(msg)` and drop the parsed package set, so
+    // the install always fails closed to Ask and never gets wrongly queried
+    // against (or blocked by) PyPI. `None` keeps the existing behaviour.
+    let ordered: [(&Regex, Ecosystem, Option<&'static str>); 12] = [
+        (&*UV_RE, Ecosystem::Pypi, None),
+        (&*NPM_RE, Ecosystem::Npm, None),
+        (&*PNPM_RE, Ecosystem::Npm, None),
+        (&*YARN_RE, Ecosystem::Npm, None),
+        (&*BUN_RE, Ecosystem::Npm, None),
+        (&*PIP_RE, Ecosystem::Pypi, None),
+        (&*POETRY_RE, Ecosystem::Pypi, None),
+        (&*PIPX_RE, Ecosystem::Pypi, None),
+        (&*PDM_RE, Ecosystem::Pypi, None),
+        (&*PIPENV_RE, Ecosystem::Pypi, None),
+        (
+            &*CONDA_RE,
+            Ecosystem::Pypi,
+            Some(
+                "conda resolves from conda channels; not vettable against PyPI — review manually",
+            ),
+        ),
+        (
+            &*MAMBA_RE,
+            Ecosystem::Pypi,
+            Some(
+                "mamba resolves from conda channels; not vettable against PyPI — review manually",
+            ),
+        ),
     ];
 
     // Run the regex pass against a same-length copy of `cmd` where shell
@@ -1107,7 +1162,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     // arg-text from `cmd` itself (preserving the original characters).
     let masked = mask_quoted_operators(cmd);
 
-    for (re, eco) in ordered {
+    for (re, eco, conda_caveat) in ordered {
         for m in re.find_iter(&masked) {
             let (start, end) = (m.start(), m.end());
             // Skip if any earlier (higher-priority) pattern already claimed this span.
@@ -1131,6 +1186,22 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
                 .map(|m| &cmd[m.start()..m.end()])
                 .unwrap_or("");
             let (pkgs, has_editable, lockfile_source) = parse_package_args(arg_string);
+            // #144 — conda/mamba: packages resolve from conda channels, not
+            // PyPI. Force the install unvettable (regardless of whether a name
+            // parsed) and DROP the parsed package set so it is never queried
+            // against PyPI. `conda create -n <env> <pkg>` parses `-n`/`<env>`
+            // as flags/args, but since the whole install is unvettable the
+            // exact package parse does not matter — detection + Ask is the
+            // contract. Fails closed to Ask via the unvettable shortcut.
+            if let Some(caveat) = conda_caveat {
+                out.push(ParsedInstall {
+                    ecosystem: eco,
+                    packages: Vec::new(),
+                    has_editable: false,
+                    unvettable: Some(caveat.to_string()),
+                });
+                continue;
+            }
             // An install verb was detected. If no package is nameable AND no
             // editable token is present, the install set is unvettable
             // (lockfile / requirements / constraints indirection, or an
@@ -1298,6 +1369,16 @@ fn detect_bare_lockfile_installs(
                     }
                 }
             }
+            // #144 — `bun install` / `bun i` (bare) reads bun.lockb. Can take
+            // a package (`bun install <pkg>`), so keep the scan to distinguish
+            // bare-vs-named — the named case is claimed upstream by BUN_RE.
+            "bun" => match next_lower(idx + 1).as_deref() {
+                Some("install") | Some("i") => (idx + 1, Some(Ecosystem::Npm), true),
+                _ => {
+                    idx += 1;
+                    continue;
+                }
+            },
             "yarn" => match next_lower(idx + 1).as_deref() {
                 // `yarn install` never takes a positional package.
                 Some("install") => (idx + 1, Some(Ecosystem::Npm), false),
@@ -1342,6 +1423,29 @@ fn detect_bare_lockfile_installs(
                 Some("pip") if next_lower(idx + 2).as_deref() == Some("sync") => {
                     (idx + 2, Some(Ecosystem::Pypi), false)
                 }
+                _ => {
+                    idx += 1;
+                    continue;
+                }
+            },
+            // #144 — PDM. `pdm install` / `pdm sync` resolve from pdm.lock /
+            // pyproject.toml and take only flag arguments. Never a positional
+            // package — `pdm add <pkg>` is package-bearing, claimed by PDM_RE.
+            "pdm" => match next_lower(idx + 1).as_deref() {
+                Some("install") | Some("sync") => (idx + 1, Some(Ecosystem::Pypi), false),
+                _ => {
+                    idx += 1;
+                    continue;
+                }
+            },
+            // #144 — Pipenv. `pipenv install` is DUAL: bare reads Pipfile.lock,
+            // with a pkg it is package-bearing (claimed by PIPENV_RE upstream).
+            // Mirror npm's `install` handling: accepts_packages=true so a
+            // following non-flag token means "not bare". `pipenv sync` always
+            // reads the lockfile and never takes a positional package.
+            "pipenv" => match next_lower(idx + 1).as_deref() {
+                Some("install") => (idx + 1, Some(Ecosystem::Pypi), true),
+                Some("sync") => (idx + 1, Some(Ecosystem::Pypi), false),
                 _ => {
                     idx += 1;
                     continue;
@@ -2699,6 +2803,261 @@ mod tests {
         // "install" but contains no install verb. Must produce zero hits.
         let v = detect_installs("/some/random/path/install/notnpm.txt");
         assert!(v.is_empty(), "no install verb here, got: {:?}", v);
+    }
+
+    // ─── #144: bun / pdm / pipenv / conda / mamba install detection ─────────
+    //
+    // Before #144 these tools returned a silent Verdict::Skip (no vetting).
+    // Each new tool gets: basic package-bearing detection, bare-lockfile
+    // detection (where applicable), and adversarial head variants reusing the
+    // shared anchor (abs path, Windows launcher, case-insensitivity,
+    // line-continuation, quoted head). conda/mamba additionally assert the
+    // result is unvettable (fail-closed to Ask), never vetted as real PyPI.
+
+    // ── bun (JS/TS → npm) ──
+    #[test]
+    fn detect_bun_add() {
+        let v = detect_installs("bun add left-pad");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn detect_bun_install_named() {
+        let v = detect_installs("bun install lodash express");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["lodash", "express"]);
+    }
+
+    #[test]
+    fn detect_bun_i_shorthand() {
+        let v = detect_installs("bun i chalk");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["chalk"]);
+    }
+
+    #[test]
+    fn bun_install_bare_lockfile_detected() {
+        // Bare `bun install` reads bun.lockb — no package arg → unvettable.
+        let v = detect_installs("bun install");
+        assert_eq!(v.len(), 1, "bare bun install must surface as lockfile");
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert!(v[0].unvettable.is_some());
+    }
+
+    #[test]
+    fn bun_install_bare_with_flags_still_lockfile() {
+        let v = detect_installs("bun install --frozen-lockfile");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert!(v[0].unvettable.is_some());
+    }
+
+    #[test]
+    fn bun_abs_path_head_detected() {
+        let v = detect_installs("/usr/bin/bun install left-pad");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn bun_windows_launcher_detected() {
+        let v = detect_installs("bun.cmd add left-pad");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn bun_case_insensitive_detected() {
+        let v = detect_installs("Bun Install left-pad");
+        assert_eq!(v.len(), 1, "case-insensitive head + verb must classify");
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn bun_quoted_head_detected() {
+        let v = detect_installs("'bun' install left-pad");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn bun_line_continuation_detected() {
+        let v = detect_installs("bun add \\\n  left-pad");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Npm);
+        assert_eq!(names(&v[0]), vec!["left-pad"]);
+    }
+
+    // ── PDM (Python → PyPI) ──
+    #[test]
+    fn detect_pdm_add() {
+        let v = detect_installs("pdm add httpx");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert_eq!(names(&v[0]), vec!["httpx"]);
+    }
+
+    #[test]
+    fn pdm_install_bare_lockfile_detected() {
+        let v = detect_installs("pdm install");
+        assert_eq!(v.len(), 1, "pdm install must surface as bare lockfile");
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(v[0].unvettable.is_some());
+    }
+
+    #[test]
+    fn pdm_sync_bare_lockfile_detected() {
+        let v = detect_installs("pdm sync");
+        assert_eq!(v.len(), 1, "pdm sync must surface as bare lockfile");
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(v[0].unvettable.is_some());
+    }
+
+    #[test]
+    fn pdm_abs_path_and_case_variants() {
+        let v = detect_installs("/usr/local/bin/pdm add httpx");
+        assert_eq!(v.len(), 1);
+        assert_eq!(names(&v[0]), vec!["httpx"]);
+
+        let v = detect_installs("PDM ADD httpx");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert_eq!(names(&v[0]), vec!["httpx"]);
+    }
+
+    // ── Pipenv (Python → PyPI) — dual install verb ──
+    #[test]
+    fn detect_pipenv_install_named() {
+        // `pipenv install requests` is package-bearing.
+        let v = detect_installs("pipenv install requests");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert_eq!(names(&v[0]), vec!["requests"]);
+    }
+
+    #[test]
+    fn pipenv_install_bare_vs_named_both_detected() {
+        // Bare = lockfile (unvettable), named = package-bearing. Both must be
+        // detected, never silently skipped. This is the dual-verb contract.
+        let bare = detect_installs("pipenv install");
+        assert_eq!(bare.len(), 1, "bare pipenv install must surface");
+        assert_eq!(bare[0].ecosystem, Ecosystem::Pypi);
+        assert!(bare[0].unvettable.is_some(), "bare = lockfile = unvettable");
+
+        let named = detect_installs("pipenv install requests");
+        assert_eq!(named.len(), 1, "named pipenv install must surface");
+        assert_eq!(named[0].ecosystem, Ecosystem::Pypi);
+        assert_eq!(names(&named[0]), vec!["requests"]);
+    }
+
+    #[test]
+    fn pipenv_sync_bare_lockfile_detected() {
+        let v = detect_installs("pipenv sync");
+        assert_eq!(v.len(), 1, "pipenv sync must surface as bare lockfile");
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(v[0].unvettable.is_some());
+    }
+
+    #[test]
+    fn pipenv_quoted_head_and_line_continuation() {
+        let v = detect_installs("'pipenv' install requests");
+        assert_eq!(v.len(), 1);
+        assert_eq!(names(&v[0]), vec!["requests"]);
+
+        let v = detect_installs("pipenv install \\\n  requests");
+        assert_eq!(v.len(), 1);
+        assert_eq!(names(&v[0]), vec!["requests"]);
+    }
+
+    // ── conda / mamba (conda channels → mapped to PyPI but UNVETTABLE) ──
+    #[test]
+    fn conda_install_is_unvettable_not_vetted() {
+        // conda packages resolve from conda channels, NOT PyPI. The install
+        // must be DETECTED and surfaced as unvettable (fail closed to Ask),
+        // never silently skipped and never vetted as a real PyPI package.
+        let v = detect_installs("conda install numpy");
+        assert_eq!(v.len(), 1, "conda install must be detected");
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(
+            v[0].unvettable.is_some(),
+            "conda must fail closed to Ask (unvettable), not be vetted vs PyPI"
+        );
+        assert!(
+            v[0].packages.is_empty(),
+            "conda package set must be dropped so it is never queried against PyPI"
+        );
+    }
+
+    #[test]
+    fn conda_create_with_env_flag_is_unvettable() {
+        // `conda create -n <env> <pkg>`: the `-n <env>` precedes packages.
+        // Detection + Ask is the contract; package parse accuracy is moot
+        // because the whole install is unvettable.
+        let v = detect_installs("conda create -n myenv numpy scipy");
+        assert_eq!(v.len(), 1, "conda create must be detected");
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(v[0].unvettable.is_some());
+        assert!(v[0].packages.is_empty());
+    }
+
+    #[test]
+    fn conda_adversarial_head_variants_unvettable() {
+        for cmd in [
+            "conda.exe install numpy",     // Windows launcher
+            "CONDA INSTALL numpy",         // case-insensitive
+            "/opt/conda/bin/conda install numpy", // abs path
+            "'conda' install numpy",       // quoted head
+            "conda install \\\n  numpy",   // line-continuation
+        ] {
+            let v = detect_installs(cmd);
+            assert_eq!(v.len(), 1, "conda variant must detect: {cmd:?}");
+            assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+            assert!(
+                v[0].unvettable.is_some(),
+                "conda variant must be unvettable: {cmd:?}"
+            );
+            assert!(v[0].packages.is_empty(), "no PyPI vetting for: {cmd:?}");
+        }
+    }
+
+    #[test]
+    fn mamba_install_is_unvettable_not_vetted() {
+        let v = detect_installs("mamba install numpy");
+        assert_eq!(v.len(), 1, "mamba install must be detected");
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(
+            v[0].unvettable.is_some(),
+            "mamba must fail closed to Ask (unvettable), not be vetted vs PyPI"
+        );
+        assert!(v[0].packages.is_empty());
+    }
+
+    #[test]
+    fn mamba_create_is_unvettable() {
+        // mamba is a conda drop-in: `mamba create -n <env> <pkgs>` must be
+        // detected and unvettable, exactly like `conda create`. Before the
+        // MAMBA_RE `install|create` fix this bypassed the gate (silent Skip).
+        let v = detect_installs("mamba create -n ds numpy");
+        assert_eq!(v.len(), 1, "mamba create must be detected");
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(v[0].unvettable.is_some());
+        assert!(v[0].packages.is_empty());
+    }
+
+    #[test]
+    fn mamba_windows_launcher_unvettable() {
+        let v = detect_installs("mamba.cmd install numpy");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
+        assert!(v[0].unvettable.is_some());
     }
 
     // ─── Peer-review round 2 (BLOCKER + HIGHs from #142) ───────────────────
