@@ -178,6 +178,10 @@ pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &st
 
 /// Truncate an ISO 8601 datetime string to just the date portion (first 10 chars).
 ///
+/// Char-boundary safe: slices on the first 10 Unicode scalar values, never a raw
+/// byte index. A garbage value whose byte 10 falls mid-multibyte-char (these strings
+/// come unvalidated from command output, e.g. AWS JSON date fields) must not panic.
+///
 /// # Examples
 /// ```
 /// use rtk::utils::truncate_iso_date;
@@ -186,10 +190,9 @@ pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &st
 /// assert_eq!(truncate_iso_date("short"), "short");
 /// ```
 pub fn truncate_iso_date(date: &str) -> &str {
-    if date.len() >= 10 {
-        &date[..10]
-    } else {
-        date
+    match date.char_indices().nth(10) {
+        Some((idx, _)) => &date[..idx],
+        None => date,
     }
 }
 
@@ -1805,6 +1808,45 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         // When string is longer and max_len is exactly 3, return "..."
         assert_eq!(truncate("hello world", 3), "...");
+    }
+
+    #[test]
+    fn test_truncate_iso_date_normal() {
+        // Normal ISO datetime truncates to the 10-char date portion.
+        assert_eq!(truncate_iso_date("2024-01-15T10:30:00Z"), "2024-01-15");
+        assert_eq!(truncate_iso_date("2026-06-05T23:59:59+10:00"), "2026-06-05");
+    }
+
+    #[test]
+    fn test_truncate_iso_date_short() {
+        // Strings shorter than 10 chars are returned unchanged.
+        assert_eq!(truncate_iso_date("short"), "short");
+        assert_eq!(truncate_iso_date(""), "");
+        assert_eq!(truncate_iso_date("?"), "?");
+        // Exactly 10 ASCII chars: returned whole.
+        assert_eq!(truncate_iso_date("2024-01-15"), "2024-01-15");
+    }
+
+    #[test]
+    fn test_truncate_iso_date_multibyte_no_panic() {
+        // Garbage value with a multibyte char straddling byte 10 must NOT panic.
+        // "123456789" is 9 bytes; "é" (U+00E9) is 2 bytes, so byte 10 lands
+        // mid-char. The old `&date[..10]` byte-slice paniced here.
+        let input = "123456789é0123";
+        let out = truncate_iso_date(input);
+        // Char-safe: first 10 scalar values = "123456789é" (9 ASCII + the é).
+        assert_eq!(out, "123456789é");
+        // Sanity: result is a valid prefix of the input, never panics.
+        assert!(input.starts_with(out));
+    }
+
+    #[test]
+    fn test_truncate_iso_date_all_multibyte() {
+        // Pure multibyte string longer than 10 chars: takes first 10 chars.
+        let input = "ééééééééééééé"; // 13 × 'é'
+        let out = truncate_iso_date(input);
+        assert_eq!(out.chars().count(), 10);
+        assert!(input.starts_with(out));
     }
 
     #[test]
