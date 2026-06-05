@@ -128,6 +128,17 @@ pub fn run(
                 summary.avg_savings_pct
             ),
         );
+        // #196: surface filter regressions hidden by the floored savings_pct.
+        // Only show when there's actual inflation so clean installs read clean.
+        if summary.total_inflation > 0 {
+            print_kpi(
+                "Tokens inflated",
+                format!(
+                    "{} (filters emitted more than the raw command)",
+                    format_tokens(summary.total_inflation)
+                ),
+            );
+        }
         print_kpi(
             "Total exec time",
             format!(
@@ -546,6 +557,7 @@ struct ExportSummary {
     total_input: usize,
     total_output: usize,
     total_saved: usize,
+    total_inflation: usize, // added (#196)
     avg_savings_pct: f64,
     total_time_ms: u64,
     avg_time_ms: u64,
@@ -569,6 +581,7 @@ fn export_json(
             total_input: summary.total_input,
             total_output: summary.total_output,
             total_saved: summary.total_saved,
+            total_inflation: summary.total_inflation, // added (#196)
             avg_savings_pct: summary.avg_savings_pct,
             total_time_ms: summary.total_time_ms,
             avg_time_ms: summary.avg_time_ms,
@@ -787,19 +800,27 @@ fn show_weak_filters(
     println!("or improving.");
     println!();
     println!(
-        "  {:<3} {:<18} {:>7} {:>10} {:>10} {:>9}",
-        "#", "Tool", "Runs", "Input", "Leaked", "Savings"
+        "  {:<3} {:<18} {:>7} {:>10} {:>10} {:>9} {:>10}",
+        "#", "Tool", "Runs", "Input", "Leaked", "Savings", "Inflated"
     );
-    println!("  {}", "─".repeat(60));
+    println!("  {}", "─".repeat(72));
     for (idx, w) in weak.iter().take(15).enumerate() {
+        // #196: a dash keeps clean rows uncluttered; only inflating filters
+        // show a figure, so a regression stands out at a glance.
+        let inflated = if w.inflation_tokens > 0 {
+            format_tokens(w.inflation_tokens)
+        } else {
+            "-".to_string()
+        };
         println!(
-            "  {:<3} {:<18} {:>7} {:>10} {:>10} {:>8.1}%",
+            "  {:<3} {:<18} {:>7} {:>10} {:>10} {:>8.1}% {:>10}",
             format!("{}.", idx + 1),
             truncate(&w.tool, 18),
             w.runs,
             format_tokens(w.input_tokens),
             format_tokens(w.leaked_tokens),
             w.savings_pct,
+            inflated,
         );
     }
     println!();

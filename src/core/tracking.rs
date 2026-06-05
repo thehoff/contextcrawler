@@ -247,6 +247,9 @@ pub struct GainSummary {
     pub total_output: usize,
     /// Total tokens saved (input - output)
     pub total_saved: usize,
+    /// Total tokens by which filters INFLATED output beyond input (#196).
+    /// `saved_tokens` floors at zero, so inflation is otherwise invisible.
+    pub total_inflation: usize,
     /// Average savings percentage across all commands
     pub avg_savings_pct: f64,
     /// Total execution time across all commands (milliseconds)
@@ -278,6 +281,10 @@ pub struct WeakFilter {
     pub leaked_tokens: usize,
     /// Volume-weighted savings percentage (`saved / input * 100`).
     pub savings_pct: f64,
+    /// Tokens by which this tool's filters INFLATED output beyond input (#196).
+    /// Floored-at-zero `saved_tokens` hides this; high inflation flags a
+    /// filter regression worth investigating.
+    pub inflation_tokens: usize,
 }
 
 /// Collapse a tracked command into a "tool" key for weak-filter ranking.
@@ -916,10 +923,11 @@ impl Tracker {
         let mut total_input = 0usize;
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
+        let mut total_inflation = 0usize; // added (#196): output-overflow, floored elsewhere
         let mut total_time_ms = 0u64;
 
         let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
+            "SELECT input_tokens, output_tokens, saved_tokens, inflation_tokens, exec_time_ms
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
         )?;
@@ -930,16 +938,18 @@ impl Tracker {
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
                 row.get::<_, i64>(2)? as usize,
-                row.get::<_, i64>(3)? as u64,
+                row.get::<_, i64>(3)? as usize, // added (#196): inflation_tokens
+                row.get::<_, i64>(4)? as u64,
             ))
         })?;
 
         for row in rows {
-            let (input, output, saved, time_ms) = row?;
+            let (input, output, saved, inflation, time_ms) = row?;
             total_commands += 1;
             total_input += input;
             total_output += output;
             total_saved += saved;
+            total_inflation += inflation; // added (#196)
             total_time_ms += time_ms;
         }
 
@@ -963,6 +973,7 @@ impl Tracker {
             total_input,
             total_output,
             total_saved,
+            total_inflation, // added (#196)
             avg_savings_pct,
             total_time_ms,
             avg_time_ms,
@@ -1024,7 +1035,7 @@ impl Tracker {
         // 8601 and command timestamps are also ISO-8601, so lexicographic
         // comparison is correct.
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(input_tokens), SUM(saved_tokens)
+            "SELECT rtk_cmd, COUNT(*), SUM(input_tokens), SUM(saved_tokens), SUM(inflation_tokens)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
                AND (?3 IS NULL OR timestamp >= ?3)
@@ -1036,33 +1047,37 @@ impl Tracker {
                 row.get::<_, i64>(1)? as usize,
                 row.get::<_, i64>(2)? as usize,
                 row.get::<_, i64>(3)? as usize,
+                row.get::<_, i64>(4)? as usize, // added (#196): inflation_tokens
             ))
         })?;
 
         // Re-aggregate the per-command-string rows into tool buckets.
-        let mut tools: std::collections::HashMap<String, (usize, usize, usize)> =
+        // Tuple: (runs, input, saved, inflation).
+        let mut tools: std::collections::HashMap<String, (usize, usize, usize, usize)> =
             std::collections::HashMap::new();
         for row in rows {
-            let (rtk_cmd, runs, input, saved) = row?;
+            let (rtk_cmd, runs, input, saved, inflation) = row?;
             let key = weak_filter_tool_key(&rtk_cmd);
             if key.is_empty() {
                 continue;
             }
-            let entry = tools.entry(key).or_insert((0, 0, 0));
+            let entry = tools.entry(key).or_insert((0, 0, 0, 0));
             entry.0 += runs;
             entry.1 += input;
             entry.2 += saved;
+            entry.3 += inflation; // added (#196)
         }
 
         let mut result: Vec<WeakFilter> = tools
             .into_iter()
-            .filter(|(_, (_, input, _))| *input > 0)
-            .map(|(tool, (runs, input, saved))| WeakFilter {
+            .filter(|(_, (_, input, _, _))| *input > 0)
+            .map(|(tool, (runs, input, saved, inflation))| WeakFilter {
                 tool,
                 runs,
                 input_tokens: input,
                 leaked_tokens: input.saturating_sub(saved),
                 savings_pct: saved as f64 * 100.0 / input as f64,
+                inflation_tokens: inflation, // added (#196)
             })
             .collect();
         result.sort_by_key(|w| std::cmp::Reverse(w.leaked_tokens));
@@ -1982,6 +1997,64 @@ mod tests {
         );
         // saved_tokens is still floored: only the saving row contributes.
         assert_eq!(t.get_summary().unwrap().total_saved, 70);
+    }
+
+    #[test]
+    fn summary_surfaces_total_inflation() {
+        // #196: gain reads GainSummary.total_inflation to print the
+        // "Tokens inflated" line. Two inflating rows must aggregate.
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        t.record("grep x", "rtk fallback: grep x", 10, 25, 0)
+            .unwrap(); // inflates by 15
+        t.record("ps", "rtk fallback: ps", 5, 11, 0).unwrap(); // inflates by 6
+        let summary = t.get_summary().expect("summary");
+        assert_eq!(
+            summary.total_inflation, 21,
+            "summary must expose aggregated inflation (15 + 6)"
+        );
+    }
+
+    #[test]
+    fn summary_total_inflation_zero_on_clean_data() {
+        // #196: a clean install (no inflation) must report 0 so the gain
+        // output omits the "Tokens inflated" line entirely.
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        t.record("git log", "rtk git log", 100, 30, 0).unwrap(); // saves 70
+        assert_eq!(
+            t.get_summary().expect("summary").total_inflation,
+            0,
+            "no inflating command means zero inflation"
+        );
+    }
+
+    #[test]
+    fn weak_filters_report_per_tool_inflation() {
+        // #196: gain --weak-filters reads WeakFilter.inflation_tokens to show
+        // which tools inflate most. The inflating tool must carry the figure;
+        // a clean tool must report zero.
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        // Inflating tool: input>0 so it survives the leak filter, output>input.
+        // `weak_filter_tool_key` collapses "rtk grep x" → "grep x".
+        t.record("grep x", "rtk grep x", 10, 25, 0).unwrap(); // inflates by 15
+        // Clean tool: real savings, no inflation.
+        t.record("git log", "rtk git log", 100, 30, 0).unwrap();
+        let weak = t.get_weak_filters(None, None).expect("weak filters");
+        let grep = weak
+            .iter()
+            .find(|w| w.tool == "grep x")
+            .expect("grep entry present");
+        assert_eq!(
+            grep.inflation_tokens, 15,
+            "inflating tool must carry its overflow"
+        );
+        let git = weak
+            .iter()
+            .find(|w| w.tool == "git log")
+            .expect("git entry present");
+        assert_eq!(
+            git.inflation_tokens, 0,
+            "a saving tool must report zero inflation"
+        );
     }
 
     #[test]
