@@ -22,8 +22,9 @@ use super::tirith_gate;
 /// | Exit | Stdout   | Meaning                                                       |
 /// |------|----------|---------------------------------------------------------------|
 /// | 0    | rewritten| Rewrite allowed — hook may auto-allow the rewritten command.  |
-/// | 1    | (none)   | No ContextCrawler equivalent — hook passes through unchanged. |
+/// | 1    | (none)   | No equivalent, Default verdict — hook passes through.         |
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.   |
+/// | 3    | original | Ask verdict, no rewrite (#2286) — original cmd, host prompts. |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt. |
 pub fn run(cmd: &str) -> anyhow::Result<()> {
     let (excluded, transparent_prefixes) = crate::core::config::Config::load()
@@ -124,8 +125,18 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
             }
         },
         None => {
-            // No ContextCrawler equivalent. Exit 1 = passthrough.
-            // Claude Code independently evaluates its own ask rules on the original cmd.
+            // No ContextCrawler equivalent. SECURITY (#2286): a permission
+            // `Ask` verdict on a non-rewritable command must still force a
+            // prompt — exiting 1 (passthrough) lets the host auto-allow it via
+            // its own rule (e.g. `git status $(whoami)` under `Bash(git:*)`).
+            // Print the original command unchanged (ask/passthrough convention)
+            // and exit 3 (ask). Only a genuine no-verdict (Default) passes
+            // through at exit 1, where Claude Code evaluates its own rules.
+            if verdict == PermissionVerdict::Ask {
+                print!("{}", cmd);
+                let _ = std::io::stdout().flush();
+                std::process::exit(3);
+            }
             std::process::exit(1);
         }
     }
@@ -243,6 +254,44 @@ mod tests {
             // Sentinel: ensure Default and Allow are distinct enum variants.
             // If this ever fails, the entire permission model is broken.
             assert_ne!(PermissionVerdict::Default, PermissionVerdict::Allow);
+        }
+
+        // === #2286: the `None` (non-rewritable) arm must consult the verdict ===
+        // `run()` calls `std::process::exit`, so the arm is not directly
+        // unit-testable; this mirrors its decision logic exactly. The bug was
+        // that a non-rewritable command exited 1 (passthrough → host auto-allow)
+        // even on an `Ask` verdict. An `Ask` verdict must now exit 3 (ask);
+        // only Default still passes through at exit 1.
+        fn no_rewrite_exit_code(verdict: &PermissionVerdict) -> i32 {
+            match verdict {
+                PermissionVerdict::Deny => 2, // handled before the match
+                PermissionVerdict::Ask => 3,  // #2286: force a prompt
+                PermissionVerdict::Allow | PermissionVerdict::Default => 1,
+            }
+        }
+
+        #[test]
+        fn test_no_rewrite_ask_verdict_maps_to_ask_exit() {
+            // `notarealcmd $(whoami)` is non-rewritable AND unattestable, so
+            // the verdict is Ask regardless of rules — must exit 3, not 1.
+            let verdict = check_command_with_rules("notarealcmd $(whoami)", &[], &[], &[]);
+            assert_eq!(verdict, PermissionVerdict::Ask);
+            assert!(registry::rewrite_command("notarealcmd $(whoami)", &[], &[]).is_none());
+            assert_eq!(
+                no_rewrite_exit_code(&verdict),
+                3,
+                "non-rewritable Ask verdict MUST exit 3 (ask), not 1 (passthrough) (#2286)"
+            );
+        }
+
+        #[test]
+        fn test_no_rewrite_default_verdict_still_passthrough() {
+            // Benign non-rewritable command (Default verdict) must still exit 1
+            // so the host evaluates its own rules — no over-escalation.
+            let verdict = check_command_with_rules("notarealcmd --flag", &[], &[], &[]);
+            assert_eq!(verdict, PermissionVerdict::Default);
+            assert!(registry::rewrite_command("notarealcmd --flag", &[], &[]).is_none());
+            assert_eq!(no_rewrite_exit_code(&verdict), 1);
         }
     }
 

@@ -631,21 +631,37 @@ fn process_claude_payload_with_gate(
             // denied here, which turned a gate "ask" verdict into a block the
             // user could never approve — e.g. credential-bearing `curl` loops
             // in a REST-verification workflow.
-            if gate_ask {
+            // SECURITY (#2286): a permission `Ask` verdict must NOT be silently
+            // dropped just because the command has no rewrite. `check(cmd)`
+            // returns `Ask` for a not-auto-evaluable construct (command
+            // substitution / file-write redirect) OR an ask-rule; falling
+            // through to `Skip` here let the host (Claude Code) apply its own
+            // (possibly `Allow`) rule — e.g. `git status $(whoami)` auto-allowed
+            // via a `Bash(git:*)` rule. Escalate to a real `ask` so the host
+            // prompts. A gate Ask (#111) escalates the same way.
+            if gate_ask || verdict == PermissionVerdict::Ask {
                 // Emit a clear stderr line so the WHY is operator-visible —
                 // a gate false-positive on a bare un-rewritable command (e.g.
                 // `ls`) is then a visible prompt, not a silent block.
                 let _ = writeln!(io::stderr(), "{}", gate_no_rewrite_ask_log(cmd));
-                // Prefer the tailored trust hint (#197) when we have one; fall
-                // back to the generic line otherwise.
+                // Reason precedence: the #197 trust hint (only present on a gate
+                // Ask) wins; then the generic gate line for a gate Ask; then the
+                // #2286 not-auto-evaluable explanation for a bare Ask verdict.
                 let reason = gate_suggestion.take().unwrap_or_else(|| {
-                    "contextcrawler: a defence-in-depth gate flagged this command \
-                     — review before allowing"
-                        .to_string()
+                    if gate_ask {
+                        "contextcrawler: a defence-in-depth gate flagged this command \
+                         — review before allowing"
+                            .to_string()
+                    } else {
+                        "contextcrawler: command is not auto-evaluable (command \
+                         substitution or file-write redirect) with no safe rewrite \
+                         — deferring to you (#2286)"
+                            .to_string()
+                    }
                 });
                 return PayloadAction::Ask {
                     reason,
-                    audit_tag: "ask:gate_no_rewrite",
+                    audit_tag: "ask:no_rewrite",
                     cmd: cmd.to_string(),
                 };
             }
@@ -1183,6 +1199,93 @@ mod tests {
         assert!(!auto_allowed_on_live_path("git diff >& /tmp/evil"));
     }
 
+    // === #2286 regression: Ask-on-no-rewrite must not be silently dropped =====
+    // Before the fix, a non-rewritable command carrying a not-evaluable
+    // construct fell through to `Skip` (empty stdout), so the host (Claude
+    // Code) applied its own `Bash(<cmd>:*)` allow rule and auto-ran e.g.
+    // `git status $(whoami)`. These run through `run_claude_inner` — the same
+    // real `check_command` + real gate path `run_claude` uses — for an
+    // end-to-end proof. `notarealcmd` is unknown to the registry (no rewrite),
+    // and `contains_unattestable_construct` makes `check_command_with_rules`
+    // return Ask BEFORE any allow/default matching, so no rules need injecting.
+
+    /// Helper: does the live path emit an `ask` permissionDecision?
+    fn live_path_asks(cmd: &str) -> bool {
+        match run_claude_inner(&claude_input(cmd)) {
+            Some(json) => {
+                let v: Value = serde_json::from_str(&json).unwrap();
+                v.pointer("/hookSpecificOutput/permissionDecision") == Some(&json!("ask"))
+            }
+            None => false,
+        }
+    }
+
+    #[test]
+    fn test_live_unattestable_non_rewritable_asks() {
+        // Non-rewritable + command substitution → Ask verdict. Must escalate
+        // to a real `ask`, NOT Skip (which leaks to the host's allow rule).
+        assert!(
+            live_path_asks("notarealcmd $(whoami)"),
+            "an unattestable non-rewritable command must emit ask, not skip (#2286)"
+        );
+    }
+
+    #[test]
+    fn test_live_file_redirect_non_rewritable_asks() {
+        // Non-rewritable + file-write redirect → Ask verdict → must `ask`.
+        assert!(
+            live_path_asks("notarealcmd > /tmp/x"),
+            "a file-write-redirect non-rewritable command must emit ask (#2286)"
+        );
+    }
+
+    #[test]
+    fn test_live_benign_non_rewritable_still_skips() {
+        // Companion: a plain benign non-rewritable command (Default verdict,
+        // no unattestable construct) must STILL Skip silently so the host uses
+        // its own rules — proving the #2286 fix did not over-escalate.
+        assert!(
+            run_claude_inner(&claude_input("notarealcmd --flag")).is_none(),
+            "a benign non-rewritable command must still skip silently, not ask"
+        );
+        match process_claude_payload_with_gate(
+            &serde_json::from_str::<Value>(&claude_input("notarealcmd --flag")).unwrap(),
+            |_| PermissionVerdict::Default,
+            |_| GateDecision::Proceed,
+        ) {
+            PayloadAction::Skip { reason, .. } => assert_eq!(reason, "skip:no_match"),
+            other => panic!("expected Skip for benign Default verdict, got {other:?}"),
+        }
+    }
+
+    /// Direct verdict-injection proof of the #2286 None-branch fix: an `Ask`
+    /// permission verdict on a non-rewritable command (no gate involvement)
+    /// must yield `PayloadAction::Ask` with the `ask:no_rewrite` tag and the
+    /// not-auto-evaluable reason — not Skip.
+    #[test]
+    fn test_ask_verdict_no_rewrite_no_gate_is_ask() {
+        let v = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "notarealcmd $(whoami)" }
+        });
+        match process_claude_payload_with_gate(
+            &v,
+            |_| PermissionVerdict::Ask,
+            |_| GateDecision::Proceed,
+        ) {
+            PayloadAction::Ask {
+                audit_tag, reason, ..
+            } => {
+                assert_eq!(audit_tag, "ask:no_rewrite");
+                assert!(
+                    reason.contains("not auto-evaluable"),
+                    "reason must explain the #2286 cause, got: {reason}"
+                );
+            }
+            other => panic!("expected Ask for Ask-verdict no-rewrite, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_claude_rewrite_git_status() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();
@@ -1611,7 +1714,7 @@ mod tests {
                 cmd,
                 reason,
             } => {
-                assert_eq!(audit_tag, "ask:gate_no_rewrite");
+                assert_eq!(audit_tag, "ask:no_rewrite");
                 assert_eq!(cmd, "htop");
                 assert!(reason.contains("defence-in-depth gate"));
             }
