@@ -3,6 +3,31 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] — 2026-06-07
+
+The library pivot: ContextCrawler is now a proper lib + bin. The binary is a thin
+shim over `contextcrawler::run()`, so the CLI dogfoods the exact library code path
+downstream Rust tools embed. Completes the community request in PR #185.
+
+### Added
+- Public embedder API (experimental, NOT yet semver-guaranteed):
+  `filter_output(name, raw)` and `auto_filter_output(raw)` apply a named /
+  auto-detected output filter to captured command output without spawning the
+  CLI (panic-safe; mirrors `contextcrawler pipe`); `available_filters()` lists
+  the names. Plus the existing `summarize_command_output` / `no_bloat`.
+- Crate-level rustdoc with a usage example and an experimental-API banner.
+
+### Changed
+- `src/main.rs` is now a 5-line shim; all CLI logic lives in the library
+  (`cli::run`). `src/lib.rs` is the sole module root with a curated public
+  surface; internal modules are private (`core` is `#[doc(hidden)]`).
+- One compile tree (no duplicate bin/lib trees): dead-code warnings 473 -> 0,
+  so unused code is now genuinely flagged.
+
+### Notes
+- The public API is intentionally small and unstable at 0.x; it will be
+  stabilised toward 1.0. No CLI behaviour change in this release.
+
 ## [0.3.0] — 2026-06-06
 
 Branding rename: rtk/contextzip -> ctxcrl/contextcrawler throughout. The fork now
