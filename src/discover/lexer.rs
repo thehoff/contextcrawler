@@ -340,6 +340,194 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
     results
 }
 
+/// True for constructs the permission gate can't decompose, so they must never
+/// be auto-allowed: command/process substitution, or a real file-target
+/// redirect (fd-dup like `2>&1` and `/dev/null` are exempt). Separators,
+/// background `&`, newline and subshells `( )` are handled by
+/// [`split_for_permissions`], not flagged here.
+///
+/// Ported from upstream rtk-ai/rtk #2286 (952245d + e16aa26) and reconciled
+/// with the fork's existing `&`/newline split (22890aa): the fork already
+/// tokenises `\n`, `(` and `)` as Shellism control tokens, so this builds on
+/// the shared [`tokenize`] rather than re-tokenising.
+pub fn contains_unattestable_construct(cmd: &str) -> bool {
+    if contains_substitution(cmd) {
+        return true;
+    }
+    let tokens = tokenize(cmd);
+    tokens
+        .iter()
+        .enumerate()
+        .any(|(i, tok)| tok.kind == TokenKind::Redirect && redirect_has_file_target(&tokens, i))
+}
+
+/// Quote-aware: bash runs backtick/`$(...)` unquoted and inside double quotes,
+/// but treats single-quoted text literally; `<(`/`>(` is unquoted-only.
+fn contains_substitution(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'`' if !in_single => return true,
+            // `$(` is command substitution and IS unattestable — but `$((` is
+            // arithmetic expansion, which never executes a command, so it stays
+            // evaluable. This preserves the fork's `extract_substitutions`
+            // distinction (arithmetic is not a substitution).
+            b'$' if !in_single && bytes.get(i + 1) == Some(&b'(') => {
+                if bytes.get(i + 2) == Some(&b'(') {
+                    i += 3;
+                    continue;
+                }
+                return true;
+            }
+            b'<' | b'>' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'(') => {
+                return true
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether the redirect token at index `i` targets a real host file we cannot
+/// attest. Scope: OUTPUT redirects only (`>`, `>>`, `>&`, `&>`) — the spec
+/// downgrades real file-*write* targets to Ask. INPUT redirects (`<`, heredoc
+/// `<<`, here-string `<<<`) are NOT flagged: they write/exfil nothing to a host
+/// file, deny rules still fire on the truncated command segment, and gating them
+/// would turn every input heredoc into an Ask prompt for no security gain
+/// (council MED, reconciled from candidate B).
+///
+/// Exemptions among output redirects: fd-dup/close (`>&N`, `>&-`, `N>&M`) and
+/// `/dev/null`. A bare `>&word` (word not a number) is `>word 2>&1` — a file
+/// write — so it IS a file target. (e16aa26.)
+fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
+    let value = &tokens[i].value;
+    if !value.contains('>') {
+        // Pure input redirect (`<`, `<<`, `<<<`) — not a file-write target.
+        return false;
+    }
+    if let Some(pos) = value.find(">&") {
+        let tail = &value[pos + 2..];
+        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') {
+            return false;
+        }
+    }
+    match tokens.get(i + 1) {
+        Some(next) if next.kind == TokenKind::Arg => next.value != "/dev/null",
+        _ => true,
+    }
+}
+
+/// Like [`split_on_operators`] but also breaks on subshell parentheses
+/// `( ... )` and truncates each segment at its first redirect, in addition to
+/// the `&&`/`||`/`;`/`|`/background-`&`/newline separators already handled by
+/// the shared tokeniser (22890aa). Used only by the permission gate so a
+/// deny-ruled command hidden in ANY segment — including inside a subshell — is
+/// still checked. Callers must still gate on
+/// [`contains_unattestable_construct`] first, because substitution and
+/// file-target redirects can hide commands this function can't surface.
+pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    let tokens = tokenize(trimmed);
+    let mut results = Vec::new();
+    let mut seg_start: usize = 0;
+    let mut seg_end: Option<usize> = None;
+    // Paren stack: `true` = a substitution/arithmetic paren (`$(`, `$((`, `<(`,
+    // `>(`) whose `(`/`)` are NOT subshell boundaries; `false` = a real subshell
+    // paren that IS a boundary. Substitution commands are already forced to Ask
+    // by `contains_unattestable_construct`, so we only need this to avoid
+    // shredding `$((expr))` and `$(...)` segments on the still-allowable paths.
+    let mut paren_stack: Vec<bool> = Vec::new();
+
+    for (i, tok) in tokens.iter().enumerate() {
+        // Decide whether a `(` opens a substitution/arithmetic (skip) vs a
+        // subshell (boundary). A substitution `(` is token-adjacent to a `$`,
+        // `<` or `>` opener, or to another substitution `(` (the inner `(` of
+        // `$((`).
+        if tok.kind == TokenKind::Shellism && tok.value == "(" {
+            let prev = i.checked_sub(1).and_then(|p| tokens.get(p));
+            let is_subst_open = matches!(
+                prev,
+                Some(p)
+                    if p.offset + p.value.len() == tok.offset
+                        && ((p.kind == TokenKind::Shellism && p.value == "$")
+                            || (p.kind == TokenKind::Shellism
+                                && p.value == "("
+                                && *paren_stack.last().unwrap_or(&false))
+                            || (p.kind == TokenKind::Redirect && (p.value == "<" || p.value == ">")))
+            );
+            if is_subst_open {
+                paren_stack.push(true);
+                continue;
+            }
+            paren_stack.push(false);
+            // True subshell open — a boundary.
+            let end = seg_end.take().unwrap_or(tok.offset);
+            let segment = trimmed[seg_start..end].trim();
+            if !segment.is_empty() {
+                results.push(segment);
+            }
+            seg_start = tok.offset + tok.value.len();
+            continue;
+        }
+        if tok.kind == TokenKind::Shellism && tok.value == ")" {
+            // Closing a substitution paren is not a boundary; closing a real
+            // subshell is.
+            if paren_stack.pop() == Some(true) {
+                continue;
+            }
+            let end = seg_end.take().unwrap_or(tok.offset);
+            let segment = trimmed[seg_start..end].trim();
+            if !segment.is_empty() {
+                results.push(segment);
+            }
+            seg_start = tok.offset + tok.value.len();
+            continue;
+        }
+
+        let is_boundary = match tok.kind {
+            TokenKind::Operator | TokenKind::Pipe => true,
+            // Background `&` and newline are Shellism control tokens too.
+            TokenKind::Shellism => matches!(tok.value.as_str(), "&" | "\n"),
+            _ => false,
+        };
+
+        if is_boundary {
+            // A redirect earlier in this segment ends it before the operator;
+            // the redirect target (a filename) is not part of the command.
+            let end = seg_end.take().unwrap_or(tok.offset);
+            let segment = trimmed[seg_start..end].trim();
+            if !segment.is_empty() {
+                results.push(segment);
+            }
+            seg_start = tok.offset + tok.value.len();
+        } else if tok.kind == TokenKind::Redirect && seg_end.is_none() {
+            seg_end = Some(tok.offset);
+        }
+    }
+
+    let end = seg_end.unwrap_or(trimmed.len());
+    let tail = trimmed[seg_start..end].trim();
+    if !tail.is_empty() {
+        results.push(tail);
+    }
+
+    results
+}
+
 /// Strip a single layer of matching surrounding quotes from a token.
 ///
 /// Used by token-aware permission matching so that `"push"` and `push`
@@ -1479,5 +1667,182 @@ mod tests {
         let subs = extract_substitutions(r#"echo $(rm -rf "/x )y")"#);
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].inner, r#"rm -rf "/x )y""#);
+    }
+
+    // --- contains_unattestable_construct (#2286 security) -------------------
+    // Constructs RTK can't decompose must never be auto-allowed.
+
+    #[test]
+    fn test_unattestable_backtick() {
+        assert!(contains_unattestable_construct("git status `whoami`"));
+    }
+
+    #[test]
+    fn test_unattestable_command_substitution() {
+        assert!(contains_unattestable_construct(
+            "git log --pretty=$(rm -rf ~)"
+        ));
+    }
+
+    #[test]
+    fn test_unattestable_process_substitution() {
+        assert!(contains_unattestable_construct("diff <(secret) <(other)"));
+        assert!(contains_unattestable_construct("tee >(cat)"));
+    }
+
+    #[test]
+    fn test_unattestable_substitution_inside_double_quotes() {
+        assert!(contains_unattestable_construct(
+            r#"git log --pretty="$(rm -rf ~)""#
+        ));
+        assert!(contains_unattestable_construct(
+            r#"git log --pretty="`rm -rf ~`""#
+        ));
+        assert!(contains_unattestable_construct(
+            r#"git -c x="$(whoami)" status"#
+        ));
+    }
+
+    #[test]
+    fn test_attestable_substitution_inside_single_quotes() {
+        assert!(!contains_unattestable_construct("echo '$(rm -rf ~)'"));
+        assert!(!contains_unattestable_construct("echo '`whoami`'"));
+        assert!(!contains_unattestable_construct(r#"echo "\$(rm -rf ~)""#));
+    }
+
+    #[test]
+    fn test_unattestable_file_redirects() {
+        assert!(contains_unattestable_construct("git log > /tmp/x"));
+        assert!(contains_unattestable_construct("echo evil >> ~/.bashrc"));
+        assert!(contains_unattestable_construct("cmd &> /tmp/x"));
+    }
+
+    #[test]
+    fn test_attestable_input_redirects() {
+        // Scope is file-WRITE targets (spec / council reconciliation). Input
+        // redirects exfil/write nothing to a host file and deny rules still fire
+        // on the command segment, so they are NOT downgraded — gating them would
+        // Ask on every input heredoc for no security gain.
+        assert!(!contains_unattestable_construct("cat < /etc/passwd"));
+        assert!(!contains_unattestable_construct("cat << EOF"));
+        assert!(!contains_unattestable_construct("cat <<< 'here string'"));
+    }
+
+    #[test]
+    fn test_unattestable_ampersand_file_redirect() {
+        // `>&word` (word not a number) == `>word 2>&1` — a file write. (e16aa26)
+        assert!(contains_unattestable_construct("git status >& /tmp/evil"));
+        assert!(contains_unattestable_construct("cat x >&~/.bashrc"));
+        assert!(contains_unattestable_construct("echo hi 2>& /tmp/evil"));
+    }
+
+    #[test]
+    fn test_attestable_fd_dup_and_devnull_redirects() {
+        assert!(!contains_unattestable_construct("git status 2>&1"));
+        assert!(!contains_unattestable_construct("cmd >&2"));
+        assert!(!contains_unattestable_construct("cmd 2>&-"));
+        assert!(!contains_unattestable_construct("cmd 2>/dev/null"));
+        assert!(!contains_unattestable_construct("cmd > /dev/null"));
+        assert!(!contains_unattestable_construct("cmd &> /dev/null"));
+        assert!(!contains_unattestable_construct("cmd >& /dev/null"));
+    }
+
+    #[test]
+    fn test_attestable_subshell_and_separators() {
+        assert!(!contains_unattestable_construct(
+            "(git status; cargo build)"
+        ));
+        assert!(!contains_unattestable_construct(
+            "git status && cargo build"
+        ));
+        assert!(!contains_unattestable_construct("git status; cargo build"));
+        assert!(!contains_unattestable_construct("git log | head"));
+        assert!(!contains_unattestable_construct("sleep 1 &"));
+        assert!(!contains_unattestable_construct("git status\ncargo build"));
+    }
+
+    #[test]
+    fn test_attestable_variable_expansion() {
+        assert!(!contains_unattestable_construct("echo $HOME"));
+        assert!(!contains_unattestable_construct("echo ${HOME}"));
+        assert!(!contains_unattestable_construct("git status"));
+        assert!(!contains_unattestable_construct(""));
+    }
+
+    // --- split_for_permissions (#2286 reconciled with 22890aa) -------------
+
+    #[test]
+    fn test_split_perms_operators() {
+        assert_eq!(
+            split_for_permissions("git status && cargo build"),
+            vec!["git status", "cargo build"]
+        );
+        assert_eq!(
+            split_for_permissions("git status; cargo build"),
+            vec!["git status", "cargo build"]
+        );
+        assert_eq!(
+            split_for_permissions("git log | head"),
+            vec!["git log", "head"]
+        );
+    }
+
+    #[test]
+    fn test_split_perms_newline() {
+        assert_eq!(
+            split_for_permissions("git status\ncargo build"),
+            vec!["git status", "cargo build"]
+        );
+    }
+
+    #[test]
+    fn test_split_perms_background_ampersand() {
+        assert_eq!(
+            split_for_permissions("git status & rm -rf ~"),
+            vec!["git status", "rm -rf ~"]
+        );
+        assert_eq!(split_for_permissions("sleep 1 &"), vec!["sleep 1"]);
+    }
+
+    #[test]
+    fn test_split_perms_subshell() {
+        assert_eq!(
+            split_for_permissions("(git status; cargo build)"),
+            vec!["git status", "cargo build"]
+        );
+        assert_eq!(split_for_permissions("((a; b); c)"), vec!["a", "b", "c"]);
+        // The deny-bypass shape: a deny-ruled command alone in a subshell.
+        assert_eq!(
+            split_for_permissions("echo hi && ( rm -rf / )"),
+            vec!["echo hi", "rm -rf /"]
+        );
+    }
+
+    #[test]
+    fn test_split_perms_truncates_at_redirect() {
+        assert_eq!(split_for_permissions("git status 2>&1"), vec!["git status"]);
+        assert_eq!(split_for_permissions("git log > /tmp/x"), vec!["git log"]);
+        assert_eq!(
+            split_for_permissions("git push --force 2>&1"),
+            vec!["git push --force"]
+        );
+        // A deny-ruled command before a redirect is still surfaced.
+        assert_eq!(
+            split_for_permissions("rm -rf / > out"),
+            vec!["rm -rf /"]
+        );
+    }
+
+    #[test]
+    fn test_split_perms_newline_inside_quotes_not_split() {
+        let segments = split_for_permissions("echo 'line1\nline2'");
+        assert_eq!(segments.len(), 1);
+        assert!(segments[0].starts_with("echo"));
+    }
+
+    #[test]
+    fn test_split_perms_empty() {
+        assert!(split_for_permissions("").is_empty());
+        assert!(split_for_permissions("   ").is_empty());
     }
 }
