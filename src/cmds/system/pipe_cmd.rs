@@ -48,6 +48,7 @@ fn vitest_wrapper(input: &str) -> String {
 }
 
 fn grep_wrapper(input: &str) -> String {
+    use crate::core::utils::truncate;
     use std::collections::HashMap;
 
     let mut by_file: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
@@ -73,11 +74,20 @@ fn grep_wrapper(input: &str) -> String {
 
     for (file, matches) in files {
         out.push_str(&format!("[file] {} ({}):\n", file, matches.len()));
-        for (line_num, content) in matches.iter().take(10) {
-            out.push_str(&format!("  {:>4}: {}\n", line_num, content.trim()));
+        for (line_num, content) in matches.iter().take(5) {
+            out.push_str(&format!(
+                "  {:>4}: {}\n",
+                line_num,
+                truncate(content.trim(), 200)
+            ));
         }
-        if matches.len() > 10 {
-            out.push_str(&format!("  +{}\n", matches.len() - 10));
+        if matches.len() > 5 {
+            let rest: Vec<&str> = matches.iter().skip(5).map(|(ln, _)| *ln).collect();
+            out.push_str(&format!(
+                "  +{} more at L: {}\n",
+                matches.len() - 5,
+                rest.join(",")
+            ));
         }
         out.push('\n');
     }
@@ -114,11 +124,11 @@ fn find_wrapper(input: &str) -> String {
 
     for (dir, files) in dirs.iter().take(20) {
         out.push_str(&format!("{}/  ({})\n", dir, files.len()));
-        for f in files.iter().take(10) {
+        for f in files.iter().take(5) {
             out.push_str(&format!("  {}\n", f));
         }
-        if files.len() > 10 {
-            out.push_str(&format!("  +{}\n", files.len() - 10));
+        if files.len() > 5 {
+            out.push_str(&format!("  +{}\n", files.len() - 5));
         }
     }
 
@@ -495,9 +505,87 @@ mod tests {
         let output = grep_wrapper(&input);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
-            savings >= 40.0, // TODO: grep pipe filter below 60% target — improve grouping
-            "grep filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
+            savings >= 60.0,
+            "grep filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
             savings, count_tokens(&input), count_tokens(&output)
+        );
+    }
+
+    #[test]
+    fn test_grep_wrapper_varied_content_savings() {
+        // Realistic varied output: 12 files, 15 matches each, every match a
+        // different code line of varying length (some >200 chars to exercise
+        // truncation). count > 5 per file → compact "+N more at L:" line.
+        let snippets = [
+            // First 5 are shown with content (mixed lengths; index 4 is >200 chars
+            // to exercise the truncate helper on a displayed line).
+            "    let config = Config::load(path)?;",
+            "    self.dispatch(req)",
+            "    let sum = total();",
+            "    process(v)?;",
+            "    let very_long_line = format!(\"this is an intentionally long diagnostic message that exceeds the two hundred character truncation boundary so that the truncate helper actually has to do some real work here and cut it off cleanly with an ellipsis at the end okay then\");",
+            // Remaining 10 collapse to a comma-joined line-number list; they are
+            // still substantial real code lines in the input.
+            "        tracing::warn!(\"retrying connection to upstream endpoint {} after transient failure\", endpoint);",
+            "    return Err(anyhow!(\"unexpected token {:?} at position {} while parsing the expression\", tok, pos));",
+            "    let mut buffer: Vec<u8> = Vec::with_capacity(expected_payload_size_in_bytes);",
+            "    while let Some(item) = queue.pop_front() { worker.submit(item).context(\"submit failed\")?; }",
+            "    let decoded = serde_json::from_slice::<Envelope>(&raw).map_err(|e| ParseError::from(e))?;",
+            "    self.metrics.record_latency(start.elapsed().as_millis() as u64, &route_label);",
+            "    for (key, value) in headers.iter() { request.insert_header(key.clone(), value.clone()); }",
+            "    let response = client.post(&url).json(&body).send().await.context(\"request failed\")?;",
+            "    debug_assert!(index < self.len(), \"index out of bounds in the internal ring buffer slot\");",
+            "    let checksum = compute_crc32(&payload).wrapping_add(seed).rotate_left(shift_amount);",
+        ];
+        let mut input = String::new();
+        for file_idx in 1..=12 {
+            for (i, snip) in snippets.iter().enumerate() {
+                input.push_str(&format!(
+                    "src/module{}/file{}.rs:{}:{}\n",
+                    file_idx,
+                    file_idx,
+                    (i + 1) * 7,
+                    snip
+                ));
+            }
+        }
+        let output = grep_wrapper(&input);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "grep varied filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
+            savings,
+            count_tokens(&input),
+            count_tokens(&output)
+        );
+        // Still surfaces real content snippets...
+        assert!(
+            output.contains("Config::load"),
+            "expected a real content snippet in output: {}",
+            output
+        );
+        // ...and a comma-joined line-number list on a "+N more at L:" line.
+        let has_compact_list = output.lines().any(|l| l.contains("more at L:") && l.contains(','));
+        assert!(
+            has_compact_list,
+            "expected a comma-joined '+N more at L:' line: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_grep_wrapper_no_overflow_line_at_boundary() {
+        // A file with exactly 5 matches must NOT emit a "+N more at L:" line.
+        let input = "src/a.rs:1:fn one() {}\n\
+                     src/a.rs:2:fn two() {}\n\
+                     src/a.rs:3:fn three() {}\n\
+                     src/a.rs:4:fn four() {}\n\
+                     src/a.rs:5:fn five() {}\n";
+        let output = grep_wrapper(input);
+        assert!(
+            !output.contains("more at L:"),
+            "≤5 matches must not emit an overflow line: {}",
+            output
         );
     }
 
@@ -516,8 +604,8 @@ mod tests {
         let output = find_wrapper(&input);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
-            savings >= 40.0, // TODO: find pipe filter below 60% target — improve grouping
-            "find filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
+            savings >= 60.0,
+            "find filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
             savings, count_tokens(&input), count_tokens(&output)
         );
     }
