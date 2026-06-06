@@ -3,6 +3,35 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] — 2026-06-06
+
+Branding rename: rtk/contextzip -> ctxcrl/contextcrawler throughout. The fork now
+carries its own identity; upstream origins (rtk-ai/rtk, "based on rtk 0.30.1",
+author attribution) are preserved as historical credit. Complete-reset sanctioned
+(no external fork users) so no schema/marker back-compat is carried beyond the
+env-var shim.
+
+### Changed (breaking for local setup, shimmed)
+- Env vars RTK_* -> CTXCRL_* (CTXCRL_DISABLED, CTXCRL_DB_PATH, ...). Legacy RTK_*
+  still honoured via a deprecated compat shim, so existing ~/.claude hook
+  integrations keep working.
+- Paths -> ~/.config/ctxcrl, ~/.local/share/ctxcrl, .ctxcrl/. Settings
+  (config.toml/filters) auto-migrate on first run; the savings history.db resets
+  fresh (schema changed; legacy DB left orphaned).
+- DB columns rtk_* -> ctxcrl_*; analytics JSON keys rtk_* -> ctxcrl_*.
+- CLAUDE.md managed-block markers RTK_* -> CTXCRL_* (old blocks orphan on re-init).
+- Hook integrity sidecar .rtk-hook.sha256 -> .ctxcrl-hook.sha256; hermes hook dir
+  rtk-rewrite -> ctxcrl-rewrite. Public symbols Rtk* -> Ctxcrl*.
+
+### Kept (deliberate)
+- Origin/attribution refs; legacy detection of old rtk command-prefixes,
+  rtk-rewrite.sh / rtk-hook / RTK.md / homebrew rtk installs; the X-RTK-Token
+  telemetry wire header (telemetry is opt-out).
+
+### Repo hygiene
+- .gitignore excludes local tool metadata (.serena/, .playwright-mcp/,
+  package-lock.json, cache/) so `git add -A` can't sweep them in.
+
 ## [0.2.0] — 2026-06-06
 
 Consolidation baseline before the library/CLI pivot. Bundles the 2026-06-06

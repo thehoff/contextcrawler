@@ -66,3 +66,5 @@ bench/claude-code-*.md
 .serena/
 .playwright-mcp/
 .agy-intent-diff.patch
+package-lock.json
+.ctxcrl/
