@@ -1,11 +1,11 @@
 //! Filters dotnet CLI output — build, test, and format results.
 
-use crate::binlog;
+use super::binlog;
+use super::dotnet_format_report;
+use super::dotnet_trx;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{check_forbidden_dotnet_args, secure_dotnet_command, truncate};
-use crate::dotnet_format_report;
-use crate::dotnet_trx;
 use anyhow::{Context, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -1224,7 +1224,7 @@ fn format_restore_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dotnet_format_report;
+    use super::super::dotnet_format_report;
     use std::fs;
     use std::time::Duration;
 
