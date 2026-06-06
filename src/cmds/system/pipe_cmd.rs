@@ -3,7 +3,7 @@ use std::io::Read;
 
 use crate::core::stream::RAW_CAP;
 
-pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
+pub(crate) fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
         "pytest" => Some(crate::cmds::python::pytest_cmd::filter_pytest_output),
@@ -139,7 +139,7 @@ fn find_wrapper(input: &str) -> String {
     out
 }
 
-pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
+pub(crate) fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     let end = input.len().min(1024);
     // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
     let end = input.floor_char_boundary(end);
@@ -201,7 +201,7 @@ fn identity_filter(input: &str) -> String {
     input.to_string()
 }
 
-fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
+pub(crate) fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
         .unwrap_or_else(|_| {
             eprintln!("[contextcrawler] warning: filter panicked — passing through raw output");
