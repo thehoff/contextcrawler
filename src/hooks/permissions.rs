@@ -69,7 +69,7 @@ pub(crate) fn check_command_with_rules(
     // Never auto-allow a construct the gate can't decompose: command/process
     // substitution (`$(...)`, backticks) or a real file-target redirect
     // (`>file`, `>>file`, `>&file`, `&>file`). fd-dups (`2>&1`) and `/dev/null`
-    // stay evaluable. RTK can't attest these, so they downgrade to Ask and the
+    // stay evaluable. ContextCrawler can't attest these, so they downgrade to Ask and the
     // user decides. Ported from rtk-ai/rtk #2286 (952245d + e16aa26). Deny was
     // already checked above and still wins.
     if contains_unattestable_construct(cmd) {

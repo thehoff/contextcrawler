@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_pipe_line_count() {
-        // Simulates: rtk ls | wc -l
+        // Simulates: ctxcrl ls | wc -l
         // Entries should have exactly 1 line per file/dir, no extra blank or summary
         let input = "total 48\n\
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_compact_device_files() {
-        // Regression test for #844: `rtk ls /dev/ttyACM*` returned "(empty)"
+        // Regression test for #844: `ctxcrl ls /dev/ttyACM*` returned "(empty)"
         // because character devices (type 'c') were not handled by compact_ls.
         let input = "crw-rw----  1 root  dialout  166, 0 Apr 22 09:46 /dev/ttyACM0\n";
         let (entries, _summary, _parsed) = compact_ls(input, false, false);

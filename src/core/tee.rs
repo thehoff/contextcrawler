@@ -86,7 +86,7 @@ fn get_tee_dir(config: &Config) -> Option<PathBuf> {
         return confine_tee_dir_to_home(dir.clone());
     }
 
-    // Default: ~/.local/share/rtk/tee/
+    // Default: ~/.local/share/ctxcrl/tee/
     dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR).join("tee"))
 }
 
@@ -265,7 +265,7 @@ fn write_tee_content(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()
 /// Write raw output to tee file if conditions are met.
 /// Returns file path on success, None if skipped/failed.
 pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
-    // Check RTK_TEE=0 env override (disable)
+    // Check CTXCRL_TEE=0 env override (disable)
     if crate::core::env_compat::env_var("CTXCRL_TEE").as_deref() == Some("0") {
         return None;
     }
@@ -313,7 +313,7 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
 /// Used by AWS filters when FilterResult.truncated = true, ensuring
 /// the LLM has access to full untruncated output via the hint path.
 pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
-    // Check RTK_TEE=0 env override (disable)
+    // Check CTXCRL_TEE=0 env override (disable)
     if crate::core::env_compat::env_var("CTXCRL_TEE").as_deref() == Some("0") {
         return None;
     }
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_format_hint() {
-        let path = PathBuf::from("/tmp/rtk/tee/123_cargo_test.log");
+        let path = PathBuf::from("/tmp/ctxcrl/tee/123_cargo_test.log");
         let hint = format_hint(&path);
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
@@ -573,14 +573,14 @@ enabled = true
 mode = "always"
 max_files = 10
 max_file_size = 524288
-directory = "/tmp/rtk-tee"
+directory = "/tmp/ctxcrl-tee"
 "#;
         let config: TeeConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
         assert_eq!(config.mode, TeeMode::Always);
         assert_eq!(config.max_files, 10);
         assert_eq!(config.max_file_size, 524288);
-        assert_eq!(config.directory, Some(PathBuf::from("/tmp/rtk-tee")));
+        assert_eq!(config.directory, Some(PathBuf::from("/tmp/ctxcrl-tee")));
 
         // Round-trip
         let serialized = toml::to_string_pretty(&config).unwrap();

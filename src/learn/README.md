@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Analyzes Claude Code session history to detect recurring CLI mistakes — commands that fail then get corrected by the agent. Powers the `rtk learn` command, which identifies error patterns (unknown flags, wrong paths, missing args) and can auto-generate `.claude/rules/cli-corrections.md` to prevent them.
+Analyzes Claude Code session history to detect recurring CLI mistakes — commands that fail then get corrected by the agent. Powers the `ctxcrl learn` command, which identifies error patterns (unknown flags, wrong paths, missing args) and can auto-generate `.claude/rules/cli-corrections.md` to prevent them.
 
 ## Key Types
 
@@ -15,7 +15,7 @@ Analyzes Claude Code session history to detect recurring CLI mistakes — comman
 ## Dependencies
 
 - **Uses**: `discover::provider::ClaudeProvider` (session file discovery and command extraction), `lazy_static`/`regex` (error pattern matching), `serde_json` (JSON output)
-- **Used by**: `src/main.rs` (routes `rtk learn` command)
+- **Used by**: `src/main.rs` (routes `ctxcrl learn` command)
 
 ## Detection Algorithm
 

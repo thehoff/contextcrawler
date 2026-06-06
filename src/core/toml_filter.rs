@@ -3,15 +3,15 @@
 /// Provides a declarative pipeline of 8 stages that can be configured
 /// via TOML files. Lookup priority (first match wins):
 ///   1. `.ctxcrl/filters.toml`              — project-local, committable with the repo
-///   2. `~/.config/rtk/filters.toml`     — user-global, applies to all projects
+///   2. `~/.config/ctxcrl/filters.toml`  — user-global, applies to all projects
 ///   3. Built-in TOML                     — `src/filters/*.toml`, concatenated by build.rs and embedded at compile time
 ///   4. Passthrough                       — no match, handled by caller
 ///
-/// `rtk init` generates a commented template for both levels (project or global).
+/// `ctxcrl init` generates a commented template for both levels (project or global).
 ///
 /// Environment variables:
-///   - `RTK_NO_TOML=1`     — bypass TOML engine entirely
-///   - `RTK_TOML_DEBUG=1`  — print which filter matched and line counts to stderr
+///   - `CTXCRL_NO_TOML=1`     — bypass TOML engine entirely
+///   - `CTXCRL_TOML_DEBUG=1`  — print which filter matched and line counts to stderr
 ///
 /// Pipeline stages (applied in order):
 ///   1. strip_ansi           — remove ANSI escape codes
@@ -154,7 +154,7 @@ pub struct CompiledFilter {
 }
 
 // ---------------------------------------------------------------------------
-// Results for `rtk verify`
+// Results for `ctxcrl verify`
 // ---------------------------------------------------------------------------
 
 /// Outcome of running a single inline test.
@@ -245,7 +245,7 @@ impl TomlFilterRegistry {
             }
         }
 
-        // Priority 2: user-global ~/.config/rtk/filters.toml (trust-gated).
+        // Priority 2: user-global ~/.config/ctxcrl/filters.toml (trust-gated).
         //
         // Closes GHSA-2026-CC-001 / audit finding H-3 from the 2026-05-15
         // session. Without this gate, malware that wrote a hostile
@@ -627,7 +627,7 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// rtk verify — inline test execution
+// ctxcrl verify — inline test execution
 // ---------------------------------------------------------------------------
 
 /// Run inline tests from loaded TOML files (builtin + project-local).

@@ -1,25 +1,25 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
+description: How to integrate contextcrawler with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
 sidebar:
   order: 3
 ---
 
 # Supported Agents
 
-RTK supports all major AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
+contextcrawler supports all major AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
 
 ## How it works
 
-Each agent integration intercepts CLI commands before execution and rewrites them to their RTK equivalent. The agent runs `rtk cargo test` instead of `cargo test`, sees filtered output, and uses up to 90% fewer tokens — without any change to your workflow.
+Each agent integration intercepts CLI commands before execution and rewrites them to their contextcrawler equivalent. The agent runs `contextcrawler cargo test` instead of `cargo test`, sees filtered output, and uses up to 90% fewer tokens — without any change to your workflow.
 
-All rewrite logic lives in the RTK binary (`rtk rewrite`). Agent hooks are thin delegates that parse the agent-specific JSON format and call `rtk rewrite` for the actual decision.
+All rewrite logic lives in the contextcrawler binary (`contextcrawler rewrite`). Agent hooks are thin delegates that parse the agent-specific JSON format and call `contextcrawler rewrite` for the actual decision.
 
 ```
 Agent runs "cargo test"
   -> Hook intercepts (PreToolUse / plugin event)
-  -> Calls rtk rewrite "cargo test"
-  -> Returns "rtk cargo test"
+  -> Calls contextcrawler rewrite "cargo test"
+  -> Returns "contextcrawler cargo test"
   -> Agent executes filtered command
   -> LLM sees 90% fewer tokens
 ```
@@ -47,19 +47,19 @@ Agent runs "cargo test"
 ### Claude Code
 
 ```bash
-rtk init --global    # installs hook + patches settings.json
+contextcrawler init --global    # installs hook + patches settings.json
 ```
 
 Restart Claude Code. Verify:
 
 ```bash
-rtk init --show    # shows hook status
+contextcrawler init --show    # shows hook status
 ```
 
 ### Cursor
 
 ```bash
-rtk init --global --cursor
+contextcrawler init --global --cursor
 ```
 
 Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
@@ -67,19 +67,19 @@ Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
 ### VS Code Copilot Chat
 
 ```bash
-rtk init --global --copilot
+contextcrawler init --global --copilot
 ```
 
 ### Gemini CLI
 
 ```bash
-rtk init --global --gemini
+contextcrawler init --global --gemini
 ```
 
 ### OpenCode
 
 ```bash
-rtk init --global --opencode
+contextcrawler init --global --opencode
 ```
 
 Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
@@ -87,48 +87,48 @@ Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook
 ### Hermes
 
 ```bash
-rtk init --agent hermes
+contextcrawler init --agent hermes
 ```
 
-Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config. Hermes loads Python plugins, so the plugin entrypoint is Python, but it is only a thin adapter. It mutates the Hermes `terminal` tool `command` before execution and delegates all rewrite decisions to Rust through `rtk rewrite`. The repository source and tests for that adapter live in `hooks/hermes/`; only installed runtime files use the `~/.hermes/plugins/rtk-rewrite/` path.
+Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config. Hermes loads Python plugins, so the plugin entrypoint is Python, but it is only a thin adapter. It mutates the Hermes `terminal` tool `command` before execution and delegates all rewrite decisions to Rust through `contextcrawler rewrite`. The repository source and tests for that adapter live in `hooks/hermes/`; only installed runtime files use the `~/.hermes/plugins/rtk-rewrite/` path.
 
-The plugin fails open. If `rtk` is missing at load time, the hook is not registered. If `rtk rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
+The plugin fails open. If `contextcrawler` is missing at load time, the hook is not registered. If `contextcrawler rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `contextcrawler rewrite` limitations apply: already-prefixed `contextcrawler` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
 
 ### Cline / Roo Code
 
 ```bash
-rtk init --cline    # creates .clinerules in current project
+contextcrawler init --cline    # creates .clinerules in current project
 ```
 
-Cline reads `.clinerules` as custom instructions. RTK adds guidance telling Cline to prefer `rtk <cmd>` over raw commands.
+Cline reads `.clinerules` as custom instructions. contextcrawler adds guidance telling Cline to prefer `contextcrawler <cmd>` over raw commands.
 
 ### Windsurf
 
 ```bash
-rtk init --windsurf    # creates .windsurfrules in current project
+contextcrawler init --windsurf    # creates .windsurfrules in current project
 ```
 
 ### Codex CLI
 
 ```bash
-rtk init --codex    # creates AGENTS.md or patches existing one
+contextcrawler init --codex    # creates AGENTS.md or patches existing one
 ```
 
 ### Kilo Code
 
 ```bash
-rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current project
+contextcrawler init --agent kilocode    # creates .kilocode/rules/ctxcrl-rules.md in current project
 ```
 
-Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
+Kilo Code reads `.kilocode/rules/` as custom instructions. contextcrawler adds guidance telling Kilo Code to prefer `contextcrawler <cmd>` over raw commands.
 
 ### Google Antigravity
 
 ```bash
-rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md in current project
+contextcrawler init --agent antigravity    # creates .agents/rules/antigravity-ctxcrl-rules.md in current project
 ```
 
-Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
+Antigravity reads `.agents/rules/` as custom instructions. contextcrawler adds guidance telling Antigravity to prefer `contextcrawler <cmd>` over raw commands.
 
 ### Mistral Vibe (planned)
 
@@ -140,7 +140,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 |------|-----------|------------------|
 | **Full hook** | Shell script or Rust binary, intercepts via agent API | Transparent — agent never sees the raw command |
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
-| **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
+| **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `contextcrawler <cmd>` |
 
 Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
 
@@ -148,28 +148,28 @@ Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on
 
 The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
 
-- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
-- Filters work normally (`rtk cargo test`, `rtk git status`)
-- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
+- `contextcrawler init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
+- Filters work normally (`contextcrawler cargo test`, `contextcrawler git status`)
+- Auto-rewrite does not work — the AI assistant is instructed to use contextcrawler but commands are not intercepted
 
 For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
 
 ## Graceful degradation
 
-Hooks never block command execution. If RTK is missing, the hook exits cleanly and the raw command runs unchanged:
+Hooks never block command execution. If contextcrawler is missing, the hook exits cleanly and the raw command runs unchanged:
 
-- RTK binary not found: warning to stderr, exit 0
+- contextcrawler binary not found: warning to stderr, exit 0
 - Invalid JSON input: pass through unchanged
-- RTK version too old: warning to stderr, exit 0
+- contextcrawler version too old: warning to stderr, exit 0
 - Filter logic error: fallback to raw command output
 
-## Override: disable RTK for one command
+## Override: disable contextcrawler for one command
 
 ```bash
-RTK_DISABLED=1 git status    # runs raw git status, no rewrite
+CTXCRL_DISABLED=1 git status    # runs raw git status, no rewrite
 ```
 
-Or exclude commands permanently in `~/.config/rtk/config.toml`:
+Or exclude commands permanently in `~/.config/ctxcrl/config.toml`:
 
 ```toml
 [hooks]

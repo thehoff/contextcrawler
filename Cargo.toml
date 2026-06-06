@@ -1,7 +1,8 @@
 [package]
-# contextzip-downstream: package renamed for ContextCrawler distribution.
-# The source-level module/use/struct identifiers still use 'rtk' — this only
-# changes the cargo target binary name. Single binary, single mental model.
+# contextcrawler-downstream: package renamed for ContextCrawler distribution.
+# The source-level module/use/struct identifiers still use the upstream 'rtk'
+# names — this only changes the cargo target binary name. Single binary, single
+# mental model.
 name = "contextcrawler"
 version = "0.2.0"
 edition = "2021"
@@ -10,7 +11,7 @@ edition = "2021"
 # Older toolchains will fail to compile.
 rust-version = "1.80"
 authors = ["Patrick Szymkowiak"]
-description = "ContextCrawler — downstream of rtk-ai/rtk: CLI proxy that compresses command output for LLM agents, with the contextzip session compactor and an opt-in Tirith defense-in-depth gate"
+description = "ContextCrawler — downstream of rtk-ai/rtk: CLI proxy that compresses command output for LLM agents, with a session compactor and an opt-in Tirith defense-in-depth gate"
 license = "MIT"
 homepage = "https://github.com/thehoff/contextcrawler"
 repository = "https://github.com/thehoff/contextcrawler"
@@ -44,9 +45,9 @@ shlex = "1.3"
 wait-timeout = "0.2"
 url = "2"
 
-# ===== contextzip-downstream dependencies begin =====
+# ===== contextcrawler-downstream dependencies begin =====
 scraper = "0.20"      # used by cmds/cloud/web_cmd.rs (HTML content extraction)
-# ===== contextzip-downstream dependencies end =====
+# ===== contextcrawler-downstream dependencies end =====
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

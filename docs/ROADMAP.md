@@ -41,7 +41,7 @@ ship them when one of them is mature, not all at once.
       the `~/.cargo/bin/tirith` fallback path. Adds operational
       friction; only land if F-03 in the tirith audit becomes a real
       concern.
-- [ ] **Address upstream issue #1820** if it lands first: RTK proxy
+- [ ] **Address upstream issue #1820** if it lands first: contextcrawler proxy
       not used by Claude Code subagents (massive token leak in
       multi-agent workflows). Either inherit upstream's fix or scope
       our own. Reference: rtk-ai/rtk#1820.

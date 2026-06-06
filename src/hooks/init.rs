@@ -68,7 +68,7 @@ const AGENT_PIDEV: &str = "pidev";
 /// # Errors
 /// Returns an error on an unrecognised key — callers must use one of the
 /// eleven `AGENT_*` constants above; passing a typo is a programming error
-/// surfaced as a `Result` rather than a panic (RTK no-panic-in-production rule).
+/// surfaced as a `Result` rather than a panic (CTXCRL no-panic-in-production rule).
 fn agent_guidance(agent: &str) -> Result<String> {
     let title = match agent {
         AGENT_CLAUDE     => "Claude Code",
@@ -165,15 +165,15 @@ fn agent_guidance(agent: &str) -> Result<String> {
     ))
 }
 
-/// Wrap `agent_guidance(agent)` output in an RTK marker block so it can be
+/// Wrap `agent_guidance(agent)` output in a ContextCrawler marker block so it can be
 /// upserted into a shared instructions file (AGENTS.md) via
-/// [`write_rtk_block`] / [`upsert_rtk_block`] without clobbering user content.
+/// [`write_ctxcrl_block`] / [`upsert_ctxcrl_block`] without clobbering user content.
 ///
-/// The markers (`RTK_BLOCK_START` … `RTK_BLOCK_END`) are the same ones the
+/// The markers (`CTXCRL_BLOCK_START` … `CTXCRL_BLOCK_END`) are the same ones the
 /// Claude CLAUDE.md and Copilot copilot-instructions.md flows use.
 fn agent_guidance_block(agent: &str) -> Result<String> {
     Ok(format!(
-        "<!-- rtk-instructions v3 -->\n{}\n<!-- /rtk-instructions -->\n",
+        "<!-- ctxcrl-instructions v3 -->\n{}\n<!-- /ctxcrl-instructions -->\n",
         agent_guidance(agent)?
     ))
 }
@@ -210,7 +210,7 @@ schema_version = 1
 # on_empty = "my-tool: ok"
 "#;
 
-/// Template for user-global filters (~/.config/rtk/filters.toml).
+/// Template for user-global filters (~/.config/ctxcrl/filters.toml).
 const FILTERS_GLOBAL_TEMPLATE: &str = r#"# User-global ContextCrawler filters — apply to all your projects.
 # Project-local .ctxcrl/filters.toml takes precedence over these.
 # Trust gate: run `contextcrawler trust --global` after editing.
@@ -229,21 +229,21 @@ schema_version = 1
 // The slim instructions file is named CONTEXTCRAWLER.md (not RTK.md) so it // branding-lint: allow legacy
 // matches the downstream tool name on disk. Commit bcddd06 silently reverted
 // this to "RTK.md" during the upstream rebase; see issue #19 and the
-// `test_rtk_md_constant_pinned_to_contextcrawler_filename` regression test.
-const RTK_MD: &str = "CONTEXTCRAWLER.md";
+// `test_ctxcrl_md_constant_pinned_to_contextcrawler_filename` regression test.
+const CTXCRL_MD: &str = "CONTEXTCRAWLER.md";
 const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
-const RTK_MD_REF: &str = "@CONTEXTCRAWLER.md";
+const CTXCRL_MD_REF: &str = "@CONTEXTCRAWLER.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
 /// Legacy file names that should be cleaned up if found, both on disk and as
 /// `@<name>` references in AGENTS.md / CLAUDE.md. Add to this list whenever
 /// a rename happens so users running `init` after the change don't end up
 /// with duplicate orphan files.
-const LEGACY_RTK_MD_FILES: &[&str] = &["RTK.md"];
+const LEGACY_CTXCRL_MD_FILES: &[&str] = &["RTK.md"]; // branding-lint: allow legacy
 
-const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
-const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
+const CTXCRL_BLOCK_START: &str = "<!-- ctxcrl-instructions";
+const CTXCRL_BLOCK_END: &str = "<!-- /ctxcrl-instructions -->";
 
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -280,7 +280,7 @@ fn print_dry_run_footer() {
 }
 
 // Legacy full instructions for backward compatibility (--claude-md mode)
-const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v3 -->
+const CTXCRL_INSTRUCTIONS: &str = r##"<!-- ctxcrl-instructions v3 -->
 # ContextCrawler — Token-Optimized Commands
 
 ## Golden Rule
@@ -421,7 +421,7 @@ contextcrawler trust --global      # Trust user-global TOML filters
 | Network | curl, wget, web | 65-70% |
 
 Overall average: **60-90% token reduction** on common development operations.
-<!-- /rtk-instructions -->
+<!-- /ctxcrl-instructions -->
 "##;
 
 /// Main entry point for `contextcrawler init`
@@ -707,7 +707,7 @@ fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
     }
 }
 
-/// `true` if `command` is the legacy ContextCrawler/rtk rewrite *script*
+/// `true` if `command` is the legacy ContextCrawler rewrite *script*
 /// hook entry.
 ///
 /// SECURITY (#100 G2 IMPORTANT 6): the legacy hook command is a filesystem
@@ -848,7 +848,7 @@ pub fn uninstall(
         let cursor_removed = remove_cursor_hooks(ctx).context("Failed to remove Cursor hooks")?;
         if !cursor_removed.is_empty() {
             let header = if dry_run {
-                "[dry-run] would uninstall RTK (Cursor):"
+                "[dry-run] would uninstall ContextCrawler (Cursor):"
             } else {
                 "ContextCrawler uninstalled (Cursor):"
             };
@@ -869,7 +869,7 @@ pub fn uninstall(
     }
 
     if !global {
-        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
+        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove ContextCrawler from CLAUDE.md");
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -881,7 +881,7 @@ pub fn uninstall(
         removed.extend(gemini_removed);
         if !removed.is_empty() {
             let header = if dry_run {
-                "[dry-run] would uninstall RTK (Gemini):"
+                "[dry-run] would uninstall ContextCrawler (Gemini):"
             } else {
                 "ContextCrawler uninstalled (Gemini):"
             };
@@ -928,15 +928,15 @@ pub fn uninstall(
     }
 
     // 2. Remove CONTEXTCRAWLER.md
-    let rtk_md_path = claude_dir.join(RTK_MD);
-    if rtk_md_path.exists() {
+    let ctxcrl_md_path = claude_dir.join(CTXCRL_MD);
+    if ctxcrl_md_path.exists() {
         if dry_run {
-            println!("[dry-run] would remove CONTEXTCRAWLER.md: {}", rtk_md_path.display());
+            println!("[dry-run] would remove CONTEXTCRAWLER.md: {}", ctxcrl_md_path.display());
         } else {
-            fs::remove_file(&rtk_md_path)
-                .with_context(|| format!("Failed to remove CONTEXTCRAWLER.md: {}", rtk_md_path.display()))?;
+            fs::remove_file(&ctxcrl_md_path)
+                .with_context(|| format!("Failed to remove CONTEXTCRAWLER.md: {}", ctxcrl_md_path.display()))?;
         }
-        removed.push(format!("CONTEXTCRAWLER.md: {}", rtk_md_path.display()));
+        removed.push(format!("CONTEXTCRAWLER.md: {}", ctxcrl_md_path.display()));
     }
 
     // 3. Remove @CONTEXTCRAWLER.md reference from CLAUDE.md
@@ -948,10 +948,10 @@ pub fn uninstall(
         let mut claude_md_changed = false;
         let mut working_content = content.clone();
 
-        if working_content.contains(RTK_MD_REF) {
+        if working_content.contains(CTXCRL_MD_REF) {
             let new_content = working_content
                 .lines()
-                .filter(|line| !line.trim().starts_with(RTK_MD_REF))
+                .filter(|line| !line.trim().starts_with(CTXCRL_MD_REF))
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -960,12 +960,12 @@ pub fn uninstall(
             removed.push("CLAUDE.md: removed @CONTEXTCRAWLER.md reference".to_string());
         }
 
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
+        if working_content.contains(CTXCRL_BLOCK_START) {
+            let (cleaned, did_remove) = remove_ctxcrl_block(&working_content);
             if did_remove {
                 working_content = cleaned;
                 claude_md_changed = true;
-                removed.push("CLAUDE.md: removed rtk-instructions block".to_string());
+                removed.push("CLAUDE.md: removed ctxcrl-instructions block".to_string());
             }
         }
 
@@ -1021,14 +1021,14 @@ pub fn uninstall(
 
     // Report results
     if removed.is_empty() {
-        println!("RTK was not installed (nothing to remove)");
+        println!("ContextCrawler was not installed (nothing to remove)");
         println!("  Checked: {}", hook_path.display());
-        println!("  Checked: {}", claude_dir.join(RTK_MD).display());
+        println!("  Checked: {}", claude_dir.join(CTXCRL_MD).display());
         println!("  Checked: {}", claude_md_path.display());
         println!("  Checked: {}", claude_dir.join(SETTINGS_JSON).display());
     } else {
         let header = if dry_run {
-            "[dry-run] would uninstall RTK:"
+            "[dry-run] would uninstall ContextCrawler:"
         } else {
             "ContextCrawler uninstalled:"
         };
@@ -1052,7 +1052,7 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     if !global {
         anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
+            "Uninstall only works with --global flag. For local projects, manually remove ContextCrawler from AGENTS.md"
         );
     }
 
@@ -1060,10 +1060,10 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let removed = uninstall_codex_at(&codex_dir, ctx)?;
 
     if removed.is_empty() {
-        println!("RTK was not installed for Codex CLI (nothing to remove)");
+        println!("ContextCrawler was not installed for Codex CLI (nothing to remove)");
     } else {
         let header = if dry_run {
-            "[dry-run] would uninstall RTK for Codex CLI:"
+            "[dry-run] would uninstall ContextCrawler for Codex CLI:"
         } else {
             "ContextCrawler uninstalled for Codex CLI:"
         };
@@ -1079,7 +1079,7 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
 fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
-    let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
+    let absolute_ctxcrl_md_ref = codex_ctxcrl_md_ref(codex_dir);
 
     // ORDER MATTERS (issue #26): patch AGENTS.md FIRST, delete files SECOND.
     //
@@ -1099,10 +1099,10 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
 
     let agents_md_path = codex_dir.join(AGENTS_MD);
     let mut refs_to_strip: Vec<String> = vec![
-        RTK_MD_REF.to_string(),
-        absolute_rtk_md_ref.clone(),
+        CTXCRL_MD_REF.to_string(),
+        absolute_ctxcrl_md_ref.clone(),
     ];
-    for legacy in LEGACY_RTK_MD_FILES {
+    for legacy in LEGACY_CTXCRL_MD_FILES {
         refs_to_strip.push(format!("@{}", legacy));
         refs_to_strip.push(format!("@{}", codex_dir.join(legacy).display()));
     }
@@ -1117,8 +1117,8 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         let mut block_removed = false;
         let mut ref_removed = false;
 
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
+        if working_content.contains(CTXCRL_BLOCK_START) {
+            let (cleaned, did_remove) = remove_ctxcrl_block(&working_content);
             if did_remove {
                 working_content = cleaned;
                 block_removed = true;
@@ -1154,7 +1154,7 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
                 })?;
             }
             if block_removed {
-                removed.push("AGENTS.md: removed rtk-instructions block".to_string());
+                removed.push("AGENTS.md: removed ctxcrl-instructions block".to_string());
             }
             if ref_removed {
                 removed.push("AGENTS.md: removed @CONTEXTCRAWLER.md reference".to_string());
@@ -1167,8 +1167,8 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
     // mid-loop, the earlier removes still count as removed — but AGENTS.md
     // is already in its final state so the user can re-run `uninstall`
     // safely; the remaining files will be retried.
-    let candidate_files: Vec<&str> = std::iter::once(RTK_MD)
-        .chain(LEGACY_RTK_MD_FILES.iter().copied())
+    let candidate_files: Vec<&str> = std::iter::once(CTXCRL_MD)
+        .chain(LEGACY_CTXCRL_MD_FILES.iter().copied())
         .collect();
     for filename in candidate_files {
         let file_path = codex_dir.join(filename);
@@ -1357,7 +1357,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
 }
 
 /// Check if ContextCrawler hook is already present in settings.json
-/// Matches on legacy rtk-rewrite.sh path OR new `rtk hook claude` command
+/// Matches on legacy rtk-rewrite.sh path OR new `contextcrawler hook claude` command
 fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
     let pre_tool_use_array = match root
         .get("hooks")
@@ -1396,14 +1396,14 @@ fn run_default_mode(
     }
 
     let claude_dir = resolve_claude_dir()?;
-    let rtk_md_path = claude_dir.join(RTK_MD);
+    let ctxcrl_md_path = claude_dir.join(CTXCRL_MD);
     let claude_md_path = claude_dir.join(CLAUDE_MD);
 
     // 1. Migrate old hook script if present
     migrate_old_hook_script(ctx);
 
     // 2. Write CONTEXTCRAWLER.md
-    write_if_changed(&rtk_md_path, &agent_guidance(AGENT_CLAUDE)?, RTK_MD, ctx)?;
+    write_if_changed(&ctxcrl_md_path, &agent_guidance(AGENT_CLAUDE)?, CTXCRL_MD, ctx)?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1420,7 +1420,7 @@ fn run_default_mode(
     if !dry_run {
         println!("\nContextCrawler hook registered (global).\n");
         println!("  Command:   {}", CLAUDE_HOOK_COMMAND);
-        println!("  CONTEXTCRAWLER.md:    {} (10 lines)", rtk_md_path.display());
+        println!("  CONTEXTCRAWLER.md:    {} (10 lines)", ctxcrl_md_path.display());
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode:  {}", path.display());
         }
@@ -1459,7 +1459,7 @@ fn run_default_mode(
         }
     }
 
-    // 6. Generate user-global filters template (~/.config/rtk/filters.toml)
+    // 6. Generate user-global filters template (~/.config/ctxcrl/filters.toml)
     generate_global_filters_template(ctx)?;
 
     if !dry_run {
@@ -1471,7 +1471,7 @@ fn run_default_mode(
 
 /// Migrate old hook script to new binary command.
 /// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.ctxcrl-hook.sha256` if present,
-/// and removes the stale settings.json entry so the new `rtk hook claude` entry
+/// and removes the stale settings.json entry so the new `contextcrawler hook claude` entry
 /// can be registered.
 fn migrate_old_hook_script(ctx: InitContext) {
     let InitContext { verbose, dry_run } = ctx;
@@ -1534,7 +1534,7 @@ fn migrate_old_hook_script(ctx: InitContext) {
 }
 
 /// Remove only legacy `rtk-rewrite.sh` entries from settings.json.
-/// Preserves any existing `rtk hook claude` entries (new format).
+/// Preserves any existing `contextcrawler hook claude` entries (new format).
 fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let claude_dir = resolve_claude_dir()?;
@@ -1582,7 +1582,7 @@ fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
 
 /// Remove only legacy `rtk-rewrite.sh` hook entries from a parsed settings.json.
 /// Returns true if any entries were removed.
-/// Does NOT remove `rtk hook claude` entries — those are the new format.
+/// Does NOT remove `contextcrawler hook claude` entries — those are the new format.
 fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
     let pre_tool_use_array = match root
         .get_mut("hooks")
@@ -1615,8 +1615,8 @@ fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
 /// Generate .ctxcrl/filters.toml template in the current directory if not present.
 fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
-    let rtk_dir = std::path::Path::new(".ctxcrl");
-    let path = rtk_dir.join("filters.toml");
+    let ctxcrl_dir = std::path::Path::new(".ctxcrl");
+    let path = ctxcrl_dir.join("filters.toml");
 
     if path.exists() {
         if verbose > 0 {
@@ -1633,8 +1633,8 @@ fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
         return Ok(());
     }
 
-    fs::create_dir_all(rtk_dir)
-        .with_context(|| format!("Failed to create directory: {}", rtk_dir.display()))?;
+    fs::create_dir_all(ctxcrl_dir)
+        .with_context(|| format!("Failed to create directory: {}", ctxcrl_dir.display()))?;
     fs::write(&path, FILTERS_TEMPLATE)
         .with_context(|| format!("Failed to write {}", path.display()))?;
 
@@ -1645,12 +1645,12 @@ fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-/// Generate ~/.config/rtk/filters.toml template if not present.
+/// Generate ~/.config/ctxcrl/filters.toml template if not present.
 fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
-    let rtk_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
-    let path = rtk_dir.join("filters.toml");
+    let ctxcrl_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
+    let path = ctxcrl_dir.join("filters.toml");
 
     if path.exists() {
         if verbose > 0 {
@@ -1667,8 +1667,8 @@ fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
         return Ok(());
     }
 
-    fs::create_dir_all(&rtk_dir)
-        .with_context(|| format!("Failed to create directory: {}", rtk_dir.display()))?;
+    fs::create_dir_all(&ctxcrl_dir)
+        .with_context(|| format!("Failed to create directory: {}", ctxcrl_dir.display()))?;
     fs::write(&path, FILTERS_GLOBAL_TEMPLATE)
         .with_context(|| format!("Failed to write {}", path.display()))?;
 
@@ -1774,12 +1774,12 @@ fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) ->
         "contextcrawler init --claude-md"
     };
 
-    // write_rtk_block handles all 4 cases: add, update, unchanged, malformed.
+    // write_ctxcrl_block handles all 4 cases: add, update, unchanged, malformed.
     // A malformed CLAUDE.md bails with a diagnostic instead of silently
     // exiting 0 and skipping the OpenCode plugin step below.
-    let action = write_rtk_block(
+    let action = write_ctxcrl_block(
         &path,
-        RTK_INSTRUCTIONS,
+        CTXCRL_INSTRUCTIONS,
         "contextcrawler instructions",
         recovery_cmd,
         ctx,
@@ -2020,8 +2020,8 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
 // ─── Hermes support ────────────────────────────────────────────
 
-const HERMES_PLUGIN_INIT: &str = include_str!("../../hooks/hermes/rtk-rewrite/__init__.py");
-const HERMES_PLUGIN_YAML: &str = include_str!("../../hooks/hermes/rtk-rewrite/plugin.yaml");
+const HERMES_PLUGIN_INIT: &str = include_str!("../../hooks/hermes/ctxcrl-rewrite/__init__.py");
+const HERMES_PLUGIN_YAML: &str = include_str!("../../hooks/hermes/ctxcrl-rewrite/plugin.yaml");
 
 pub fn run_hermes_mode(ctx: InitContext) -> Result<()> {
     let hermes_home = resolve_hermes_home()?;
@@ -2071,7 +2071,7 @@ fn run_hermes_mode_at(hermes_home: &Path, ctx: InitContext) -> Result<()> {
     // standalone CONTEXTCRAWLER.md. Only the marked block is touched —
     // user content in AGENTS.md is preserved.
     let agents_md_path = hermes_home.join(AGENTS_MD);
-    write_rtk_block(
+    write_ctxcrl_block(
         &agents_md_path,
         &agent_guidance_block(AGENT_HERMES)?,
         "Hermes guidance",
@@ -2102,7 +2102,7 @@ pub fn uninstall_hermes(ctx: InitContext) -> Result<()> {
         println!("ContextCrawler Hermes support was not installed (nothing to remove)");
     } else {
         let header = if dry_run {
-            "[dry-run] would uninstall RTK for Hermes CLI:"
+            "[dry-run] would uninstall ContextCrawler for Hermes CLI:"
         } else {
             "ContextCrawler uninstalled for Hermes CLI:"
         };
@@ -2131,7 +2131,7 @@ fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<Strin
                 plugin_dir.display()
             );
         } else {
-            // nosemgrep: filesystem-deletion -- uninstall intentionally removes only RTK's Hermes plugin directory.
+            // nosemgrep: filesystem-deletion -- uninstall intentionally removes only ContextCrawler's Hermes plugin directory.
             fs::remove_dir_all(&plugin_dir).with_context(|| {
                 format!(
                     "Failed to remove Hermes plugin directory: {}",
@@ -2168,14 +2168,14 @@ fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<Strin
                     eprintln!("Updated Hermes config: {}", config_path.display());
                 }
             }
-            removed.push("Hermes config: removed RTK plugin entry".to_string());
+            removed.push("Hermes config: removed ContextCrawler plugin entry".to_string());
         }
     }
 
-    // Strip the RTK guidance block from ~/.hermes/AGENTS.md.
+    // Strip the ContextCrawler guidance block from ~/.hermes/AGENTS.md.
     // Only the marked block is removed — user content in AGENTS.md is kept.
     let agents_md_path = hermes_home.join(AGENTS_MD);
-    if let Some(desc) = strip_rtk_block_from_file(&agents_md_path, "Hermes guidance", ctx)? {
+    if let Some(desc) = strip_ctxcrl_block_from_file(&agents_md_path, "Hermes guidance", ctx)? {
         removed.push(desc);
     }
 
@@ -2190,9 +2190,9 @@ fn unpatch_hermes_config(existing: &str) -> String {
     rewrite_hermes_config(existing, false)
 }
 
-fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
+fn rewrite_hermes_config(existing: &str, add_plugin: bool) -> String {
     if existing.trim().is_empty() {
-        return if add_rtk {
+        return if add_plugin {
             hermes_plugins_block()
         } else {
             String::new()
@@ -2201,7 +2201,7 @@ fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
 
     let mut lines = split_yaml_lines(existing);
     let Some(plugins_idx) = find_yaml_key_line(&lines, "plugins", 0, None) else {
-        return if add_rtk {
+        return if add_plugin {
             append_hermes_plugins_block(existing)
         } else {
             existing.to_string()
@@ -2216,7 +2216,7 @@ fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
         plugins_idx + 1,
         Some((plugins_end, plugins_indent)),
     ) else {
-        if add_rtk {
+        if add_plugin {
             let (enabled_indent, item_indent) =
                 hermes_missing_enabled_indents(&lines, plugins_idx, plugins_end, plugins_indent);
             let enabled_block = format!(
@@ -2232,11 +2232,11 @@ fn rewrite_hermes_config(existing: &str, add_rtk: bool) -> String {
     };
 
     if yaml_line_without_ending(&lines[enabled_idx]).contains('[') {
-        rewrite_inline_hermes_enabled(&mut lines, enabled_idx, add_rtk);
+        rewrite_inline_hermes_enabled(&mut lines, enabled_idx, add_plugin);
         return lines.concat();
     }
 
-    rewrite_block_hermes_enabled(&mut lines, enabled_idx, add_rtk);
+    rewrite_block_hermes_enabled(&mut lines, enabled_idx, add_plugin);
     lines.concat()
 }
 
@@ -2317,7 +2317,7 @@ fn yaml_block_end(lines: &[String], start: usize, parent_indent: usize) -> usize
         .unwrap_or(lines.len())
 }
 
-fn rewrite_inline_hermes_enabled(lines: &mut [String], enabled_idx: usize, add_rtk: bool) {
+fn rewrite_inline_hermes_enabled(lines: &mut [String], enabled_idx: usize, add_plugin: bool) {
     let line_ending = yaml_line_ending(&lines[enabled_idx]);
     let raw = yaml_line_without_ending(&lines[enabled_idx]);
     let Some((prefix, rest)) = raw.split_once('[') else {
@@ -2328,7 +2328,7 @@ fn rewrite_inline_hermes_enabled(lines: &mut [String], enabled_idx: usize, add_r
     };
 
     let mut items = Vec::new();
-    let mut saw_rtk = false;
+    let mut saw_plugin = false;
     for item in items_raw.split(',') {
         let trimmed = item.trim();
         if trimmed.is_empty() {
@@ -2336,16 +2336,16 @@ fn rewrite_inline_hermes_enabled(lines: &mut [String], enabled_idx: usize, add_r
         }
 
         if is_hermes_plugin_name(trimmed) {
-            if add_rtk && !saw_rtk {
+            if add_plugin && !saw_plugin {
                 items.push(trimmed.to_string());
-                saw_rtk = true;
+                saw_plugin = true;
             }
         } else {
             items.push(trimmed.to_string());
         }
     }
 
-    if add_rtk && !saw_rtk {
+    if add_plugin && !saw_plugin {
         items.push(HERMES_PLUGIN_NAME.to_string());
     }
 
@@ -2357,17 +2357,17 @@ fn rewrite_inline_hermes_enabled(lines: &mut [String], enabled_idx: usize, add_r
     lines[enabled_idx] = replacement;
 }
 
-fn rewrite_block_hermes_enabled(lines: &mut Vec<String>, enabled_idx: usize, add_rtk: bool) {
+fn rewrite_block_hermes_enabled(lines: &mut Vec<String>, enabled_idx: usize, add_plugin: bool) {
     let enabled_end = hermes_enabled_list_end(lines, enabled_idx);
     let item_indent = hermes_enabled_list_item_indent(lines, enabled_idx, enabled_end);
     let mut kept = Vec::with_capacity(lines.len() + 1);
-    let mut saw_rtk = false;
+    let mut saw_plugin = false;
 
     for line in &lines[enabled_idx + 1..enabled_end] {
         if is_yaml_list_item_named(line, HERMES_PLUGIN_NAME) {
-            if add_rtk && !saw_rtk {
+            if add_plugin && !saw_plugin {
                 kept.push(line.clone());
-                saw_rtk = true;
+                saw_plugin = true;
             }
             continue;
         }
@@ -2375,7 +2375,7 @@ fn rewrite_block_hermes_enabled(lines: &mut Vec<String>, enabled_idx: usize, add
         kept.push(line.clone());
     }
 
-    if add_rtk && !saw_rtk {
+    if add_plugin && !saw_plugin {
         let insert_idx = kept.len();
         ensure_previous_yaml_line_ends_with_newline(&mut kept, insert_idx);
         kept.push(format!(
@@ -2385,13 +2385,13 @@ fn rewrite_block_hermes_enabled(lines: &mut Vec<String>, enabled_idx: usize, add
         ));
     }
 
-    let mut enabled_line = if add_rtk || kept.iter().any(|line| is_yaml_list_item_line(line)) {
+    let mut enabled_line = if add_plugin || kept.iter().any(|line| is_yaml_list_item_line(line)) {
         lines[enabled_idx].clone()
     } else {
         collapse_yaml_list_key_to_empty(&lines[enabled_idx])
     };
 
-    if add_rtk
+    if add_plugin
         && kept
             .iter()
             .any(|line| is_yaml_list_item_named(line, HERMES_PLUGIN_NAME))
@@ -2539,19 +2539,19 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
 }
 
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let (agents_md_path, rtk_md_path) = if global {
+    let (agents_md_path, ctxcrl_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
-        (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
+        (codex_dir.join(AGENTS_MD), codex_dir.join(CTXCRL_MD))
     } else {
-        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
+        (PathBuf::from(AGENTS_MD), PathBuf::from(CTXCRL_MD))
     };
 
-    run_codex_mode_with_paths(agents_md_path, rtk_md_path, global, ctx)
+    run_codex_mode_with_paths(agents_md_path, ctxcrl_md_path, global, ctx)
 }
 
 fn run_codex_mode_with_paths(
     agents_md_path: PathBuf,
-    rtk_md_path: PathBuf,
+    ctxcrl_md_path: PathBuf,
     global: bool,
     ctx: InitContext,
 ) -> Result<()> {
@@ -2570,25 +2570,25 @@ fn run_codex_mode_with_paths(
     // ISSUE #892: In global mode, use absolute path so @CONTEXTCRAWLER.md resolves
     // from any CWD (worktrees, nested projects). Codex resolves @ references
     // relative to CWD, not the AGENTS.md file location.
-    let rtk_md_ref = if global {
-        codex_rtk_md_ref(
-            rtk_md_path
+    let ctxcrl_md_ref = if global {
+        codex_ctxcrl_md_ref(
+            ctxcrl_md_path
                 .parent()
                 .context("CONTEXTCRAWLER.md path missing parent directory")?,
         )
     } else {
-        RTK_MD_REF.to_string()
+        CTXCRL_MD_REF.to_string()
     };
 
-    write_if_changed(&rtk_md_path, &agent_guidance(AGENT_CODEX)?, RTK_MD, ctx)?;
-    let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+    write_if_changed(&ctxcrl_md_path, &agent_guidance(AGENT_CODEX)?, CTXCRL_MD, ctx)?;
+    let added_ref = patch_agents_md(&agents_md_path, &ctxcrl_md_ref, ctx)?;
 
     // Clean up legacy filenames (e.g. RTK.md left behind by the regressed // branding-lint: allow legacy
     // bcddd06 commit) so users upgrading don't end up with two duplicate
     // imports in AGENTS.md and a stale orphan file on disk. See issue #19.
     let cleaned_legacy = cleanup_legacy_codex_files(
         &agents_md_path,
-        rtk_md_path
+        ctxcrl_md_path
             .parent()
             .context("CONTEXTCRAWLER.md path missing parent directory")?,
         ctx,
@@ -2599,11 +2599,11 @@ fn run_codex_mode_with_paths(
             println!("  cleaned legacy artifact: {}", note);
         }
         println!("\nContextCrawler configured for Codex CLI.\n");
-        println!("  CONTEXTCRAWLER.md:    {}", rtk_md_path.display());
+        println!("  CONTEXTCRAWLER.md:    {}", ctxcrl_md_path.display());
         if added_ref {
-            println!("  AGENTS.md: {} reference added", rtk_md_ref);
+            println!("  AGENTS.md: {} reference added", ctxcrl_md_ref);
         } else {
-            println!("  AGENTS.md: {} reference already present", rtk_md_ref);
+            println!("  AGENTS.md: {} reference already present", ctxcrl_md_ref);
         }
         if global {
             println!(
@@ -2621,7 +2621,7 @@ fn run_codex_mode_with_paths(
     Ok(())
 }
 
-// --- upsert_rtk_block: idempotent RTK block management ---
+// --- upsert_ctxcrl_block: idempotent ContextCrawler block management ---
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum CtxcrlBlockUpsert {
@@ -2635,13 +2635,13 @@ enum CtxcrlBlockUpsert {
     Malformed,
 }
 
-/// Insert or replace the RTK instructions block in `content`.
+/// Insert or replace the ContextCrawler instructions block in `content`.
 ///
 /// Returns `(new_content, action)` describing what happened.
 /// The caller decides whether to write `new_content` based on `action`.
-fn upsert_rtk_block(content: &str, block: &str) -> (String, CtxcrlBlockUpsert) {
-    let start_marker = RTK_BLOCK_START;
-    let end_marker = RTK_BLOCK_END;
+fn upsert_ctxcrl_block(content: &str, block: &str) -> (String, CtxcrlBlockUpsert) {
+    let start_marker = CTXCRL_BLOCK_START;
+    let end_marker = CTXCRL_BLOCK_END;
 
     if let Some(start) = content.find(start_marker) {
         if let Some(relative_end) = content[start..].find(end_marker) {
@@ -2687,7 +2687,7 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, CtxcrlBlockUpsert) {
 /// Idempotently write a ContextCrawler-owned marker block into `path`,
 /// preserving user content.
 ///
-/// Reads the file (if any), passes it through [`upsert_rtk_block`], and writes
+/// Reads the file (if any), passes it through [`upsert_ctxcrl_block`], and writes
 /// the result back via [`atomic_write`]. Refuses to modify files containing an
 /// opening marker without a matching closing marker (bails with a diagnostic
 /// and the exact `recovery_cmd` to re-run after manual cleanup).
@@ -2696,7 +2696,7 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, CtxcrlBlockUpsert) {
 /// anything was actually changed.
 ///
 /// `label` is shown in user-facing messages (e.g. `"Copilot instructions"`).
-fn write_rtk_block(
+fn write_ctxcrl_block(
     path: &Path,
     block: &str,
     label: &str,
@@ -2711,7 +2711,7 @@ fn write_rtk_block(
         String::new()
     };
 
-    let (new_content, action) = upsert_rtk_block(&existing, block);
+    let (new_content, action) = upsert_ctxcrl_block(&existing, block);
 
     match action {
         CtxcrlBlockUpsert::Added => {
@@ -2740,13 +2740,13 @@ fn write_rtk_block(
         CtxcrlBlockUpsert::Malformed => {
             eprintln!(
                 "[warn] Found '{}' without closing marker in {}",
-                RTK_BLOCK_START,
+                CTXCRL_BLOCK_START,
                 path.display()
             );
             if let Some((line_num, _)) = existing
                 .lines()
                 .enumerate()
-                .find(|(_, line)| line.contains(RTK_BLOCK_START))
+                .find(|(_, line)| line.contains(CTXCRL_BLOCK_START))
             {
                 eprintln!("    Location: line {}", line_num + 1);
             }
@@ -2771,22 +2771,22 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     let mut migrated = false;
 
     // Check for old block and migrate
-    if content.contains(RTK_BLOCK_START) {
-        let (new_content, did_migrate) = remove_rtk_block(&content);
+    if content.contains(CTXCRL_BLOCK_START) {
+        let (new_content, did_migrate) = remove_ctxcrl_block(&content);
         if did_migrate {
             content = new_content;
             migrated = true;
             if verbose > 0 {
-                eprintln!("Migrated: removed old RTK block from CLAUDE.md");
+                eprintln!("Migrated: removed old ContextCrawler block from CLAUDE.md");
             }
         }
     }
 
-    // Migrate legacy `@CONTEXTCRAWLER.md` line(s) to the canonical `RTK_MD_REF`. On an
+    // Migrate legacy `@CONTEXTCRAWLER.md` line(s) to the canonical `CTXCRL_MD_REF`. On an
     // upgraded install CLAUDE.md may still reference the old filename — left
     // alone, the contains-check below misses it and the appender adds a
     // second line, leaving both references in place. See codex review on #19.
-    for legacy in LEGACY_RTK_MD_FILES {
+    for legacy in LEGACY_CTXCRL_MD_FILES {
         let legacy_ref = format!("@{}", legacy);
         if content.contains(&legacy_ref) {
             // Replace whole-line occurrences only — substring replace could
@@ -2795,7 +2795,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
                 .lines()
                 .map(|line| {
                     if line.trim() == legacy_ref.as_str() {
-                        RTK_MD_REF
+                        CTXCRL_MD_REF
                     } else {
                         line
                     }
@@ -2812,7 +2812,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
                 if verbose > 0 {
                     eprintln!(
                         "Migrated: {} -> {} in CLAUDE.md",
-                        legacy_ref, RTK_MD_REF
+                        legacy_ref, CTXCRL_MD_REF
                     );
                 }
             }
@@ -2820,14 +2820,14 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     }
 
     // Check if @CONTEXTCRAWLER.md already present
-    if content.contains(RTK_MD_REF) {
+    if content.contains(CTXCRL_MD_REF) {
         if verbose > 0 {
             eprintln!("@CONTEXTCRAWLER.md reference already present in CLAUDE.md");
         }
         if migrated {
             if dry_run {
                 println!(
-                    "[dry-run] would migrate old RTK block in CLAUDE.md: {}",
+                    "[dry-run] would migrate old ContextCrawler block in CLAUDE.md: {}",
                     path.display()
                 );
             } else {
@@ -2837,12 +2837,12 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
         return Ok(migrated);
     }
 
-    // Add the @-reference. Must use RTK_MD_REF (not a hardcoded literal) so
+    // Add the @-reference. Must use CTXCRL_MD_REF (not a hardcoded literal) so
     // this stays in lock-step with the constant — see #19.
     let new_content = if content.is_empty() {
-        format!("{}\n", RTK_MD_REF)
+        format!("{}\n", CTXCRL_MD_REF)
     } else {
-        format!("{}\n\n{}\n", content.trim(), RTK_MD_REF)
+        format!("{}\n\n{}\n", content.trim(), CTXCRL_MD_REF)
     };
 
     if dry_run {
@@ -2865,7 +2865,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
 }
 
 /// Patch AGENTS.md: add @CONTEXTCRAWLER.md (or absolute path), migrate old inline block if present
-fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bool> {
+fn patch_agents_md(path: &Path, ctxcrl_md_ref: &str, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
     let mut content = if path.exists() {
         fs::read_to_string(path)
@@ -2875,38 +2875,38 @@ fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bo
     };
 
     let mut migrated = false;
-    if content.contains(RTK_BLOCK_START) {
-        let (new_content, did_migrate) = remove_rtk_block(&content);
+    if content.contains(CTXCRL_BLOCK_START) {
+        let (new_content, did_migrate) = remove_ctxcrl_block(&content);
         if did_migrate {
             content = new_content;
             migrated = true;
             if verbose > 0 {
-                eprintln!("Migrated: removed old RTK block from AGENTS.md");
+                eprintln!("Migrated: removed old ContextCrawler block from AGENTS.md");
             }
         }
     }
 
     // ISSUE #892: Check for both relative and absolute @CONTEXTCRAWLER.md references
-    if content.contains(RTK_MD_REF) || content.contains(rtk_md_ref) {
+    if content.contains(CTXCRL_MD_REF) || content.contains(ctxcrl_md_ref) {
         if verbose > 0 {
-            eprintln!("{} reference already present in AGENTS.md", rtk_md_ref);
+            eprintln!("{} reference already present in AGENTS.md", ctxcrl_md_ref);
         }
         // ISSUE #892: Migrate old relative @CONTEXTCRAWLER.md to absolute path if needed
-        if rtk_md_ref != RTK_MD_REF && content.contains(RTK_MD_REF) && !content.contains(rtk_md_ref)
+        if ctxcrl_md_ref != CTXCRL_MD_REF && content.contains(CTXCRL_MD_REF) && !content.contains(ctxcrl_md_ref)
         {
-            content = content.replace(RTK_MD_REF, rtk_md_ref);
+            content = content.replace(CTXCRL_MD_REF, ctxcrl_md_ref);
             if dry_run {
                 println!(
                     "[dry-run] would migrate {} to {} in {}",
-                    RTK_MD_REF,
-                    rtk_md_ref,
+                    CTXCRL_MD_REF,
+                    ctxcrl_md_ref,
                     path.display()
                 );
             } else {
                 atomic_write(path, &content)
                     .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
                 if verbose > 0 {
-                    eprintln!("Migrated {} to {}", RTK_MD_REF, rtk_md_ref);
+                    eprintln!("Migrated {} to {}", CTXCRL_MD_REF, ctxcrl_md_ref);
                 }
             }
             return Ok(true);
@@ -2926,15 +2926,15 @@ fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bo
     }
 
     let new_content = if content.is_empty() {
-        format!("{}\n", rtk_md_ref)
+        format!("{}\n", ctxcrl_md_ref)
     } else {
-        format!("{}\n\n{}\n", content.trim(), rtk_md_ref)
+        format!("{}\n\n{}\n", content.trim(), ctxcrl_md_ref)
     };
 
     if dry_run {
         println!(
             "[dry-run] would add {} reference to AGENTS.md: {}",
-            rtk_md_ref,
+            ctxcrl_md_ref,
             path.display()
         );
         if verbose > 0 {
@@ -2944,7 +2944,7 @@ fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bo
         atomic_write(path, &new_content)
             .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
         if verbose > 0 {
-            eprintln!("Added {} reference to AGENTS.md", rtk_md_ref);
+            eprintln!("Added {} reference to AGENTS.md", ctxcrl_md_ref);
         }
     }
 
@@ -2964,10 +2964,10 @@ fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
 // other callers and was removed; the body lives at the bottom of
 // `uninstall_codex_at` and is exercised by the same tests.
 
-/// Remove old RTK block from CLAUDE.md (migration helper)
-fn remove_rtk_block(content: &str) -> (String, bool) {
-    if let (Some(start), Some(end)) = (content.find(RTK_BLOCK_START), content.find(RTK_BLOCK_END)) {
-        let end_pos = end + RTK_BLOCK_END.len();
+/// Remove old ContextCrawler block from CLAUDE.md (migration helper)
+fn remove_ctxcrl_block(content: &str) -> (String, bool) {
+    if let (Some(start), Some(end)) = (content.find(CTXCRL_BLOCK_START), content.find(CTXCRL_BLOCK_END)) {
+        let end_pos = end + CTXCRL_BLOCK_END.len();
         let before = content[..start].trim_end();
         let after = content[end_pos..].trim_start();
 
@@ -2978,17 +2978,17 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
         };
 
         (result, true) // migrated
-    } else if content.contains(RTK_BLOCK_START) {
+    } else if content.contains(CTXCRL_BLOCK_START) {
         eprintln!(
             "[warn] Warning: Found '{}' without closing marker.",
-            RTK_BLOCK_START
+            CTXCRL_BLOCK_START
         );
         eprintln!("    This can happen if CLAUDE.md was manually edited.");
 
         if let Some((line_num, _)) = content
             .lines()
             .enumerate()
-            .find(|(_, line)| line.contains(RTK_BLOCK_START))
+            .find(|(_, line)| line.contains(CTXCRL_BLOCK_START))
         {
             eprintln!("    Location: line {}", line_num + 1);
         }
@@ -3001,14 +3001,14 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
     }
 }
 
-/// Strip the RTK guidance marker block from a shared instructions file
+/// Strip the ContextCrawler guidance marker block from a shared instructions file
 /// (e.g. AGENTS.md), preserving any surrounding user content. If removing the
 /// block empties the file, the file itself is deleted. No-op if the file is
 /// missing or contains no block.
 ///
 /// Returns `Some(description)` when something was removed (for uninstall
 /// reporting), `None` otherwise.
-fn strip_rtk_block_from_file(
+fn strip_ctxcrl_block_from_file(
     path: &Path,
     label: &str,
     ctx: InitContext,
@@ -3022,13 +3022,13 @@ fn strip_rtk_block_from_file(
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}: {}", label, path.display()))?;
 
-    if !content.contains(RTK_BLOCK_START) {
+    if !content.contains(CTXCRL_BLOCK_START) {
         return Ok(None);
     }
 
-    let (stripped, removed) = remove_rtk_block(&content);
+    let (stripped, removed) = remove_ctxcrl_block(&content);
     if !removed {
-        // Malformed block (opening marker, no closing marker) — remove_rtk_block
+        // Malformed block (opening marker, no closing marker) — remove_ctxcrl_block
         // already warned. Leave the file untouched.
         return Ok(None);
     }
@@ -3217,8 +3217,8 @@ fn resolve_hermes_home_from_env(
         .context("Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.")
 }
 
-fn codex_rtk_md_ref(codex_dir: &Path) -> String {
-    format!("@{}", codex_dir.join(RTK_MD).display())
+fn codex_ctxcrl_md_ref(codex_dir: &Path) -> String {
+    format!("@{}", codex_dir.join(CTXCRL_MD).display())
 }
 
 /// Remove orphan files and stale @-references left behind by a previous
@@ -3233,8 +3233,8 @@ fn cleanup_legacy_codex_files(
     let InitContext { dry_run, .. } = ctx;
     let mut notes = Vec::new();
 
-    let canonical = codex_dir.join(RTK_MD);
-    for legacy in LEGACY_RTK_MD_FILES {
+    let canonical = codex_dir.join(CTXCRL_MD);
+    for legacy in LEGACY_CTXCRL_MD_FILES {
         let legacy_path = codex_dir.join(legacy);
         // Don't remove the canonical file even if it happens to share a name.
         if legacy_path == canonical {
@@ -3257,7 +3257,7 @@ fn cleanup_legacy_codex_files(
             format!("Failed to read AGENTS.md: {}", agents_md_path.display())
         })?;
         let mut new_content = content.clone();
-        for legacy in LEGACY_RTK_MD_FILES {
+        for legacy in LEGACY_CTXCRL_MD_FILES {
             // Match both relative `@CONTEXTCRAWLER.md` and absolute `@/path/to/CONTEXTCRAWLER.md`.
             let relative_ref = format!("@{}", legacy);
             let absolute_ref = format!("@{}", codex_dir.join(legacy).display());
@@ -3363,10 +3363,10 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
         removed.push(path);
     }
 
-    // Strip the RTK guidance block from ~/.config/opencode/AGENTS.md.
+    // Strip the ContextCrawler guidance block from ~/.config/opencode/AGENTS.md.
     // Only the marked block is removed — user content in AGENTS.md is kept.
     let agents_md_path = opencode_agents_md_path(&opencode_dir);
-    if strip_rtk_block_from_file(&agents_md_path, "OpenCode guidance", ctx)?.is_some() {
+    if strip_ctxcrl_block_from_file(&agents_md_path, "OpenCode guidance", ctx)?.is_some() {
         removed.push(agents_md_path);
     }
 
@@ -3415,7 +3415,7 @@ fn run_pidev_mode_at(agent_dir: &Path, ctx: InitContext) -> Result<()> {
     // Pi auto-loads AGENTS.md at session start from this directory; only the
     // marked block is touched, user content in AGENTS.md is preserved.
     let agents_md_path = pidev_agents_md_path(agent_dir);
-    write_rtk_block(
+    write_ctxcrl_block(
         &agents_md_path,
         &agent_guidance_block(AGENT_PIDEV)?,
         "Pi guidance",
@@ -3466,10 +3466,10 @@ fn uninstall_pidev_at(agent_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
     let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
 
-    // Strip the RTK guidance block from ~/.pi/agent/AGENTS.md.
+    // Strip the ContextCrawler guidance block from ~/.pi/agent/AGENTS.md.
     // User content in AGENTS.md is preserved.
     let agents_md_path = pidev_agents_md_path(agent_dir);
-    if let Some(desc) = strip_rtk_block_from_file(&agents_md_path, "Pi guidance", ctx)? {
+    if let Some(desc) = strip_ctxcrl_block_from_file(&agents_md_path, "Pi guidance", ctx)? {
         removed.push(desc);
     }
 
@@ -3713,7 +3713,7 @@ fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
 }
 
 /// Check if ContextCrawler preToolUse hook is already present in Cursor hooks.json
-/// Matches on legacy rtk-rewrite.sh path OR new `rtk hook cursor` command
+/// Matches on legacy rtk-rewrite.sh path OR new `contextcrawler hook cursor` command
 fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
     let hooks = match root
         .get("hooks")
@@ -3770,7 +3770,7 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
 }
 
 /// Remove only legacy `rtk-rewrite.sh` entries from Cursor hooks.json.
-/// Preserves any existing `rtk hook cursor` entries (new format).
+/// Preserves any existing `contextcrawler hook cursor` entries (new format).
 fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     if !path.exists() {
@@ -3810,7 +3810,7 @@ fn remove_legacy_cursor_hooks_json_entries(path: &Path, ctx: InitContext) -> Res
 
 /// Remove only legacy `rtk-rewrite.sh` entries from parsed Cursor hooks.json.
 /// Returns true if any entries were removed.
-/// Does NOT remove `rtk hook cursor` entries — those are the new format.
+/// Does NOT remove `contextcrawler hook cursor` entries — those are the new format.
 fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
     let pre_tool_use = match root
         .get_mut("hooks")
@@ -3855,7 +3855,7 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
         removed.push(format!("Cursor hook: {}", hook_path.display()));
     }
 
-    // 2. Remove RTK entry from hooks.json
+    // 2. Remove ContextCrawler entry from hooks.json
     let hooks_json_path = cursor_dir.join(HOOKS_JSON);
     if hooks_json_path.exists() {
         let content = fs::read_to_string(&hooks_json_path)
@@ -3866,7 +3866,7 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
                 if remove_cursor_hook_from_json(&mut root) {
                     if dry_run {
                         println!(
-                            "[dry-run] would remove RTK entry from Cursor hooks.json: {}",
+                            "[dry-run] would remove ContextCrawler entry from Cursor hooks.json: {}",
                             hooks_json_path.display()
                         );
                     } else {
@@ -3881,7 +3881,7 @@ fn remove_cursor_hooks(ctx: InitContext) -> Result<Vec<String>> {
                             eprintln!("Removed ContextCrawler hook from Cursor hooks.json");
                         }
                     }
-                    removed.push("Cursor hooks.json: removed RTK entry".to_string());
+                    removed.push("Cursor hooks.json: removed ContextCrawler entry".to_string());
                 }
             }
         }
@@ -3920,7 +3920,7 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use.len() < original_len
 }
 
-/// Show current rtk configuration
+/// Show current ContextCrawler configuration
 pub fn show_config(codex: bool) -> Result<()> {
     if codex {
         return show_codex_config();
@@ -3932,7 +3932,7 @@ pub fn show_config(codex: bool) -> Result<()> {
 fn show_claude_config() -> Result<()> {
     let claude_dir = resolve_claude_dir()?;
     let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    let rtk_md_path = claude_dir.join(RTK_MD);
+    let ctxcrl_md_path = claude_dir.join(CTXCRL_MD);
     let global_claude_md = claude_dir.join(CLAUDE_MD);
     let local_claude_md = PathBuf::from(CLAUDE_MD);
 
@@ -4005,8 +4005,8 @@ fn show_claude_config() -> Result<()> {
     }
 
     // Check CONTEXTCRAWLER.md
-    if rtk_md_path.exists() {
-        println!("[ok] CONTEXTCRAWLER.md: {} (slim mode)", rtk_md_path.display());
+    if ctxcrl_md_path.exists() {
+        println!("[ok] CONTEXTCRAWLER.md: {} (slim mode)", ctxcrl_md_path.display());
     } else {
         println!("[--] CONTEXTCRAWLER.md: not found");
     }
@@ -4036,11 +4036,11 @@ fn show_claude_config() -> Result<()> {
     // Check global CLAUDE.md
     if global_claude_md.exists() {
         let content = fs::read_to_string(&global_claude_md)?;
-        if content.contains(RTK_MD_REF) {
+        if content.contains(CTXCRL_MD_REF) {
             println!("[ok] Global (~/.claude/CLAUDE.md): @CONTEXTCRAWLER.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
+        } else if content.contains(CTXCRL_BLOCK_START) {
             println!(
-                "[warn] Global (~/.claude/CLAUDE.md): old RTK block (run: contextcrawler init -g to migrate)"
+                "[warn] Global (~/.claude/CLAUDE.md): old ContextCrawler block (run: contextcrawler init -g to migrate)"
             );
         } else {
             println!("[--] Global (~/.claude/CLAUDE.md): exists but ContextCrawler not configured");
@@ -4052,16 +4052,16 @@ fn show_claude_config() -> Result<()> {
     // Check local CLAUDE.md.
     //
     // Detect via the exact block markers the installer writes
-    // (`RTK_MD_REF` / `RTK_BLOCK_START`), not a bare `rtk` substring — the
+    // (`CTXCRL_MD_REF` / `CTXCRL_BLOCK_START`), not a bare `ctxcrl` substring — the
     // substring matched any unrelated mention of the word and misreported
     // status (#100 G2 NICE-TO-HAVE 10).
     if local_claude_md.exists() {
         let content = fs::read_to_string(&local_claude_md)?;
-        if content.contains(RTK_MD_REF) {
+        if content.contains(CTXCRL_MD_REF) {
             println!("[ok] Local (./CLAUDE.md): @CONTEXTCRAWLER.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
+        } else if content.contains(CTXCRL_BLOCK_START) {
             println!(
-                "[warn] Local (./CLAUDE.md): old RTK block (run: contextcrawler init to migrate)"
+                "[warn] Local (./CLAUDE.md): old ContextCrawler block (run: contextcrawler init to migrate)"
             );
         } else {
             println!("[--] Local (./CLAUDE.md): exists but ContextCrawler not configured");
@@ -4175,22 +4175,22 @@ fn show_claude_config() -> Result<()> {
 fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
     let global_agents_md = codex_dir.join(AGENTS_MD);
-    let global_rtk_md = codex_dir.join(RTK_MD);
-    let global_rtk_md_ref = codex_rtk_md_ref(&codex_dir);
+    let global_ctxcrl_md = codex_dir.join(CTXCRL_MD);
+    let global_ctxcrl_md_ref = codex_ctxcrl_md_ref(&codex_dir);
     let local_agents_md = PathBuf::from(AGENTS_MD);
-    let local_rtk_md = PathBuf::from(RTK_MD);
+    let local_ctxcrl_md = PathBuf::from(CTXCRL_MD);
 
     println!("ContextCrawler Configuration (Codex CLI):\n");
 
-    if global_rtk_md.exists() {
-        println!("[ok] Global CONTEXTCRAWLER.md: {}", global_rtk_md.display());
+    if global_ctxcrl_md.exists() {
+        println!("[ok] Global CONTEXTCRAWLER.md: {}", global_ctxcrl_md.display());
     } else {
         println!("[--] Global CONTEXTCRAWLER.md: not found");
     }
     // Also surface legacy artifacts so a user on a regressed install sees
     // them in `init --show` rather than wondering why init keeps recreating
     // files. Hint at the cleanup that runs on next `init`.
-    for legacy in LEGACY_RTK_MD_FILES {
+    for legacy in LEGACY_CTXCRL_MD_FILES {
         let legacy_path = codex_dir.join(legacy);
         if legacy_path.exists() {
             println!(
@@ -4206,18 +4206,18 @@ fn show_codex_config() -> Result<()> {
         // Build the full reference set (canonical + every legacy form) so a
         // regressed install isn't reported as "not configured".
         let mut all_refs: Vec<String> = vec![
-            RTK_MD_REF.to_string(),
-            global_rtk_md_ref.clone(),
+            CTXCRL_MD_REF.to_string(),
+            global_ctxcrl_md_ref.clone(),
         ];
-        for legacy in LEGACY_RTK_MD_FILES {
+        for legacy in LEGACY_CTXCRL_MD_FILES {
             all_refs.push(format!("@{}", legacy));
             all_refs.push(format!("@{}", codex_dir.join(legacy).display()));
         }
         let all_refs_borrowed: Vec<&str> = all_refs.iter().map(|s| s.as_str()).collect();
         if has_rtk_reference(&content, &all_refs_borrowed) {
             println!("[ok] Global AGENTS.md: CONTEXTCRAWLER.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Global AGENTS.md: old inline RTK block");
+        } else if content.contains(CTXCRL_BLOCK_START) {
+            println!("[!!] Global AGENTS.md: old inline ContextCrawler block");
         } else {
             println!("[--] Global AGENTS.md: exists but ContextCrawler not configured");
         }
@@ -4225,24 +4225,24 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Global AGENTS.md: not found");
     }
 
-    if local_rtk_md.exists() {
-        println!("[ok] Local CONTEXTCRAWLER.md: {}", local_rtk_md.display());
+    if local_ctxcrl_md.exists() {
+        println!("[ok] Local CONTEXTCRAWLER.md: {}", local_ctxcrl_md.display());
     } else {
         println!("[--] Local CONTEXTCRAWLER.md: not found");
     }
 
     if local_agents_md.exists() {
         let content = fs::read_to_string(&local_agents_md)?;
-        let mut all_local_refs: Vec<String> = vec![RTK_MD_REF.to_string()];
-        for legacy in LEGACY_RTK_MD_FILES {
+        let mut all_local_refs: Vec<String> = vec![CTXCRL_MD_REF.to_string()];
+        for legacy in LEGACY_CTXCRL_MD_FILES {
             all_local_refs.push(format!("@{}", legacy));
         }
         let all_local_refs_borrowed: Vec<&str> =
             all_local_refs.iter().map(|s| s.as_str()).collect();
         if has_rtk_reference(&content, &all_local_refs_borrowed) {
             println!("[ok] Local AGENTS.md: @CONTEXTCRAWLER.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Local AGENTS.md: old inline RTK block");
+        } else if content.contains(CTXCRL_BLOCK_START) {
+            println!("[!!] Local AGENTS.md: old inline ContextCrawler block");
         } else {
             println!("[--] Local AGENTS.md: exists but ContextCrawler not configured");
         }
@@ -4284,7 +4284,7 @@ fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
         })?;
     }
     let agents_md_path = opencode_agents_md_path(&opencode_dir);
-    write_rtk_block(
+    write_ctxcrl_block(
         &agents_md_path,
         &agent_guidance_block(AGENT_OPENCODE)?,
         "OpenCode guidance",
@@ -4314,7 +4314,7 @@ fn resolve_gemini_dir() -> Result<PathBuf> {
     resolve_home_subdir(GEMINI_DIR)
 }
 
-/// Entry point for `rtk init --gemini`
+/// Entry point for `contextcrawler init --gemini`
 pub fn run_gemini(
     global: bool,
     hook_only: bool,
@@ -4359,7 +4359,7 @@ pub fn run_gemini(
         })?;
     }
 
-    // 2. Install GEMINI.md (RTK awareness for Gemini)
+    // 2. Install GEMINI.md (ContextCrawler awareness for Gemini)
     if !hook_only {
         let gemini_md_path = gemini_dir.join(GEMINI_MD);
         write_if_changed(&gemini_md_path, &agent_guidance(AGENT_GEMINI)?, GEMINI_MD, ctx)?;
@@ -4421,7 +4421,7 @@ fn patch_gemini_settings(
                     .is_some_and(|c| c.contains("rtk"))
             }) {
                 if verbose > 0 {
-                    eprintln!("Gemini settings.json already has RTK hook");
+                    eprintln!("Gemini settings.json already has ContextCrawler hook");
                 }
                 return Ok(());
             }
@@ -4431,7 +4431,7 @@ fn patch_gemini_settings(
     // Ask user before patching
     if patch_mode == PatchMode::Skip {
         println!(
-            "\nManual setup needed: add RTK hook to {}\n\
+            "\nManual setup needed: add ContextCrawler hook to {}\n\
              See: https://github.com/rtk-ai/rtk#gemini-cli",
             settings_path.display()
         );
@@ -4445,7 +4445,7 @@ fn patch_gemini_settings(
                 settings_path.display()
             );
         } else {
-            print!("Patch {} with RTK hook? [y/N] ", settings_path.display());
+            print!("Patch {} with ContextCrawler hook? [y/N] ", settings_path.display());
             std::io::Write::flush(&mut std::io::stdout())?;
             let mut answer = String::new();
             std::io::stdin().read_line(&mut answer)?;
@@ -4564,7 +4564,7 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
                 if arr.len() < before {
                     if dry_run {
                         println!(
-                            "[dry-run] would remove RTK hook from Gemini settings.json: {}",
+                            "[dry-run] would remove ContextCrawler hook from Gemini settings.json: {}",
                             settings_path.display()
                         );
                     } else {
@@ -4603,7 +4603,7 @@ const COPILOT_HOOK_JSON: &str = r#"{
 }
 "#;
 
-const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v3 -->
+const COPILOT_INSTRUCTIONS: &str = r#"<!-- ctxcrl-instructions v3 -->
 # ContextCrawler — Token-Optimized CLI
 
 **contextcrawler** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
@@ -4630,7 +4630,7 @@ contextcrawler gain --weak-filters # Rank tools by leaked tokens (where filters 
 contextcrawler discover          # Find missed contextcrawler opportunities
 contextcrawler proxy <cmd>       # Run raw (no filtering) but track usage
 ```
-<!-- /rtk-instructions -->
+<!-- /ctxcrl-instructions -->
 "#;
 
 /// Entry point for `contextcrawler init --copilot`.
@@ -4654,11 +4654,11 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
             .with_context(|| format!("Failed to create {} directory", hooks_dir.display()))?;
     }
 
-    // 1. Upsert RTK marker block in copilot-instructions.md (preserves user content).
+    // 1. Upsert ContextCrawler marker block in copilot-instructions.md (preserves user content).
     //    Done BEFORE writing the hook config so a malformed file aborts the install
     //    without leaving a stale hook on disk.
     let instructions_path = github_dir.join("copilot-instructions.md");
-    write_rtk_block(
+    write_ctxcrl_block(
         &instructions_path,
         COPILOT_INSTRUCTIONS,
         "Copilot instructions",
@@ -4839,7 +4839,7 @@ mod tests {
 
     #[test]
     fn test_guidance_unknown_agent_returns_error() {
-        // RTK no-panic rule: an unknown key surfaces as Err, not a panic.
+        // CTXCRL no-panic rule: an unknown key surfaces as Err, not a panic.
         let err = agent_guidance("not-a-real-agent").unwrap_err();
         assert!(
             err.to_string().contains("unknown agent key"),
@@ -4896,20 +4896,20 @@ mod tests {
     #[test]
     fn test_agent_guidance_block_has_markers() {
         // The marked-block wrapper must produce both upsert markers so
-        // upsert_rtk_block can detect and replace it idempotently.
+        // upsert_ctxcrl_block can detect and replace it idempotently.
         let block = agent_guidance_block(AGENT_OPENCODE).expect("opencode block");
         assert!(
-            block.contains(RTK_BLOCK_START),
-            "agent_guidance_block must contain RTK_BLOCK_START marker"
+            block.contains(CTXCRL_BLOCK_START),
+            "agent_guidance_block must contain CTXCRL_BLOCK_START marker"
         );
         assert!(
-            block.contains(RTK_BLOCK_END),
-            "agent_guidance_block must contain RTK_BLOCK_END marker"
+            block.contains(CTXCRL_BLOCK_END),
+            "agent_guidance_block must contain CTXCRL_BLOCK_END marker"
         );
         // Round-trip: upsert into empty, then strip, returns to empty.
-        let (with_block, action) = upsert_rtk_block("", &block);
+        let (with_block, action) = upsert_ctxcrl_block("", &block);
         assert_eq!(action, CtxcrlBlockUpsert::Added);
-        let (stripped, removed) = remove_rtk_block(&with_block);
+        let (stripped, removed) = remove_ctxcrl_block(&with_block);
         assert!(removed, "block must be strippable");
         assert!(
             stripped.trim().is_empty(),
@@ -4937,8 +4937,8 @@ mod tests {
             "contextcrawler kubectl",
         ] {
             assert!(
-                RTK_INSTRUCTIONS.contains(cmd),
-                "Missing {cmd} in RTK_INSTRUCTIONS"
+                CTXCRL_INSTRUCTIONS.contains(cmd),
+                "Missing {cmd} in CTXCRL_INSTRUCTIONS"
             );
         }
     }
@@ -4946,39 +4946,39 @@ mod tests {
     #[test]
     fn test_init_has_version_marker() {
         assert!(
-            RTK_INSTRUCTIONS.contains(RTK_BLOCK_START),
-            "RTK_INSTRUCTIONS must start with RTK_BLOCK_START marker"
+            CTXCRL_INSTRUCTIONS.contains(CTXCRL_BLOCK_START),
+            "CTXCRL_INSTRUCTIONS must start with CTXCRL_BLOCK_START marker"
         );
         assert!(
-            RTK_INSTRUCTIONS.contains(RTK_BLOCK_END),
-            "RTK_INSTRUCTIONS must end with RTK_BLOCK_END marker"
+            CTXCRL_INSTRUCTIONS.contains(CTXCRL_BLOCK_END),
+            "CTXCRL_INSTRUCTIONS must end with CTXCRL_BLOCK_END marker"
         );
     }
 
     #[test]
     fn test_copilot_instructions_has_markers() {
-        // Without both markers, `upsert_rtk_block` cannot detect an existing
+        // Without both markers, `upsert_ctxcrl_block` cannot detect an existing
         // block and would append a duplicate on every re-init.
         assert!(
-            COPILOT_INSTRUCTIONS.contains(RTK_BLOCK_START),
-            "COPILOT_INSTRUCTIONS must contain RTK_BLOCK_START marker"
+            COPILOT_INSTRUCTIONS.contains(CTXCRL_BLOCK_START),
+            "COPILOT_INSTRUCTIONS must contain CTXCRL_BLOCK_START marker"
         );
         assert!(
-            COPILOT_INSTRUCTIONS.contains(RTK_BLOCK_END),
-            "COPILOT_INSTRUCTIONS must contain RTK_BLOCK_END marker"
+            COPILOT_INSTRUCTIONS.contains(CTXCRL_BLOCK_END),
+            "COPILOT_INSTRUCTIONS must contain CTXCRL_BLOCK_END marker"
         );
     }
 
     #[test]
     fn test_migration_removes_old_block() {
         let input = format!(
-            "# My Config\n\n{} v2 -->\nOLD RTK STUFF\n{}\n\nMore content",
-            RTK_BLOCK_START, RTK_BLOCK_END
+            "# My Config\n\n{} v2 -->\nOLD CTXCRL STUFF\n{}\n\nMore content",
+            CTXCRL_BLOCK_START, CTXCRL_BLOCK_END
         );
 
-        let (result, migrated) = remove_rtk_block(&input);
+        let (result, migrated) = remove_ctxcrl_block(&input);
         assert!(migrated);
-        assert!(!result.contains("OLD RTK STUFF"));
+        assert!(!result.contains("OLD CTXCRL STUFF"));
         assert!(result.contains("# My Config"));
         assert!(result.contains("More content"));
     }
@@ -5033,27 +5033,27 @@ mod tests {
         let block = agent_guidance_block(AGENT_OPENCODE).expect("opencode block");
 
         // Install: upsert.
-        write_rtk_block(&agents_md, &block, "OpenCode guidance", "x", InitContext::default())
+        write_ctxcrl_block(&agents_md, &block, "OpenCode guidance", "x", InitContext::default())
             .unwrap();
         let first = fs::read_to_string(&agents_md).unwrap();
         // Re-install: idempotent.
-        write_rtk_block(&agents_md, &block, "OpenCode guidance", "x", InitContext::default())
+        write_ctxcrl_block(&agents_md, &block, "OpenCode guidance", "x", InitContext::default())
             .unwrap();
         let second = fs::read_to_string(&agents_md).unwrap();
         assert_eq!(first, second, "OpenCode AGENTS.md upsert must be idempotent");
         assert!(first.contains("# Project notes"));
         assert!(first.contains("User text."));
         assert!(first.contains("# ContextCrawler (OpenCode)"));
-        assert_eq!(first.matches(RTK_BLOCK_START).count(), 1);
+        assert_eq!(first.matches(CTXCRL_BLOCK_START).count(), 1);
 
         // Uninstall stripping must keep user content.
-        let desc = strip_rtk_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
+        let desc = strip_ctxcrl_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
             .unwrap();
         assert!(desc.is_some(), "strip must report removal");
         let after = fs::read_to_string(&agents_md).unwrap();
         assert!(after.contains("# Project notes"));
         assert!(after.contains("User text."));
-        assert!(!after.contains(RTK_BLOCK_START));
+        assert!(!after.contains(CTXCRL_BLOCK_START));
     }
 
     #[test]
@@ -5088,7 +5088,7 @@ mod tests {
         assert!(first.contains("User text."), "user content preserved");
         assert!(first.contains("# ContextCrawler (Pi)"), "block has Pi title");
         assert_eq!(
-            first.matches(RTK_BLOCK_START).count(),
+            first.matches(CTXCRL_BLOCK_START).count(),
             1,
             "exactly one marked block after first install"
         );
@@ -5135,7 +5135,7 @@ mod tests {
         assert!(after.contains("# User notes"), "user content preserved");
         assert!(after.contains("Keep me."), "user content preserved");
         assert!(
-            !after.contains(RTK_BLOCK_START),
+            !after.contains(CTXCRL_BLOCK_START),
             "ContextCrawler marker must be gone after uninstall"
         );
     }
@@ -5153,13 +5153,13 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_rtk_block_deletes_file_when_only_our_block() {
+    fn test_strip_ctxcrl_block_deletes_file_when_only_our_block() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         let block = agent_guidance_block(AGENT_OPENCODE).expect("opencode block");
         fs::write(&agents_md, &block).unwrap();
 
-        let desc = strip_rtk_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
+        let desc = strip_ctxcrl_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
             .unwrap();
         assert!(desc.is_some());
         assert!(
@@ -5169,12 +5169,12 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_rtk_block_noop_when_no_block() {
+    fn test_strip_ctxcrl_block_noop_when_no_block() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         fs::write(&agents_md, "# Just user content\n").unwrap();
 
-        let desc = strip_rtk_block_from_file(&agents_md, "guidance", InitContext::default())
+        let desc = strip_ctxcrl_block_from_file(&agents_md, "guidance", InitContext::default())
             .unwrap();
         assert!(desc.is_none(), "no block present — strip is a no-op");
         assert_eq!(
@@ -5185,10 +5185,10 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_rtk_block_missing_file_is_noop() {
+    fn test_strip_ctxcrl_block_missing_file_is_noop() {
         let temp = TempDir::new().unwrap();
         let missing = temp.path().join("AGENTS.md");
-        let desc = strip_rtk_block_from_file(&missing, "guidance", InitContext::default())
+        let desc = strip_ctxcrl_block_from_file(&missing, "guidance", InitContext::default())
             .unwrap();
         assert!(desc.is_none());
         assert!(!missing.exists());
@@ -5225,75 +5225,75 @@ mod tests {
 
     #[test]
     fn test_migration_warns_on_missing_end_marker() {
-        let input = format!("{} v2 -->\nOLD STUFF\nNo end marker", RTK_BLOCK_START);
-        let (result, migrated) = remove_rtk_block(&input);
+        let input = format!("{} v2 -->\nOLD STUFF\nNo end marker", CTXCRL_BLOCK_START);
+        let (result, migrated) = remove_ctxcrl_block(&input);
         assert!(!migrated);
         assert_eq!(result, input);
     }
 
     #[test]
-    fn test_default_mode_creates_rtk_md() {
+    fn test_default_mode_creates_ctxcrl_md() {
         let temp = TempDir::new().unwrap();
-        let rtk_md_path = temp.path().join("CONTEXTCRAWLER.md");
+        let ctxcrl_md_path = temp.path().join("CONTEXTCRAWLER.md");
 
         let claude_guidance = agent_guidance(AGENT_CLAUDE).expect("claude guidance");
-        fs::write(&rtk_md_path, &claude_guidance).unwrap();
-        assert!(rtk_md_path.exists());
+        fs::write(&ctxcrl_md_path, &claude_guidance).unwrap();
+        assert!(ctxcrl_md_path.exists());
 
-        let content = fs::read_to_string(&rtk_md_path).unwrap();
+        let content = fs::read_to_string(&ctxcrl_md_path).unwrap();
         assert_eq!(content, claude_guidance);
     }
 
     #[test]
     fn test_claude_md_mode_creates_full_injection() {
-        // Just verify RTK_INSTRUCTIONS constant has the right content
-        assert!(RTK_INSTRUCTIONS.contains(RTK_BLOCK_START));
-        assert!(RTK_INSTRUCTIONS.contains("contextcrawler cargo test"));
-        assert!(RTK_INSTRUCTIONS.contains(RTK_BLOCK_END));
-        assert!(RTK_INSTRUCTIONS.len() > 4000);
+        // Just verify CTXCRL_INSTRUCTIONS constant has the right content
+        assert!(CTXCRL_INSTRUCTIONS.contains(CTXCRL_BLOCK_START));
+        assert!(CTXCRL_INSTRUCTIONS.contains("contextcrawler cargo test"));
+        assert!(CTXCRL_INSTRUCTIONS.contains(CTXCRL_BLOCK_END));
+        assert!(CTXCRL_INSTRUCTIONS.len() > 4000);
     }
 
-    // --- upsert_rtk_block tests ---
+    // --- upsert_ctxcrl_block tests ---
 
     #[test]
-    fn test_upsert_rtk_block_appends_when_missing() {
+    fn test_upsert_ctxcrl_block_appends_when_missing() {
         let input = "# Team instructions";
-        let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
+        let (content, action) = upsert_ctxcrl_block(input, CTXCRL_INSTRUCTIONS);
         assert_eq!(action, CtxcrlBlockUpsert::Added);
         assert!(content.contains("# Team instructions"));
-        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains(CTXCRL_BLOCK_START));
     }
 
     #[test]
-    fn test_upsert_rtk_block_updates_stale_block() {
+    fn test_upsert_ctxcrl_block_updates_stale_block() {
         let input = format!(
-            "# Team instructions\n\n{} v1 -->\nOLD RTK CONTENT\n{}\n\nMore notes\n",
-            RTK_BLOCK_START, RTK_BLOCK_END
+            "# Team instructions\n\n{} v1 -->\nOLD CTXCRL CONTENT\n{}\n\nMore notes\n",
+            CTXCRL_BLOCK_START, CTXCRL_BLOCK_END
         );
 
-        let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
+        let (content, action) = upsert_ctxcrl_block(&input, CTXCRL_INSTRUCTIONS);
         assert_eq!(action, CtxcrlBlockUpsert::Updated);
-        assert!(!content.contains("OLD RTK CONTENT"));
-        assert!(content.contains("contextcrawler cargo test")); // from current RTK_INSTRUCTIONS
+        assert!(!content.contains("OLD CTXCRL CONTENT"));
+        assert!(content.contains("contextcrawler cargo test")); // from current CTXCRL_INSTRUCTIONS
         assert!(content.contains("# Team instructions"));
         assert!(content.contains("More notes"));
     }
 
     #[test]
-    fn test_upsert_rtk_block_noop_when_already_current() {
+    fn test_upsert_ctxcrl_block_noop_when_already_current() {
         let input = format!(
             "# Team instructions\n\n{}\n\nMore notes\n",
-            RTK_INSTRUCTIONS
+            CTXCRL_INSTRUCTIONS
         );
-        let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
+        let (content, action) = upsert_ctxcrl_block(&input, CTXCRL_INSTRUCTIONS);
         assert_eq!(action, CtxcrlBlockUpsert::Unchanged);
         assert_eq!(content, input);
     }
 
     #[test]
-    fn test_upsert_rtk_block_detects_malformed_block() {
-        let input = format!("{} v2 -->\npartial", RTK_BLOCK_START);
-        let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
+    fn test_upsert_ctxcrl_block_detects_malformed_block() {
+        let input = format!("{} v2 -->\npartial", CTXCRL_BLOCK_START);
+        let (content, action) = upsert_ctxcrl_block(&input, CTXCRL_INSTRUCTIONS);
         assert_eq!(action, CtxcrlBlockUpsert::Malformed);
         assert_eq!(content, input);
     }
@@ -5303,10 +5303,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let claude_md = temp.path().join("CLAUDE.md");
 
-        fs::write(&claude_md, format!("# My stuff\n\n{}\n", RTK_MD_REF)).unwrap();
+        fs::write(&claude_md, format!("# My stuff\n\n{}\n", CTXCRL_MD_REF)).unwrap();
 
         let content = fs::read_to_string(&claude_md).unwrap();
-        let count = content.matches(RTK_MD_REF).count();
+        let count = content.matches(CTXCRL_MD_REF).count();
         assert_eq!(count, 1);
     }
 
@@ -5316,14 +5316,14 @@ mod tests {
         let agents_md = temp.path().join("AGENTS.md");
 
         fs::write(&agents_md, "# Team rules\n").unwrap();
-        let first_added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
-        let second_added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
+        let first_added = patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
+        let second_added = patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
 
         assert!(first_added);
         assert!(!second_added);
 
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert_eq!(content.matches(RTK_MD_REF).count(), 1);
+        assert_eq!(content.matches(CTXCRL_MD_REF).count(), 1);
     }
 
     #[test]
@@ -5431,11 +5431,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
 
-        let added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
+        let added = patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
 
         assert!(added);
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert_eq!(content, format!("{}\n", RTK_MD_REF));
+        assert_eq!(content, format!("{}\n", CTXCRL_MD_REF));
     }
 
     #[test]
@@ -5446,17 +5446,17 @@ mod tests {
             &agents_md,
             format!(
                 "# Team rules\n\n{} v2 -->\nold\n{}\n",
-                RTK_BLOCK_START, RTK_BLOCK_END
+                CTXCRL_BLOCK_START, CTXCRL_BLOCK_END
             ),
         )
         .unwrap();
 
-        let added = patch_agents_md(&agents_md, RTK_MD_REF, InitContext::default()).unwrap();
+        let added = patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
 
         assert!(added);
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("old"));
-        assert_eq!(content.matches(RTK_MD_REF).count(), 1);
+        assert_eq!(content.matches(CTXCRL_MD_REF).count(), 1);
     }
 
     #[test]
@@ -5473,11 +5473,11 @@ mod tests {
         assert!(manifest_path.exists(), "Plugin manifest should be created");
         assert_eq!(
             fs::read_to_string(&init_path).unwrap(),
-            include_str!("../../hooks/hermes/rtk-rewrite/__init__.py")
+            include_str!("../../hooks/hermes/ctxcrl-rewrite/__init__.py")
         );
         assert_eq!(
             fs::read_to_string(&manifest_path).unwrap(),
-            include_str!("../../hooks/hermes/rtk-rewrite/plugin.yaml")
+            include_str!("../../hooks/hermes/ctxcrl-rewrite/plugin.yaml")
         );
 
         let config = fs::read_to_string(&config_path).unwrap();
@@ -5490,12 +5490,12 @@ mod tests {
         let agents_md = temp.path().join("AGENTS.md");
         assert!(agents_md.exists(), "Hermes guidance AGENTS.md should be created");
         let agents = fs::read_to_string(&agents_md).unwrap();
-        assert!(agents.contains(RTK_BLOCK_START), "AGENTS.md must hold the RTK block start marker");
-        assert!(agents.contains(RTK_BLOCK_END), "AGENTS.md must hold the RTK block end marker");
+        assert!(agents.contains(CTXCRL_BLOCK_START), "AGENTS.md must hold the CTXCRL block start marker");
+        assert!(agents.contains(CTXCRL_BLOCK_END), "AGENTS.md must hold the CTXCRL block end marker");
         assert!(agents.contains("# ContextCrawler (Hermes)"), "AGENTS.md must hold Hermes guidance");
         // No standalone CONTEXTCRAWLER.md should be written.
         assert!(
-            !temp.path().join(RTK_MD).exists(),
+            !temp.path().join(CTXCRL_MD).exists(),
             "Hermes must NOT write a standalone CONTEXTCRAWLER.md"
         );
     }
@@ -5516,9 +5516,9 @@ mod tests {
         assert!(first.contains("Do the thing."), "user content must be preserved");
         assert!(first.contains("# ContextCrawler (Hermes)"));
         assert_eq!(
-            first.matches(RTK_BLOCK_START).count(),
+            first.matches(CTXCRL_BLOCK_START).count(),
             1,
-            "exactly one RTK block — no duplicate on re-run"
+            "exactly one CTXCRL block — no duplicate on re-run"
         );
     }
 
@@ -5542,7 +5542,7 @@ mod tests {
         let after = fs::read_to_string(&agents_md).unwrap();
         assert!(after.contains("# Team rules"), "user content must survive uninstall");
         assert!(after.contains("Keep me."), "user content must survive uninstall");
-        assert!(!after.contains(RTK_BLOCK_START), "RTK block must be removed");
+        assert!(!after.contains(CTXCRL_BLOCK_START), "CTXCRL block must be removed");
         assert!(!after.contains("# ContextCrawler (Hermes)"), "guidance must be removed");
     }
 
@@ -6030,29 +6030,29 @@ mod tests {
         // Use the constant so the fixture filename tracks any future rename
         // — and so cleanup_legacy_codex_files (which removes CONTEXTCRAWLER.md) doesn't
         // delete our test fixture.
-        let rtk_md = temp.path().join(RTK_MD);
+        let ctxcrl_md = temp.path().join(CTXCRL_MD);
 
         run_codex_mode_with_paths(
             agents_md.clone(),
-            rtk_md.clone(),
+            ctxcrl_md.clone(),
             true,
             InitContext::default(),
         )
         .unwrap();
 
-        assert!(rtk_md.exists());
+        assert!(ctxcrl_md.exists());
         assert_eq!(
-            fs::read_to_string(&rtk_md).unwrap(),
+            fs::read_to_string(&ctxcrl_md).unwrap(),
             agent_guidance(AGENT_CODEX).expect("codex guidance")
         );
         assert_eq!(
             fs::read_to_string(&agents_md).unwrap(),
-            format!("{}\n", codex_rtk_md_ref(temp.path()))
+            format!("{}\n", codex_ctxcrl_md_ref(temp.path()))
         );
     }
 
     #[test]
-    fn test_rtk_md_constant_pinned_to_contextcrawler_filename() {
+    fn test_ctxcrl_md_constant_pinned_to_contextcrawler_filename() {
         // REGRESSION GUARD (issue #19). The downstream rebrand requires the
         // slim instructions file to be named CONTEXTCRAWLER.md so it matches
         // the tool name on disk. Commit bcddd06 silently flipped this back
@@ -6061,12 +6061,12 @@ mod tests {
         // leaving orphan files behind. If you're changing this assertion,
         // you're probably re-introducing the regression — read #19 first.
         assert_eq!(
-            RTK_MD,
+            CTXCRL_MD,
             "CONTEXTCRAWLER.md",
             "filename regression: see issue #19"
         );
         assert_eq!(
-            RTK_MD_REF,
+            CTXCRL_MD_REF,
             "@CONTEXTCRAWLER.md",
             "filename regression: see issue #19"
         );
@@ -6094,18 +6094,18 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_legacy_codex_files_removes_orphan_rtk_md() {
+    fn test_cleanup_legacy_codex_files_removes_orphan_ctxcrl_md() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
         // Fixture must use the legacy filename so the test exercises the
         // codepath that the cleanup helper exists to handle.
-        let legacy_rtk_md = temp.path().join("RTK.md");
-        fs::write(&legacy_rtk_md, "old content").unwrap();
+        let legacy_ctxcrl_md = temp.path().join("RTK.md");
+        fs::write(&legacy_ctxcrl_md, "old content").unwrap();
         fs::write(
             &agents_md,
             format!(
                 "# header\n\n@{}\n\n@{}\n",
-                legacy_rtk_md.display(),
+                legacy_ctxcrl_md.display(),
                 temp.path().join("CONTEXTCRAWLER.md").display()
             ),
         )
@@ -6118,10 +6118,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!legacy_rtk_md.exists(), "legacy RTK.md should be removed");
+        assert!(!legacy_ctxcrl_md.exists(), "legacy RTK.md should be removed");
         let after = fs::read_to_string(&agents_md).unwrap();
         assert!(
-            !after.contains(&format!("@{}", legacy_rtk_md.display())),
+            !after.contains(&format!("@{}", legacy_ctxcrl_md.display())),
             "absolute @-ref to legacy RTK.md should be stripped, got:\n{}",
             after
         );
@@ -6193,7 +6193,7 @@ mod tests {
 
         let content = fs::read_to_string(&claude_md).unwrap();
         assert!(
-            content.contains(RTK_MD_REF),
+            content.contains(CTXCRL_MD_REF),
             "must end up with the canonical reference, got:\n{}",
             content
         );
@@ -6206,11 +6206,11 @@ mod tests {
         // place must not duplicate the line.
         let _ = patch_claude_md(&claude_md, InitContext::default()).unwrap();
         let content2 = fs::read_to_string(&claude_md).unwrap();
-        assert_eq!(content2.matches(RTK_MD_REF).count(), 1);
+        assert_eq!(content2.matches(CTXCRL_MD_REF).count(), 1);
     }
 
     #[test]
-    fn test_uninstall_codex_at_removes_legacy_rtk_md_file_and_ref() {
+    fn test_uninstall_codex_at_removes_legacy_ctxcrl_md_file_and_ref() {
         // Codex review on #19: an existing Codex home that still has
         // RTK.md / @RTK.md from a regressed install should be cleanable
         // via `uninstall --codex` without forcing the user to run a
@@ -6218,14 +6218,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
-        let legacy_rtk_md = codex_dir.join("RTK.md");
+        let legacy_ctxcrl_md = codex_dir.join("RTK.md");
 
         fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
-        fs::write(&legacy_rtk_md, "legacy codex config").unwrap();
+        fs::write(&legacy_ctxcrl_md, "legacy codex config").unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
-        assert!(!legacy_rtk_md.exists(), "legacy RTK.md must be removed");
+        assert!(!legacy_ctxcrl_md.exists(), "legacy RTK.md must be removed");
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(
             !content.contains("@RTK.md"),
@@ -6381,20 +6381,20 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
-        let rtk_md = codex_dir.join(RTK_MD);
+        let ctxcrl_md = codex_dir.join(CTXCRL_MD);
 
-        fs::write(&agents_md, format!("# Team rules\n\n{}\n", RTK_MD_REF)).unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(&agents_md, format!("# Team rules\n\n{}\n", CTXCRL_MD_REF)).unwrap();
+        fs::write(&ctxcrl_md, "codex config").unwrap();
 
         let removed_first = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
         let removed_second = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
         assert_eq!(removed_first.len(), 2);
         assert!(removed_second.is_empty());
-        assert!(!rtk_md.exists());
+        assert!(!ctxcrl_md.exists());
 
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains(RTK_MD_REF));
+        assert!(!content.contains(CTXCRL_MD_REF));
         assert!(content.contains("# Team rules"));
     }
 
@@ -6403,11 +6403,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
-        let rtk_md = codex_dir.join(RTK_MD);
-        let absolute_ref = codex_rtk_md_ref(codex_dir);
+        let ctxcrl_md = codex_dir.join(CTXCRL_MD);
+        let absolute_ref = codex_ctxcrl_md_ref(codex_dir);
 
         fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(&ctxcrl_md, "codex config").unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
@@ -6473,11 +6473,11 @@ mod tests {
     fn test_run_codex_mode_dry_run_writes_nothing() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
-        let rtk_md = temp.path().join("CONTEXTCRAWLER.md");
+        let ctxcrl_md = temp.path().join("CONTEXTCRAWLER.md");
 
         run_codex_mode_with_paths(
             agents_md.clone(),
-            rtk_md.clone(),
+            ctxcrl_md.clone(),
             true,
             InitContext {
                 dry_run: true,
@@ -6487,9 +6487,9 @@ mod tests {
         .unwrap();
 
         assert!(
-            !rtk_md.exists(),
+            !ctxcrl_md.exists(),
             "dry-run must not create CONTEXTCRAWLER.md: {}",
-            rtk_md.display()
+            ctxcrl_md.display()
         );
         assert!(
             !agents_md.exists(),
@@ -6503,25 +6503,25 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
-        let rtk_md = codex_dir.join("CONTEXTCRAWLER.md");
+        let ctxcrl_md = codex_dir.join("CONTEXTCRAWLER.md");
 
         fs::write(
             &agents_md,
             format!(
-                "# Team rules\n\n{} v2 -->\nOLD RTK STUFF\n{}\n\nMore content",
-                RTK_BLOCK_START, RTK_BLOCK_END
+                "# Team rules\n\n{} v2 -->\nOLD CTXCRL STUFF\n{}\n\nMore content",
+                CTXCRL_BLOCK_START, CTXCRL_BLOCK_END
             ),
         )
         .unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(&ctxcrl_md, "codex config").unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
         let content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!content.contains("OLD RTK STUFF"));
+        assert!(!content.contains("OLD CTXCRL STUFF"));
         assert!(content.contains("# Team rules"));
         assert!(content.contains("More content"));
-        assert!(removed.iter().any(|r| r.contains("rtk-instructions block")));
+        assert!(removed.iter().any(|r| r.contains("ctxcrl-instructions block")));
     }
 
     #[test]
@@ -6544,31 +6544,31 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
-        let rtk_md = codex_dir.join("CONTEXTCRAWLER.md");
+        let ctxcrl_md = codex_dir.join("CONTEXTCRAWLER.md");
 
         let fixture = format!(
-            "# Team rules\n\n{} v2 -->\nOLD RTK STUFF\n{}\n\n{}\n\nMore content\n",
-            RTK_BLOCK_START, RTK_BLOCK_END, RTK_MD_REF
+            "# Team rules\n\n{} v2 -->\nOLD CTXCRL STUFF\n{}\n\n{}\n\nMore content\n",
+            CTXCRL_BLOCK_START, CTXCRL_BLOCK_END, CTXCRL_MD_REF
         );
         fs::write(&agents_md, &fixture).unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(&ctxcrl_md, "codex config").unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
         // 1. AGENTS.md is fully clean.
         let agents_content = fs::read_to_string(&agents_md).unwrap();
-        assert!(!agents_content.contains(RTK_BLOCK_START));
-        assert!(!agents_content.contains("OLD RTK STUFF"));
-        assert!(!agents_content.contains(RTK_MD_REF));
+        assert!(!agents_content.contains(CTXCRL_BLOCK_START));
+        assert!(!agents_content.contains("OLD CTXCRL STUFF"));
+        assert!(!agents_content.contains(CTXCRL_MD_REF));
         assert!(agents_content.contains("# Team rules"));
         assert!(agents_content.contains("More content"));
 
         // 2. CONTEXTCRAWLER.md was deleted.
-        assert!(!rtk_md.exists(), "CONTEXTCRAWLER.md should be deleted");
+        assert!(!ctxcrl_md.exists(), "CONTEXTCRAWLER.md should be deleted");
 
         // 3. The removed list reports both mutations + the file.
         assert!(
-            removed.iter().any(|r| r.contains("rtk-instructions block")),
+            removed.iter().any(|r| r.contains("ctxcrl-instructions block")),
             "missing block-removal entry: {:?}",
             removed
         );
@@ -6590,10 +6590,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let claude_md = temp.path().join("CLAUDE.md");
 
-        fs::write(&claude_md, RTK_INSTRUCTIONS).unwrap();
+        fs::write(&claude_md, CTXCRL_INSTRUCTIONS).unwrap();
         let content = fs::read_to_string(&claude_md).unwrap();
 
-        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains(CTXCRL_BLOCK_START));
     }
 
     // Tests for hook_already_present()
@@ -6723,7 +6723,7 @@ mod tests {
         let first_command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(first_command, "/some/other/hook.sh");
 
-        // Check second hook is RTK
+        // Check second hook is ContextCrawler
         let second_command = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(second_command, hook_command);
     }
@@ -7297,7 +7297,7 @@ mod tests {
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
-            assert!(claude_dir.join(RTK_MD).exists(), "CONTEXTCRAWLER.md must be created");
+            assert!(claude_dir.join(CTXCRL_MD).exists(), "CONTEXTCRAWLER.md must be created");
             assert!(
                 claude_dir.join(CLAUDE_MD).exists(),
                 "CLAUDE.md must be created"
@@ -7320,7 +7320,7 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             uninstall(true, false, false, false, InitContext::default()).unwrap();
 
-            assert!(!claude_dir.join(RTK_MD).exists(), "CONTEXTCRAWLER.md must be removed");
+            assert!(!claude_dir.join(CTXCRL_MD).exists(), "CONTEXTCRAWLER.md must be removed");
             let settings_content =
                 fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap_or_default();
             assert!(
@@ -7350,13 +7350,13 @@ mod tests {
             run_claude_md_mode(true, false, InitContext::default()).unwrap();
             let claude_md_content = fs::read_to_string(claude_dir.join(CLAUDE_MD)).unwrap();
             assert!(
-                claude_md_content.contains(RTK_BLOCK_START),
+                claude_md_content.contains(CTXCRL_BLOCK_START),
                 "pre-condition: old block must exist"
             );
 
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
-            assert!(claude_dir.join(RTK_MD).exists(), "CONTEXTCRAWLER.md must be created");
+            assert!(claude_dir.join(CTXCRL_MD).exists(), "CONTEXTCRAWLER.md must be created");
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
             assert!(
                 settings.contains(CLAUDE_HOOK_COMMAND),
@@ -7392,7 +7392,7 @@ mod tests {
             run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
             assert!(
-                !claude_dir.join(RTK_MD).exists(),
+                !claude_dir.join(CTXCRL_MD).exists(),
                 "CONTEXTCRAWLER.md must NOT be created in hook-only mode"
             );
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
@@ -7414,7 +7414,7 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, dry).unwrap();
 
             assert!(
-                !claude_dir.join(RTK_MD).exists(),
+                !claude_dir.join(CTXCRL_MD).exists(),
                 "dry-run must not create CONTEXTCRAWLER.md"
             );
             assert!(
@@ -7434,11 +7434,11 @@ mod tests {
         with_claude_dir_override(&tmp, |claude_dir| {
             // Stage a real install first
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            assert!(claude_dir.join(RTK_MD).exists());
+            assert!(claude_dir.join(CTXCRL_MD).exists());
             assert!(claude_dir.join(SETTINGS_JSON).exists());
 
             let settings_before = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
-            let rtk_md_before = fs::read_to_string(claude_dir.join(RTK_MD)).unwrap();
+            let ctxcrl_md_before = fs::read_to_string(claude_dir.join(CTXCRL_MD)).unwrap();
 
             // Dry-run uninstall
             let dry = InitContext {
@@ -7449,7 +7449,7 @@ mod tests {
 
             // Files must still exist with identical content
             assert!(
-                claude_dir.join(RTK_MD).exists(),
+                claude_dir.join(CTXCRL_MD).exists(),
                 "dry-run uninstall must not remove CONTEXTCRAWLER.md"
             );
             assert!(
@@ -7457,8 +7457,8 @@ mod tests {
                 "dry-run uninstall must not remove settings.json"
             );
             assert_eq!(
-                fs::read_to_string(claude_dir.join(RTK_MD)).unwrap(),
-                rtk_md_before,
+                fs::read_to_string(claude_dir.join(CTXCRL_MD)).unwrap(),
+                ctxcrl_md_before,
                 "dry-run uninstall must not modify CONTEXTCRAWLER.md"
             );
             assert_eq!(
@@ -7474,38 +7474,38 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let claude_md = temp.path().join("CLAUDE.md");
 
-        fs::write(&claude_md, RTK_INSTRUCTIONS).unwrap();
+        fs::write(&claude_md, CTXCRL_INSTRUCTIONS).unwrap();
         assert!(claude_md.exists());
 
         let content = fs::read_to_string(&claude_md).unwrap();
-        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains(CTXCRL_BLOCK_START));
 
-        let (cleaned, did_remove) = remove_rtk_block(&content);
+        let (cleaned, did_remove) = remove_ctxcrl_block(&content);
         assert!(did_remove);
-        assert!(!cleaned.contains(RTK_BLOCK_START));
-        assert!(!cleaned.contains("rtk cargo test"));
+        assert!(!cleaned.contains(CTXCRL_BLOCK_START));
+        assert!(!cleaned.contains("contextcrawler cargo test"));
     }
 
     #[test]
     fn test_uninstall_preserves_non_rtk_content() {
         let content = format!(
             "# My Project\n\nSome custom instructions.\n\n{}\n\n## Other Notes\n\nKeep this.",
-            RTK_INSTRUCTIONS
+            CTXCRL_INSTRUCTIONS
         );
 
-        let (cleaned, did_remove) = remove_rtk_block(&content);
+        let (cleaned, did_remove) = remove_ctxcrl_block(&content);
 
         assert!(did_remove);
         assert!(cleaned.contains("# My Project"));
         assert!(cleaned.contains("Some custom instructions."));
         assert!(cleaned.contains("## Other Notes"));
         assert!(cleaned.contains("Keep this."));
-        assert!(!cleaned.contains(RTK_BLOCK_START));
+        assert!(!cleaned.contains(CTXCRL_BLOCK_START));
     }
 
     #[test]
     fn test_uninstall_handles_both_artifacts() {
-        let content = format!("# Config\n\n@CONTEXTCRAWLER.md\n\n{}\n\nMore stuff", RTK_INSTRUCTIONS);
+        let content = format!("# Config\n\n@CONTEXTCRAWLER.md\n\n{}\n\nMore stuff", CTXCRL_INSTRUCTIONS);
 
         let after_at_removal: String = content
             .lines()
@@ -7514,31 +7514,31 @@ mod tests {
             .join("\n");
 
         assert!(!after_at_removal.contains("@CONTEXTCRAWLER.md"));
-        assert!(after_at_removal.contains(RTK_BLOCK_START));
+        assert!(after_at_removal.contains(CTXCRL_BLOCK_START));
 
-        let (final_content, did_remove) = remove_rtk_block(&after_at_removal);
+        let (final_content, did_remove) = remove_ctxcrl_block(&after_at_removal);
         assert!(did_remove);
-        assert!(!final_content.contains(RTK_BLOCK_START));
+        assert!(!final_content.contains(CTXCRL_BLOCK_START));
         assert!(final_content.contains("# Config"));
         assert!(final_content.contains("More stuff"));
     }
 
     #[test]
     fn test_uninstall_integration_claude_md_only() {
-        let (cleaned, did_remove) = remove_rtk_block(RTK_INSTRUCTIONS);
-        assert!(did_remove, "remove_rtk_block must succeed for valid block");
+        let (cleaned, did_remove) = remove_ctxcrl_block(CTXCRL_INSTRUCTIONS);
+        assert!(did_remove, "remove_ctxcrl_block must succeed for valid block");
         assert!(
             cleaned.trim().is_empty(),
-            "CLAUDE.md with only RTK content should be empty after removal"
+            "CLAUDE.md with only CTXCRL content should be empty after removal"
         );
     }
 
     #[test]
     fn test_uninstall_integration_preserves_user_content() {
         let user_content = "# My Project Rules\n\nAlways use snake_case.";
-        let installed = format!("{}\n\n{}", user_content, RTK_INSTRUCTIONS);
+        let installed = format!("{}\n\n{}", user_content, CTXCRL_INSTRUCTIONS);
 
-        let (cleaned, did_remove) = remove_rtk_block(&installed);
+        let (cleaned, did_remove) = remove_ctxcrl_block(&installed);
         assert!(did_remove);
         assert!(!cleaned.trim().is_empty(), "user content should remain");
         assert!(
@@ -7550,12 +7550,12 @@ mod tests {
             "user content must be preserved"
         );
         assert!(
-            !cleaned.contains(RTK_BLOCK_START),
-            "RTK block must be fully removed"
+            !cleaned.contains(CTXCRL_BLOCK_START),
+            "CTXCRL block must be fully removed"
         );
         assert!(
-            !cleaned.contains(RTK_BLOCK_END),
-            "RTK end marker must be removed"
+            !cleaned.contains(CTXCRL_BLOCK_END),
+            "CTXCRL end marker must be removed"
         );
     }
 
@@ -7588,12 +7588,12 @@ mod tests {
             "User custom rule was destroyed. Got: {final_content}"
         );
         assert!(
-            final_content.contains(RTK_BLOCK_START),
-            "RTK block start marker missing"
+            final_content.contains(CTXCRL_BLOCK_START),
+            "CTXCRL block start marker missing"
         );
         assert!(
-            final_content.contains(RTK_BLOCK_END),
-            "RTK block end marker missing"
+            final_content.contains(CTXCRL_BLOCK_END),
+            "CTXCRL block end marker missing"
         );
     }
 
@@ -7614,13 +7614,13 @@ mod tests {
             "Second init must be a no-op (idempotent)"
         );
 
-        let count_start = after_first.matches(RTK_BLOCK_START).count();
-        let count_end = after_first.matches(RTK_BLOCK_END).count();
+        let count_start = after_first.matches(CTXCRL_BLOCK_START).count();
+        let count_end = after_first.matches(CTXCRL_BLOCK_END).count();
         assert_eq!(
             count_start, 1,
-            "RTK_BLOCK_START must appear once, got {count_start}"
+            "CTXCRL_BLOCK_START must appear once, got {count_start}"
         );
-        assert_eq!(count_end, 1, "RTK_BLOCK_END must appear once, got {count_end}");
+        assert_eq!(count_end, 1, "CTXCRL_BLOCK_END must appear once, got {count_end}");
     }
 
     #[test]
@@ -7631,8 +7631,8 @@ mod tests {
 
         let instructions_path = github_dir.join("copilot-instructions.md");
         let stale = format!(
-            "# Project rules\n\nUse rg.\n\n{} v2 -->\n# OLD RTK CONTENT\nrtk foo\n{}\n",
-            RTK_BLOCK_START, RTK_BLOCK_END
+            "# Project rules\n\nUse rg.\n\n{} v2 -->\n# OLD CTXCRL CONTENT\nctxcrl foo\n{}\n",
+            CTXCRL_BLOCK_START, CTXCRL_BLOCK_END
         );
         fs::write(&instructions_path, &stale).unwrap();
 
@@ -7645,8 +7645,8 @@ mod tests {
             "User content outside the block must be preserved"
         );
         assert!(
-            !updated.contains("# OLD RTK CONTENT"),
-            "Stale RTK block content must be removed"
+            !updated.contains("# OLD CTXCRL CONTENT"),
+            "Stale CTXCRL block content must be removed"
         );
         assert!(
             updated.contains("contextcrawler gain"),
@@ -7688,8 +7688,8 @@ mod tests {
             "Fresh install must create copilot-instructions.md"
         );
         let content = fs::read_to_string(&instructions_path).unwrap();
-        assert!(content.contains(RTK_BLOCK_START), "marker block missing");
-        assert!(content.contains(RTK_BLOCK_END), "end marker missing");
+        assert!(content.contains(CTXCRL_BLOCK_START), "marker block missing");
+        assert!(content.contains(CTXCRL_BLOCK_END), "end marker missing");
     }
 
     #[test]
@@ -7699,7 +7699,7 @@ mod tests {
         fs::create_dir_all(&github_dir).unwrap();
 
         let instructions_path = github_dir.join("copilot-instructions.md");
-        let malformed = format!("# My rules\n\n{}\nincomplete RTK block\n", RTK_BLOCK_START);
+        let malformed = format!("# My rules\n\n{}\nincomplete CTXCRL block\n", CTXCRL_BLOCK_START);
         fs::write(&instructions_path, &malformed).unwrap();
 
         let result = run_copilot_at(temp.path(), InitContext::default());
@@ -7722,7 +7722,7 @@ mod tests {
         fs::create_dir_all(&github_dir).unwrap();
 
         let instructions_path = github_dir.join("copilot-instructions.md");
-        let malformed = format!("# My rules\n\n{}\nincomplete RTK block\n", RTK_BLOCK_START);
+        let malformed = format!("# My rules\n\n{}\nincomplete CTXCRL block\n", CTXCRL_BLOCK_START);
         fs::write(&instructions_path, &malformed).unwrap();
 
         let hook_path = github_dir.join("hooks").join("rtk-rewrite.json");
@@ -7741,14 +7741,14 @@ mod tests {
     fn test_claude_md_mode_refuses_malformed_block() {
         // Mirrors `test_copilot_init_refuses_malformed_block`: a malformed
         // CLAUDE.md previously emitted a warning and exited 0, silently
-        // skipping the OpenCode plugin step. The shared `write_rtk_block`
+        // skipping the OpenCode plugin step. The shared `write_ctxcrl_block`
         // dispatcher now bails for both paths.
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);
             let malformed = format!(
-                "# Existing notes\n\n{}\nincomplete RTK block\n",
-                RTK_BLOCK_START
+                "# Existing notes\n\n{}\nincomplete CTXCRL block\n",
+                CTXCRL_BLOCK_START
             );
             fs::write(&claude_md, &malformed).unwrap();
 

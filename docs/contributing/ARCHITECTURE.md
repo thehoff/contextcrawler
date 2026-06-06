@@ -1,8 +1,8 @@
-# rtk Architecture Documentation
+# contextcrawler Architecture Documentation
 
-> **Deep reference** for RTK's system design, filtering taxonomy, performance characteristics, and architecture decisions. For a guided tour of the end-to-end flow, start with [TECHNICAL.md](TECHNICAL.md).
+> **Deep reference** for contextcrawler's system design, filtering taxonomy, performance characteristics, and architecture decisions. For a guided tour of the end-to-end flow, start with [TECHNICAL.md](TECHNICAL.md).
 
-**rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption through intelligent output filtering and compression.
+**contextcrawler (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption through intelligent output filtering and compression.
 
 ---
 
@@ -65,7 +65,7 @@ Best for: production                Best for: learning / auditing
 
 Phase 1: PARSE
 ──────────────
-$ rtk git log --oneline -5 -v
+$ contextcrawler git log --oneline -5 -v
 
 Clap Parser extracts:
   • Command: Commands::Git
@@ -124,7 +124,7 @@ Phase 6: TRACK
 ──────────────
 tracking::track(
     original_cmd: "git log --oneline -5",
-    rtk_cmd: "rtk git log --oneline -5",
+    rtk_cmd: "contextcrawler git log --oneline -5",
     input: &raw_output,    // 500 chars
     output: &filtered      // 20 chars
 )
@@ -137,7 +137,7 @@ SQLite INSERT:
   • savings_pct: 96.0
   • timestamp: now()
 
-Database: ~/.local/share/rtk/history.db
+Database: ~/.local/share/ctxcrl/history.db
 ```
 
 ### Verbosity Levels
@@ -466,7 +466,7 @@ Uses `Commands::Go { #[command(subcommand)] command: GoCommand }` in main.rs, wi
 **Why Sub-Enum?**
 - `go test/build/vet` are semantically related (core Go toolchain)
 - Mirrors existing git/cargo patterns (consistency)
-- Natural CLI: `rtk go test` not `rtk gotest`
+- Natural CLI: `contextcrawler go test` not `contextcrawler gotest`
 
 **Why golangci-lint Standalone?**
 - Third-party tool (not core Go toolchain)
@@ -534,7 +534,7 @@ Output format known?
 │              Python/Go Module Overhead Benchmarks                      │
 └────────────────────────────────────────────────────────────────────────┘
 
-Command                 Raw Time    rtk Time    Overhead    Savings
+Command                 Raw Time    contextcrawler Time    Overhead    Savings
 ─────────────────────────────────────────────────────────────────────────
 
 ruff check              850ms       862ms       +12ms       83%
@@ -653,7 +653,7 @@ Flow:
    INSERT INTO commands (
        timestamp,      -- RFC3339 format
        original_cmd,   -- "git log --oneline -5"
-       rtk_cmd,        -- "rtk git log --oneline -5"
+       rtk_cmd,        -- "contextcrawler git log --oneline -5"
        input_tokens,   -- 125
        output_tokens,  -- 5
        saved_tokens,   -- 120
@@ -665,7 +665,7 @@ Flow:
 
 4. STORAGE
    ───────
-   Database: ~/.local/share/rtk/history.db
+   Database: ~/.local/share/ctxcrl/history.db
 
    Schema:
    ┌─────────────────────────────────────────┐
@@ -699,7 +699,7 @@ Flow:
 
 6. REPORTING (gain.rs)
    ────────
-   $ rtk gain
+   $ contextcrawler gain
 
    Query:
    SELECT
@@ -721,9 +721,9 @@ Flow:
    │ Total exec time:    8m50s (573ms)   │
    │                                      │
    │ Top commands:                       │
-   │   • rtk git status    (234 uses)    │
-   │   • rtk lint          (156 uses)    │
-   │   • rtk test          (89 uses)     │
+   │   • contextcrawler git status    (234 uses)    │
+   │   • contextcrawler lint          (156 uses)    │
+   │   • contextcrawler test          (89 uses)     │
    └──────────────────────────────────────┘
 
    Note: Time column shows average execution
@@ -848,7 +848,7 @@ Exit Codes:
 │ Code    │ Meaning                                              │
 ├─────────┼──────────────────────────────────────────────────────┤
 │ 0       │ Success                                              │
-│ 1       │ rtk internal error (parsing, filtering, etc.)        │
+│ 1       │ contextcrawler internal error (parsing, filtering, etc.)        │
 │ N       │ Preserved exit code from underlying tool            │
 │         │ (e.g., git returns 128, lint returns 1)             │
 └─────────┴──────────────────────────────────────────────────────┘
@@ -874,39 +874,39 @@ Modules with Exit Code Preservation:
 
 > For config file format, tee settings, tracking database path, and TOML filter tiers, see [src/core/README.md](src/core/README.md).
 
-Two tiers: **User settings** (`~/.config/rtk/config.toml`) and **LLM integration** (CLAUDE.md via `rtk init`).
+Two tiers: **User settings** (`~/.config/ctxcrl/config.toml`) and **LLM integration** (CLAUDE.md via `contextcrawler init`).
 
 ### Initialization Flow
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                      rtk init Workflow                                 │
+│                      contextcrawler init Workflow                                 │
 └────────────────────────────────────────────────────────────────────────┘
 
-$ rtk init [--global]
+$ contextcrawler init [--global]
       ↓
 Check existing CLAUDE.md:
-  • --global? → ~/.config/rtk/CLAUDE.md
+  • --global? → ~/.config/ctxcrl/CLAUDE.md
   • else      → ./CLAUDE.md
       ↓
       ├─ Exists? → Warn user, ask to overwrite
       └─ Not exists? → Continue
       ↓
-Prompt: "Initialize rtk for LLM usage? [y/N]"
+Prompt: "Initialize contextcrawler for LLM usage? [y/N]"
       ↓ Yes
 Write template:
 ┌─────────────────────────────────────┐
 │ # CLAUDE.md                         │
 │                                     │
-│ Use `rtk` prefix for commands:      │
-│ - rtk git status                    │
-│ - rtk lint                          │
-│ - rtk test                          │
+│ Use `contextcrawler` prefix for commands:      │
+│ - contextcrawler git status                    │
+│ - contextcrawler lint                          │
+│ - contextcrawler test                          │
 │                                     │
 │ Benefits: 60-90% token reduction    │
 └─────────────────────────────────────┘
       ↓
-Success: "✓ Initialized rtk for LLM integration"
+Success: "✓ Initialized contextcrawler for LLM integration"
 ```
 
 ---
@@ -975,12 +975,12 @@ Binary:
 
 Runtime Overhead (estimated):
 ┌──────────────────────┬──────────────┬──────────────┐
-│ Operation            │ rtk Overhead │ Total Time   │
+│ Operation            │ contextcrawler Overhead │ Total Time   │
 ├──────────────────────┼──────────────┼──────────────┤
-│ rtk git status       │ +8ms         │ 58ms         │
-│ rtk grep "pattern"   │ +12ms        │ 145ms        │
-│ rtk read file.rs     │ +5ms         │ 15ms         │
-│ rtk lint             │ +15ms        │ 2.5s         │
+│ contextcrawler git status       │ +8ms         │ 58ms         │
+│ contextcrawler grep "pattern"   │ +12ms        │ 145ms        │
+│ contextcrawler read file.rs     │ +5ms         │ 15ms         │
+│ contextcrawler lint             │ +15ms        │ 2.5s         │
 └──────────────────────┴──────────────┴──────────────┘
 
 Note: Overhead measurements are estimates. Actual performance varies
@@ -1048,7 +1048,7 @@ Overhead Sources:
 |------|------------|
 | **Token** | Unit of text processed by LLMs (~4 characters on average) |
 | **Filtering** | Reducing output size while preserving essential information |
-| **Proxy Pattern** | rtk sits between user and tool, transforming output |
+| **Proxy Pattern** | contextcrawler sits between user and tool, transforming output |
 | **Exit Code Preservation** | Passing through tool's exit code for CI/CD reliability |
 | **Package Manager Detection** | Identifying pnpm/yarn/npm to execute JS/TS tools correctly |
 | **Verbosity Levels** | `-v/-vv/-vvv` for progressively more debug output |

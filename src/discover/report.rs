@@ -1,4 +1,4 @@
-//! Data types for reporting which commands RTK can and cannot optimize.
+//! Data types for reporting which commands CTXCRL can and cannot optimize.
 
 use crate::hooks::constants::{
     CURSOR_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
@@ -7,14 +7,14 @@ use crate::hooks::constants::{
 use serde::Serialize;
 use std::path::Path;
 
-/// RTK support status for a command.
+/// CTXCRL support status for a command.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 pub enum CtxcrlStatus {
     /// Dedicated handler with filtering (e.g., git status → git.rs:run_status())
     Existing,
     /// Works via external_subcommand passthrough, no filtering (e.g., cargo fmt → Other)
     Passthrough,
-    /// RTK doesn't handle this command at all
+    /// CTXCRL doesn't handle this command at all
     NotSupported,
 }
 
@@ -28,7 +28,7 @@ impl CtxcrlStatus {
     }
 }
 
-/// A supported command that RTK already handles.
+/// A supported command that CTXCRL already handles.
 #[derive(Debug, Serialize)]
 pub struct SupportedEntry {
     pub command: String,
@@ -37,10 +37,10 @@ pub struct SupportedEntry {
     pub category: &'static str,
     pub estimated_savings_tokens: usize,
     pub estimated_savings_pct: f64,
-    pub rtk_status: CtxcrlStatus,
+    pub ctxcrl_status: CtxcrlStatus,
 }
 
-/// An unsupported command not yet handled by RTK.
+/// An unsupported command not yet handled by CTXCRL.
 #[derive(Debug, Serialize)]
 pub struct UnsupportedEntry {
     pub base_command: String,
@@ -83,12 +83,12 @@ impl AgentIntegrationStatus {
 pub struct DiscoverReport {
     pub sessions_scanned: usize,
     pub total_commands: usize,
-    pub already_rtk: usize,
-    /// Subset of `already_rtk` attributable to the PreToolUse hook rewriting
+    pub already_ctxcrl: usize,
+    /// Subset of `already_ctxcrl` attributable to the PreToolUse hook rewriting
     /// the command at runtime — detected by cross-referencing the JSONL
     /// transcript against the contextcrawler tracking DB.
     #[serde(default)]
-    pub rtk_via_runtime: usize,
+    pub ctxcrl_via_runtime: usize,
     /// Banner emitted when the tracking DB couldn't be opened — `None` on the
     /// happy path. Surfaced above the MISSED SAVINGS section so users
     /// understand a stale miss count may be over-reporting.
@@ -98,8 +98,8 @@ pub struct DiscoverReport {
     pub supported: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
     pub parse_errors: usize,
-    pub rtk_disabled_count: usize,
-    pub rtk_disabled_examples: Vec<String>,
+    pub ctxcrl_disabled_count: usize,
+    pub ctxcrl_disabled_examples: Vec<String>,
     pub agent_status: AgentIntegrationStatus,
 }
 
@@ -128,19 +128,19 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         report.sessions_scanned, report.since_days, report.total_commands
     ));
     let already_pct = if report.total_commands > 0 {
-        report.already_rtk as f64 * 100.0 / report.total_commands as f64
+        report.already_ctxcrl as f64 * 100.0 / report.total_commands as f64
     } else {
         0.0
     };
-    if report.rtk_via_runtime > 0 {
+    if report.ctxcrl_via_runtime > 0 {
         out.push_str(&format!(
             "Already using ContextCrawler: {} commands ({:.1}%)  -- {} via hook rewrite (runtime tracked)\n",
-            report.already_rtk, already_pct, report.rtk_via_runtime
+            report.already_ctxcrl, already_pct, report.ctxcrl_via_runtime
         ));
     } else {
         out.push_str(&format!(
             "Already using ContextCrawler: {} commands ({:.1}%)\n",
-            report.already_rtk, already_pct
+            report.already_ctxcrl, already_pct
         ));
     }
 
@@ -170,7 +170,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
                 truncate_str(&entry.command, 23),
                 entry.count,
                 entry.ctxcrl_equivalent,
-                entry.rtk_status.as_str(),
+                entry.ctxcrl_status.as_str(),
                 format_tokens(entry.estimated_savings_tokens),
             ));
         }
@@ -209,16 +209,16 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     }
 
     // RTK_DISABLED bypass warning
-    if report.rtk_disabled_count > 0 {
+    if report.ctxcrl_disabled_count > 0 {
         out.push_str(&format!(
             "\nRTK_DISABLED BYPASS -- {} commands ran without filtering\n",
-            report.rtk_disabled_count
+            report.ctxcrl_disabled_count
         ));
         out.push_str(&"-".repeat(72));
         out.push('\n');
         out.push_str("These commands used RTK_DISABLED=1 unnecessarily:\n");
-        if !report.rtk_disabled_examples.is_empty() {
-            out.push_str(&format!("  {}\n", report.rtk_disabled_examples.join(", ")));
+        if !report.ctxcrl_disabled_examples.is_empty() {
+            out.push_str(&format!("  {}\n", report.ctxcrl_disabled_examples.join(", ")));
         }
         out.push_str("-> Remove RTK_DISABLED=1 to recover token savings\n");
     }
@@ -277,19 +277,19 @@ fn truncate_str(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
+    fn make_report(total_commands: usize, already_ctxcrl: usize) -> DiscoverReport {
         DiscoverReport {
             sessions_scanned: 1,
             total_commands,
-            already_rtk,
-            rtk_via_runtime: 0,
+            already_ctxcrl,
+            ctxcrl_via_runtime: 0,
             reconcile_warning: None,
             since_days: 30,
             supported: vec![],
             unsupported: vec![],
             parse_errors: 0,
-            rtk_disabled_count: 0,
-            rtk_disabled_examples: vec![],
+            ctxcrl_disabled_count: 0,
+            ctxcrl_disabled_examples: vec![],
             agent_status: AgentIntegrationStatus::default(),
         }
     }
@@ -297,7 +297,7 @@ mod tests {
     // B6 regression: integer division truncated small percentages to 0%.
     // Example: 3/1000 = 0% (old bug), should be "0.3%".
     #[test]
-    fn test_already_rtk_percent_shows_decimal() {
+    fn test_already_ctxcrl_percent_shows_decimal() {
         let report = make_report(1000, 3);
         let output = format_text(&report, 10, false);
         // "0.3%" must appear; old code would print "0%"
@@ -315,7 +315,7 @@ mod tests {
 
     // Edge case: 0/0 must not divide-by-zero.
     #[test]
-    fn test_already_rtk_percent_zero_total() {
+    fn test_already_ctxcrl_percent_zero_total() {
         let report = make_report(0, 0);
         let output = format_text(&report, 10, false);
         assert!(output.contains("0 commands (0.0%)"));
@@ -323,7 +323,7 @@ mod tests {
 
     // Full percent: 1000/1000 = 100.0%
     #[test]
-    fn test_already_rtk_percent_full() {
+    fn test_already_ctxcrl_percent_full() {
         let report = make_report(1000, 1000);
         let output = format_text(&report, 10, false);
         assert!(output.contains("100.0%"));

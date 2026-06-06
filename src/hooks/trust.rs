@@ -1,13 +1,13 @@
 //! Controls which project-local TOML filters are allowed to run.
 //!
-//! `.rtk/filters.toml` is loaded from CWD with highest priority. An attacker
+//! `.ctxcrl/filters.toml` is loaded from CWD with highest priority. An attacker
 //! can commit this file to a public repo to control what an LLM sees — hiding
 //! malicious code, suppressing security scanner output, or rewriting command
 //! output entirely via `replace` and `match_output` primitives.
 //!
 //! This module implements a trust-before-load model:
 //! - Untrusted filters are **skipped** (not "loaded with warning")
-//! - `rtk trust` stores the SHA-256 hash after user review
+//! - `contextcrawler trust` stores the SHA-256 hash after user review
 //! - Content changes invalidate trust (re-review required)
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
@@ -160,7 +160,7 @@ pub fn check_trust_bytes(filter_path: &Path, bytes: &[u8]) -> Result<TrustStatus
 ///
 /// **Prefer `check_trust_bytes` for new load paths** — this form has a
 /// TOCTOU window between the hash and any subsequent parse. Retained
-/// for callers that don't need to parse the file (e.g. `rtk verify`).
+/// for callers that don't need to parse the file (e.g. `contextcrawler verify`).
 pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
     if let Some(s) = env_override_status() {
         return Ok(s);
@@ -233,8 +233,8 @@ pub fn list_trusted() -> Result<HashMap<String, TrustEntry>> {
 // CLI commands
 // ---------------------------------------------------------------------------
 
-/// Run `rtk trust` — review and trust project-local filters.
-/// Resolve the global filter path (`~/.config/rtk/filters.toml` on Linux,
+/// Run `contextcrawler trust` — review and trust project-local filters.
+/// Resolve the global filter path (`~/.config/ctxcrl/filters.toml` on Linux,
 /// platform equivalent elsewhere). Returns None if dirs can't locate
 /// a config directory.
 fn global_filter_path() -> Option<std::path::PathBuf> {
@@ -246,7 +246,7 @@ pub fn run_trust(list: bool, global: bool) -> Result<()> {
     if list {
         // Renamed from `trusted` to defuse CodeQL's name-based
         // `rust/cleartext-logging` heuristic. This is the explicit
-        // `rtk trust --list` command — printing the user's own trust
+        // `contextcrawler trust --list` command — printing the user's own trust
         // file to their own terminal is the entire point of the
         // command, not a leak.
         let entries = list_trusted()?;
@@ -321,7 +321,7 @@ pub fn run_trust(list: bool, global: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run `rtk untrust` — revoke trust for project-local or user-global filters.
+/// Run `contextcrawler untrust` — revoke trust for project-local or user-global filters.
 pub fn run_untrust(global: bool) -> Result<()> {
     let (filter_path, label) = if global {
         let p = global_filter_path()
@@ -330,8 +330,8 @@ pub fn run_untrust(global: bool) -> Result<()> {
         (p, label)
     } else {
         (
-            std::path::PathBuf::from(".rtk/filters.toml"),
-            ".rtk/filters.toml".to_string(),
+            std::path::PathBuf::from(".ctxcrl/filters.toml"),
+            ".ctxcrl/filters.toml".to_string(),
         )
     };
 

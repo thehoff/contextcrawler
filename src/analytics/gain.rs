@@ -1,4 +1,4 @@
-//! Shows users how many tokens RTK has saved them over time.
+//! Shows users how many tokens CTXCRL has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
@@ -179,7 +179,7 @@ pub fn run(
         }
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)
-        if let Some(warning) = check_rtk_disabled_bypass() {
+        if let Some(warning) = check_ctxcrl_disabled_bypass() {
             eprintln!("{}", warning.yellow());
             eprintln!();
         }
@@ -685,9 +685,9 @@ fn export_csv(
 /// Lightweight scan of recent Claude Code sessions for RTK_DISABLED= overuse.
 /// Returns a warning string if bypass rate exceeds 10%, None otherwise.
 /// Silently returns None on any error (missing dirs, permission issues, etc.).
-fn check_rtk_disabled_bypass() -> Option<String> {
+fn check_ctxcrl_disabled_bypass() -> Option<String> {
     use crate::discover::provider::{ClaudeProvider, SessionProvider};
-    use crate::discover::registry::cmd_has_rtk_disabled_prefix;
+    use crate::discover::registry::cmd_has_ctxcrl_disabled_prefix;
 
     let provider = ClaudeProvider;
 
@@ -710,7 +710,7 @@ fn check_rtk_disabled_bypass() -> Option<String> {
 
         for ext_cmd in &extracted {
             total_bash += 1;
-            if cmd_has_rtk_disabled_prefix(&ext_cmd.command) {
+            if cmd_has_ctxcrl_disabled_prefix(&ext_cmd.command) {
                 bypassed += 1;
             }
         }

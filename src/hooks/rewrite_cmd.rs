@@ -1,18 +1,18 @@
-//! Translates a raw shell command into its RTK-optimized equivalent.
+//! Translates a raw shell command into its ContextCrawler-optimized equivalent.
 
 use super::permissions::{check_command, PermissionVerdict};
 use crate::discover::registry;
 use std::io::Write;
 
-// ===== contextzip-downstream: supply-chain gate import begin =====
+// ===== downstream: supply-chain gate import begin =====
 use super::supply_chain_gate;
-// ===== contextzip-downstream: supply-chain gate import end =====
+// ===== downstream: supply-chain gate import end =====
 
-// ===== contextzip-downstream: Tirith pre-execution gate begin =====
+// ===== downstream: Tirith pre-execution gate begin =====
 // Gate logic lives in `super::tirith_gate` so both this path and the
-// modern `rtk hook claude` path (hook_cmd.rs) share one implementation.
+// modern `contextcrawler hook claude` path (hook_cmd.rs) share one implementation.
 use super::tirith_gate;
-// ===== contextzip-downstream: Tirith pre-execution gate end =====
+// ===== downstream: Tirith pre-execution gate end =====
 
 /// Run the `contextcrawler rewrite` command.
 ///
@@ -41,7 +41,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
     match registry::rewrite_command(cmd, &excluded, &transparent_prefixes) {
         Some(rewritten) => match verdict {
             PermissionVerdict::Allow => {
-                // ===== contextzip-downstream: Tirith gate fires here =====
+                // ===== downstream: Tirith gate fires here =====
                 let tirith_verdict = tirith_gate::check(cmd);
                 if let Some((reason, tirith_json)) =
                     tirith_gate::should_downgrade(&tirith_verdict)
@@ -64,9 +64,9 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
                     let _ = std::io::stdout().flush();
                     std::process::exit(3);
                 }
-                // ===== contextzip-downstream: end Tirith gate =====
+                // ===== downstream: end Tirith gate =====
 
-                // ===== contextzip-downstream: supply-chain gate fires here =====
+                // ===== downstream: supply-chain gate fires here =====
                 // SECURITY: a `Block` verdict (failed gate) AND an
                 // `Unavailable` verdict (registry/OSV lookup failed) both
                 // downgrade the auto-allow to Ask. Treating `Unavailable`
@@ -104,7 +104,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
                     }
                     supply_chain_gate::Verdict::Skip | supply_chain_gate::Verdict::Allow => {}
                 }
-                // ===== contextzip-downstream: end supply-chain gate =====
+                // ===== downstream: end supply-chain gate =====
 
 
                 print!("{}", rewritten);

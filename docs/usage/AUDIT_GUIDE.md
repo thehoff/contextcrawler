@@ -1,12 +1,12 @@
-# RTK Token Savings Audit Guide
+# contextcrawler Token Savings Audit Guide
 
-Complete guide to analyzing your rtk token savings with temporal breakdowns and data exports.
+Complete guide to analyzing your contextcrawler token savings with temporal breakdowns and data exports.
 
 ## Overview
 
-The `rtk gain` command provides comprehensive analytics for tracking your token savings across time periods.
+The `contextcrawler gain` command provides comprehensive analytics for tracking your token savings across time periods.
 
-**Database Location**: `~/.local/share/rtk/history.db`
+**Database Location**: `~/.local/share/ctxcrl/history.db`
 **Retention Policy**: 90 days
 **Scope**: Global across all projects, worktrees, and Claude sessions
 
@@ -14,25 +14,25 @@ The `rtk gain` command provides comprehensive analytics for tracking your token 
 
 ```bash
 # Default summary view
-rtk gain
+contextcrawler gain
 
 # Temporal breakdowns
-rtk gain --daily          # All days since tracking started
-rtk gain --weekly         # Aggregated by week
-rtk gain --monthly        # Aggregated by month
-rtk gain --all            # Show all breakdowns at once
+contextcrawler gain --daily          # All days since tracking started
+contextcrawler gain --weekly         # Aggregated by week
+contextcrawler gain --monthly        # Aggregated by month
+contextcrawler gain --all            # Show all breakdowns at once
 
 # Export formats
-rtk gain --all --format json > savings.json
-rtk gain --all --format csv > savings.csv
+contextcrawler gain --all --format json > savings.json
+contextcrawler gain --all --format csv > savings.csv
 
 # Combined flags
-rtk gain --graph --history --quota    # Classic view with extras
-rtk gain --daily --weekly --monthly   # Multiple breakdowns
+contextcrawler gain --graph --history --quota    # Classic view with extras
+contextcrawler gain --daily --weekly --monthly   # Multiple breakdowns
 
 # Reset all tracking data
-rtk gain --reset          # prompts [y/N] before deleting
-rtk gain --reset --yes    # skip prompt (CI/scripts)
+contextcrawler gain --reset          # prompts [y/N] before deleting
+contextcrawler gain --reset --yes    # skip prompt (CI/scripts)
 ```
 
 ## Command Options
@@ -89,9 +89,9 @@ TOTAL            196       1.3M      59.2K       1.2M   95.6%
 ```
 
 **Metrics explained:**
-- **Cmds**: Number of rtk commands executed
+- **Cmds**: Number of contextcrawler commands executed
 - **Input**: Estimated tokens from raw command output
-- **Output**: Actual tokens after rtk filtering
+- **Output**: Actual tokens after contextcrawler filtering
 - **Saved**: Input - Output (tokens prevented from reaching LLM)
 - **Save%**: Percentage reduction (Saved / Input × 100)
 
@@ -184,17 +184,17 @@ month,commands,input_tokens,output_tokens,saved_tokens,savings_pct
 
 ```bash
 # Generate weekly report every Monday
-rtk gain --weekly --format csv > reports/week-$(date +%Y-%W).csv
+contextcrawler gain --weekly --format csv > reports/week-$(date +%Y-%W).csv
 
 # Compare this week vs last week
-rtk gain --weekly | tail -3
+contextcrawler gain --weekly | tail -3
 ```
 
 ### Monthly Cost Analysis
 
 ```bash
 # Export monthly data for budget review
-rtk gain --monthly --format json | jq '.monthly[] |
+contextcrawler gain --monthly --format json | jq '.monthly[] |
   {month, saved_tokens, quota_pct: (.saved_tokens / 6000000 * 100)}'
 ```
 
@@ -205,7 +205,7 @@ import pandas as pd
 import subprocess
 
 # Get CSV data
-result = subprocess.run(['rtk', 'gain', '--all', '--format', 'csv'],
+result = subprocess.run(['contextcrawler', 'gain', '--all', '--format', 'csv'],
                        capture_output=True, text=True)
 
 # Parse daily data
@@ -221,7 +221,7 @@ daily_df.plot(x='date', y='savings_pct', kind='line')
 
 ### Excel Analysis
 
-1. Export CSV: `rtk gain --all --format csv > rtk-data.csv`
+1. Export CSV: `contextcrawler gain --all --format csv > ctxcrl-data.csv`
 2. Open in Excel
 3. Create pivot tables:
    - Daily trends (line chart)
@@ -232,14 +232,14 @@ daily_df.plot(x='date', y='savings_pct', kind='line')
 
 ```bash
 # Generate dashboard data daily via cron
-0 0 * * * rtk gain --all --format json > /var/www/dashboard/rtk-stats.json
+0 0 * * * contextcrawler gain --all --format json > /var/www/dashboard/ctxcrl-stats.json
 
 # Serve with static site
 cat > index.html <<'EOF'
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <canvas id="savings"></canvas>
 <script>
-fetch('rtk-stats.json')
+fetch('ctxcrl-stats.json')
   .then(r => r.json())
   .then(data => {
     new Chart(document.getElementById('savings'), {
@@ -261,7 +261,7 @@ EOF
 
 ### Token Estimation
 
-rtk estimates tokens using `text.len() / 4` (4 characters per token average).
+contextcrawler estimates tokens using `text.len() / 4` (4 characters per token average).
 
 **Accuracy**: ±10% compared to actual LLM tokenization (sufficient for trends).
 
@@ -278,13 +278,13 @@ Savings %       = (Saved / Input) × 100
 
 | Command | Typical Savings | Mechanism |
 |---------|----------------|-----------|
-| `rtk git status` | 77-93% | Compact stat format |
-| `rtk eslint` | 84% | Group by rule |
-| `rtk jest` | 94-99% | Show failures only |
-| `rtk vitest` | 94-99% | Show failures only |
-| `rtk find` | 75% | Tree format |
-| `rtk pnpm list` | 70-90% | Compact dependencies |
-| `rtk grep` | 70% | Truncate + group |
+| `contextcrawler git status` | 77-93% | Compact stat format |
+| `contextcrawler eslint` | 84% | Group by rule |
+| `contextcrawler jest` | 94-99% | Show failures only |
+| `contextcrawler vitest` | 94-99% | Show failures only |
+| `contextcrawler find` | 75% | Tree format |
+| `contextcrawler pnpm list` | 70-90% | Compact dependencies |
+| `contextcrawler grep` | 70% | Truncate + group |
 
 ## Database Management
 
@@ -292,18 +292,18 @@ Savings %       = (Saved / Input) × 100
 
 ```bash
 # Location
-ls -lh ~/.local/share/rtk/history.db
+ls -lh ~/.local/share/ctxcrl/history.db
 
 # Schema
-sqlite3 ~/.local/share/rtk/history.db ".schema"
+sqlite3 ~/.local/share/ctxcrl/history.db ".schema"
 
 # Recent records
-sqlite3 ~/.local/share/rtk/history.db \
+sqlite3 ~/.local/share/ctxcrl/history.db \
   "SELECT timestamp, rtk_cmd, saved_tokens FROM commands
    ORDER BY timestamp DESC LIMIT 10"
 
 # Total database size
-sqlite3 ~/.local/share/rtk/history.db \
+sqlite3 ~/.local/share/ctxcrl/history.db \
   "SELECT COUNT(*),
           SUM(saved_tokens) as total_saved,
           MIN(DATE(timestamp)) as first_record,
@@ -315,25 +315,25 @@ sqlite3 ~/.local/share/rtk/history.db \
 
 ```bash
 # Backup
-cp ~/.local/share/rtk/history.db ~/backups/rtk-history-$(date +%Y%m%d).db
+cp ~/.local/share/ctxcrl/history.db ~/backups/ctxcrl-history-$(date +%Y%m%d).db
 
 # Restore
-cp ~/backups/rtk-history-20260128.db ~/.local/share/rtk/history.db
+cp ~/backups/ctxcrl-history-20260128.db ~/.local/share/ctxcrl/history.db
 
 # Export for migration
-sqlite3 ~/.local/share/rtk/history.db .dump > rtk-backup.sql
+sqlite3 ~/.local/share/ctxcrl/history.db .dump > ctxcrl-backup.sql
 ```
 
 ### Cleanup
 
 ```bash
 # Manual cleanup (older than 90 days)
-sqlite3 ~/.local/share/rtk/history.db \
+sqlite3 ~/.local/share/ctxcrl/history.db \
   "DELETE FROM commands WHERE timestamp < datetime('now', '-90 days')"
 
 # Reset all data
-rm ~/.local/share/rtk/history.db
-# Next rtk command will recreate database
+rm ~/.local/share/ctxcrl/history.db
+# Next contextcrawler command will recreate database
 ```
 
 ## Integration Examples
@@ -341,8 +341,8 @@ rm ~/.local/share/rtk/history.db
 ### GitHub Actions CI/CD
 
 ```yaml
-# .github/workflows/rtk-stats.yml
-name: RTK Stats Report
+# .github/workflows/ctxcrl-stats.yml
+name: contextcrawler Stats Report
 on:
   schedule:
     - cron: '0 0 * * 1'  # Weekly on Monday
@@ -351,15 +351,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Install rtk
+      - name: Install contextcrawler
         run: cargo install --path .
       - name: Generate report
         run: |
-          rtk gain --weekly --format json > stats/week-$(date +%Y-%W).json
+          contextcrawler gain --weekly --format json > stats/week-$(date +%Y-%W).json
       - name: Commit stats
         run: |
           git add stats/
-          git commit -m "Weekly rtk stats"
+          git commit -m "Weekly contextcrawler stats"
           git push
 ```
 
@@ -371,12 +371,12 @@ import json
 import requests
 
 def send_rtk_stats():
-    result = subprocess.run(['rtk', 'gain', '--format', 'json'],
+    result = subprocess.run(['contextcrawler', 'gain', '--format', 'json'],
                            capture_output=True, text=True)
     data = json.loads(result.stdout)
 
     message = f"""
-    📊 *RTK Token Savings Report*
+    📊 *contextcrawler Token Savings Report*
 
     Total Saved: {data['summary']['total_saved']:,} tokens
     Savings Rate: {data['summary']['avg_savings_pct']:.1f}%
@@ -392,24 +392,24 @@ def send_rtk_stats():
 
 ```bash
 # Check if database exists
-ls -lh ~/.local/share/rtk/history.db
+ls -lh ~/.local/share/ctxcrl/history.db
 
 # Check record count
-sqlite3 ~/.local/share/rtk/history.db "SELECT COUNT(*) FROM commands"
+sqlite3 ~/.local/share/ctxcrl/history.db "SELECT COUNT(*) FROM commands"
 
 # Run a tracked command to generate data
-rtk git status
+contextcrawler git status
 ```
 
 ### Export fails
 
 ```bash
 # Check for pipe errors
-rtk gain --format json 2>&1 | tee /tmp/rtk-debug.log | jq .
+contextcrawler gain --format json 2>&1 | tee /tmp/ctxcrl-debug.log | jq .
 
 # Use release build to avoid warnings
 cargo build --release
-./target/release/rtk gain --format json
+./target/release/ctxcrl gain --format json
 ```
 
 ### Incorrect statistics
@@ -421,19 +421,19 @@ Token estimation is a heuristic. For precise measurements:
 pip install tiktoken
 
 # Validate estimation
-rtk git status > output.txt
+contextcrawler git status > output.txt
 python -c "
 import tiktoken
 enc = tiktoken.get_encoding('cl100k_base')
 text = open('output.txt').read()
 print(f'Actual tokens: {len(enc.encode(text))}')
-print(f'rtk estimate: {len(text) // 4}')
+print(f'contextcrawler estimate: {len(text) // 4}')
 "
 ```
 
 ## Best Practices
 
-1. **Regular Exports**: `rtk gain --all --format json > monthly-$(date +%Y%m).json`
+1. **Regular Exports**: `contextcrawler gain --all --format json > monthly-$(date +%Y%m).json`
 2. **Trend Analysis**: Compare week-over-week savings to identify optimization opportunities
 3. **Command Profiling**: Use `--history` to see which commands save the most
 4. **Backup Before Cleanup**: Always backup before manual database operations
@@ -441,6 +441,6 @@ print(f'rtk estimate: {len(text) // 4}')
 
 ## See Also
 
-- [README.md](../README.md) - Full rtk documentation
+- [README.md](../README.md) - Full contextcrawler documentation
 - [CLAUDE.md](../CLAUDE.md) - Claude Code integration guide
 - [ARCHITECTURE.md](../contributing/ARCHITECTURE.md) - Technical architecture

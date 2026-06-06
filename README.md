@@ -35,7 +35,7 @@ One binary, one name: **`contextcrawler`**.
 | Component | What it brings | License |
 |---|---|---|
 | [rtk-ai/rtk](https://github.com/rtk-ai/rtk) | The core CLI proxy framework: 60+ command filters (git, cargo, npm, kubectl, docker, …), the permission-verdict system (`allow` / `ask` / `deny` / `default`), and the agent-hook entrypoints used by every supported integration. Tracked via rebase against tagged releases. | Apache-2.0 / MIT |
-| [jee599/contextzip](https://github.com/jee599/contextzip) | The session-JSONL compactor for Claude Code, the multi-language stacktrace compressor (Node / Python / Rust / Go / Java), and the HTML web-content extractor. Ported forward to current rtk with per-file SPDX headers preserving attribution. | MIT |
+| [jee599/contextzip](https://github.com/jee599/contextzip) | The session-JSONL compactor for Claude Code, the multi-language stacktrace compressor (Node / Python / Rust / Go / Java), and the HTML web-content extractor. Ported forward to current contextcrawler with per-file SPDX headers preserving attribution. | MIT |
 | [Tirith](https://tirith.sh) ([sheeki03/tirith](https://github.com/sheeki03/tirith)) | A shell-syntax security inspector. ContextCrawler invokes it via subprocess as an optional defense-in-depth gate on the auto-allow path — block-level findings downgrade the verdict to *Ask*. | AGPL-3.0 (subprocess-only) |
 
 Plus one capability **built in-tree**:
@@ -50,7 +50,7 @@ Make AI coding agents both **cheaper** and **safer** without changing how
 you work:
 
 - **Cheaper** — compress noisy command output before it eats your LLM
-  context window. Inherits rtk's 60+ command filters, adds session-log
+  context window. Inherits upstream rtk's 60+ command filters, adds session-log
   compaction, HTML extraction, multi-language stacktrace compression.
 - **Safer** — when an agent proposes a shell command, run it past two
   optional gates before auto-approving: shell-syntax inspection (Tirith)
@@ -62,7 +62,7 @@ you work:
 Grouped by which upstream the capability comes from. Everything is one
 binary; the split is for navigation, not packaging.
 
-### 1. Context & cache (from rtk + contextzip)
+### 1. Context & cache (from upstream rtk + contextzip)
 
 | Command | Purpose | Source |
 |---|---|---|
@@ -92,7 +92,7 @@ linked AGPL code.
 
 | Variable | Effect |
 |---|---|
-| *(default)* | fail-open: if Tirith isn't installed, no gate, original rtk verdict stands |
+| *(default)* | fail-open: if Tirith isn't installed, no gate, original contextcrawler verdict stands |
 | `CONTEXTCRAWLER_TIRITH_REQUIRED=1` | fail-closed: refuse auto-allow without a working Tirith verdict |
 | `CONTEXTCRAWLER_TIRITH_DISABLED=1` | bypass the gate entirely (debug only) |
 
@@ -204,7 +204,7 @@ flowchart TB
     CZIP["jee599/contextzip<br/>(MIT)<br/>session compactor<br/>error_cmd, web_cmd"]
     TIRITH["sheeki03/tirith<br/>(AGPL-3.0)<br/>shell-command<br/>security gate"]
 
-    FORK["rtk fork branch:<br/>contextzip-downstream<br/>sentinel-blocked patches"]
+    FORK["contextcrawler fork branch:<br/>contextzip-downstream<br/>sentinel-blocked patches"]
     PATCHES["Downstream modules:<br/>supply_chain_gate<br/>tirith_gate<br/>security_cmd<br/>session_compact_cmd<br/>web_cmd · error_cmd"]
     BIN["<code>contextcrawler</code><br/>single Rust binary"]
     USERS["You / Claude / Cursor /<br/>Copilot / Gemini / OpenCode"]
@@ -232,7 +232,7 @@ flowchart TB
     AGENT["Claude / Cursor /<br/>Copilot / Gemini"]
     AGENT -- "Bash tool call" --> HOOK["contextcrawler hook &lt;agent&gt;"]
 
-    HOOK --> RW{"rtk-style<br/>rewrite available?"}
+    HOOK --> RW{"ctxcrl-style<br/>rewrite available?"}
     RW -- "no" --> PASS["pass through<br/>(agent's normal prompt)"]
     RW -- "yes" --> VERDICT{"user's<br/>allow / ask / deny<br/>rules"}
 
@@ -246,7 +246,7 @@ flowchart TB
     SC_GATE -- "block<br/>(age / CVE)" --> ASK
     SC_GATE -- "allow / skip" --> AUTO["auto-allow<br/>permissionDecision: allow"]
 
-    AUTO --> RUN["command runs<br/>through rtk's filters"]
+    AUTO --> RUN["command runs<br/>through contextcrawler's filters"]
     RUN --> OUTPUT["compressed output<br/>back to agent"]
 
     classDef gate fill:#2a0a2e,stroke:#e83e8c,color:#fff

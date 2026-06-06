@@ -1,6 +1,6 @@
 //! Claude Code Economics: Spending vs Savings Analysis
 //!
-//! Combines ccusage (tokens spent) with rtk tracking (tokens saved) to provide
+//! Combines ccusage (tokens spent) with ctxcrl tracking (tokens saved) to provide
 //! dual-metric economic impact reporting with blended and active cost-per-token.
 
 use anyhow::{Context, Result};
@@ -34,10 +34,10 @@ pub struct PeriodEconomics {
     pub cc_output_tokens: Option<u64>,
     pub cc_cache_create_tokens: Option<u64>,
     pub cc_cache_read_tokens: Option<u64>,
-    // rtk metrics
-    pub rtk_commands: Option<usize>,
+    // ctxcrl metrics
+    pub ctxcrl_commands: Option<usize>,
     pub ctxcrl_saved_tokens: Option<usize>,
-    pub rtk_savings_pct: Option<f64>,
+    pub ctxcrl_savings_pct: Option<f64>,
     // Primary metric (weighted input CPT)
     pub weighted_input_cpt: Option<f64>, // Derived input CPT using API ratios
     pub savings_weighted: Option<f64>,   // saved * weighted_input_cpt (PRIMARY)
@@ -59,9 +59,9 @@ impl PeriodEconomics {
             cc_output_tokens: None,
             cc_cache_create_tokens: None,
             cc_cache_read_tokens: None,
-            rtk_commands: None,
+            ctxcrl_commands: None,
             ctxcrl_saved_tokens: None,
-            rtk_savings_pct: None,
+            ctxcrl_savings_pct: None,
             weighted_input_cpt: None,
             savings_weighted: None,
             blended_cpt: None,
@@ -86,22 +86,22 @@ impl PeriodEconomics {
         self.cc_active_tokens = Some(active);
     }
 
-    fn set_rtk_from_day(&mut self, stats: &DayStats) {
-        self.rtk_commands = Some(stats.commands);
+    fn set_ctxcrl_from_day(&mut self, stats: &DayStats) {
+        self.ctxcrl_commands = Some(stats.commands);
         self.ctxcrl_saved_tokens = Some(stats.saved_tokens);
-        self.rtk_savings_pct = Some(stats.savings_pct);
+        self.ctxcrl_savings_pct = Some(stats.savings_pct);
     }
 
-    fn set_rtk_from_week(&mut self, stats: &WeekStats) {
-        self.rtk_commands = Some(stats.commands);
+    fn set_ctxcrl_from_week(&mut self, stats: &WeekStats) {
+        self.ctxcrl_commands = Some(stats.commands);
         self.ctxcrl_saved_tokens = Some(stats.saved_tokens);
-        self.rtk_savings_pct = Some(stats.savings_pct);
+        self.ctxcrl_savings_pct = Some(stats.savings_pct);
     }
 
-    fn set_rtk_from_month(&mut self, stats: &MonthStats) {
-        self.rtk_commands = Some(stats.commands);
+    fn set_ctxcrl_from_month(&mut self, stats: &MonthStats) {
+        self.ctxcrl_commands = Some(stats.commands);
         self.ctxcrl_saved_tokens = Some(stats.saved_tokens);
-        self.rtk_savings_pct = Some(if stats.input_tokens + stats.output_tokens > 0 {
+        self.ctxcrl_savings_pct = Some(if stats.input_tokens + stats.output_tokens > 0 {
             stats.saved_tokens as f64
                 / (stats.saved_tokens + stats.input_tokens + stats.output_tokens) as f64
                 * 100.0
@@ -166,11 +166,11 @@ struct Totals {
     cc_output_tokens: u64,
     cc_cache_create_tokens: u64,
     cc_cache_read_tokens: u64,
-    rtk_commands: usize,
+    ctxcrl_commands: usize,
     ctxcrl_saved_tokens: usize,
     /// Volume-weighted savings pct. `None` when there is no ccusage baseline
     /// to compare against — see `compute_totals` for the gating rationale.
-    rtk_avg_savings_pct: Option<f64>,
+    ctxcrl_avg_savings_pct: Option<f64>,
     weighted_input_cpt: Option<f64>,
     savings_weighted: Option<f64>,
     blended_cpt: Option<f64>,
@@ -200,7 +200,7 @@ pub fn run(
 
 // ── Merge Logic ──
 
-fn merge_daily(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<DayStats>) -> Vec<PeriodEconomics> {
+fn merge_daily(cc: Option<Vec<CcusagePeriod>>, ctxcrl: Vec<DayStats>) -> Vec<PeriodEconomics> {
     let mut map: HashMap<String, PeriodEconomics> = HashMap::new();
 
     // Insert ccusage data
@@ -213,11 +213,11 @@ fn merge_daily(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<DayStats>) -> Vec<Period
         }
     }
 
-    // Merge rtk data
-    for entry in rtk {
+    // Merge ctxcrl data
+    for entry in ctxcrl {
         map.entry(entry.date.clone())
             .or_insert_with_key(|k| PeriodEconomics::new(k))
-            .set_rtk_from_day(&entry);
+            .set_ctxcrl_from_day(&entry);
     }
 
     // Compute dual metrics and sort
@@ -230,7 +230,7 @@ fn merge_daily(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<DayStats>) -> Vec<Period
     result
 }
 
-fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<PeriodEconomics> {
+fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, ctxcrl: Vec<WeekStats>) -> Vec<PeriodEconomics> {
     let mut map: HashMap<String, PeriodEconomics> = HashMap::new();
 
     // Insert ccusage data (key = ISO Monday "2026-01-20")
@@ -243,9 +243,9 @@ fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<Peri
         }
     }
 
-    // Merge rtk data (week_start = legacy Saturday "2026-01-18")
+    // Merge ctxcrl data (week_start = legacy Saturday "2026-01-18")
     // Convert Saturday to Monday for alignment
-    for entry in rtk {
+    for entry in ctxcrl {
         let monday_key = match convert_saturday_to_monday(&entry.week_start) {
             Some(m) => m,
             None => {
@@ -256,7 +256,7 @@ fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<Peri
 
         map.entry(monday_key)
             .or_insert_with_key(|key| PeriodEconomics::new(key))
-            .set_rtk_from_week(&entry);
+            .set_ctxcrl_from_week(&entry);
     }
 
     let mut result: Vec<_> = map.into_values().collect();
@@ -268,7 +268,7 @@ fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<Peri
     result
 }
 
-fn merge_monthly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<MonthStats>) -> Vec<PeriodEconomics> {
+fn merge_monthly(cc: Option<Vec<CcusagePeriod>>, ctxcrl: Vec<MonthStats>) -> Vec<PeriodEconomics> {
     let mut map: HashMap<String, PeriodEconomics> = HashMap::new();
 
     // Insert ccusage data
@@ -281,11 +281,11 @@ fn merge_monthly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<MonthStats>) -> Vec<Pe
         }
     }
 
-    // Merge rtk data
-    for entry in rtk {
+    // Merge ctxcrl data
+    for entry in ctxcrl {
         map.entry(entry.month.clone())
             .or_insert_with_key(|k| PeriodEconomics::new(k))
-            .set_rtk_from_month(&entry);
+            .set_ctxcrl_from_month(&entry);
     }
 
     let mut result: Vec<_> = map.into_values().collect();
@@ -299,12 +299,12 @@ fn merge_monthly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<MonthStats>) -> Vec<Pe
 
 // ── Helpers ──
 
-/// Convert Saturday week_start (legacy rtk) to ISO Monday
+/// Convert Saturday week_start (legacy ctxcrl) to ISO Monday
 /// Example: "2026-01-18" (Sat) -> "2026-01-20" (Mon)
 fn convert_saturday_to_monday(saturday: &str) -> Option<String> {
     let sat_date = NaiveDate::parse_from_str(saturday, "%Y-%m-%d").ok()?;
 
-    // rtk uses Saturday as week start, ISO uses Monday
+    // ctxcrl uses Saturday as week start, ISO uses Monday
     // Saturday + 2 days = Monday
     let monday = sat_date + chrono::TimeDelta::try_days(2)?;
 
@@ -320,9 +320,9 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
         cc_output_tokens: 0,
         cc_cache_create_tokens: 0,
         cc_cache_read_tokens: 0,
-        rtk_commands: 0,
+        ctxcrl_commands: 0,
         ctxcrl_saved_tokens: 0,
-        rtk_avg_savings_pct: None,
+        ctxcrl_avg_savings_pct: None,
         weighted_input_cpt: None,
         savings_weighted: None,
         blended_cpt: None,
@@ -353,8 +353,8 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
         if let Some(cache_read) = p.cc_cache_read_tokens {
             totals.cc_cache_read_tokens += cache_read;
         }
-        if let Some(cmds) = p.rtk_commands {
-            totals.rtk_commands += cmds;
+        if let Some(cmds) = p.ctxcrl_commands {
+            totals.ctxcrl_commands += cmds;
         }
         if let Some(saved) = p.ctxcrl_saved_tokens {
             totals.ctxcrl_saved_tokens += saved;
@@ -364,7 +364,7 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
     // G7/#111: volume-weighted savings pct. The previous code took an
     // unweighted mean of each period's pct (1 cmd at 90% + 1000 at 10%
     // reported as 50%). Instead aggregate the underlying token volumes and
-    // derive a single pct — consistent with `set_rtk_from_month`'s
+    // derive a single pct — consistent with `set_ctxcrl_from_month`'s
     // `saved / (saved + input + output)` and `discover::effective_savings_pct`.
     //
     // #111 G7 follow-up: the pct is only meaningful when there IS a ccusage
@@ -376,7 +376,7 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
     let cc_baseline = totals.cc_input_tokens as usize + totals.cc_output_tokens as usize;
     let savings_denom = totals.ctxcrl_saved_tokens + cc_baseline;
     if cc_baseline > 0 && savings_denom > 0 {
-        totals.rtk_avg_savings_pct =
+        totals.ctxcrl_avg_savings_pct =
             Some(totals.ctxcrl_saved_tokens as f64 / savings_denom as f64 * 100.0);
     }
 
@@ -437,10 +437,10 @@ fn display_text(
 fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     let cc_monthly =
         ccusage::fetch(Granularity::Monthly).context("Failed to fetch ccusage monthly data")?;
-    let rtk_monthly = tracker
+    let ctxcrl_monthly = tracker
         .get_by_month()
         .context("Failed to load monthly token savings from database")?;
-    let periods = merge_monthly(cc_monthly, rtk_monthly);
+    let periods = merge_monthly(cc_monthly, ctxcrl_monthly);
 
     if periods.is_empty() {
         println!("No data available. Run some ContextCrawler commands to start tracking.");
@@ -476,7 +476,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     );
     println!();
 
-    println!("  ContextCrawler commands:      {}", totals.rtk_commands);
+    println!("  ContextCrawler commands:      {}", totals.ctxcrl_commands);
     println!(
         "  Tokens saved:                 {}",
         format_tokens(totals.ctxcrl_saved_tokens)
@@ -552,10 +552,10 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
 fn display_daily(tracker: &Tracker, verbose: u8) -> Result<()> {
     let cc_daily =
         ccusage::fetch(Granularity::Daily).context("Failed to fetch ccusage daily data")?;
-    let rtk_daily = tracker
+    let ctxcrl_daily = tracker
         .get_all_days()
         .context("Failed to load daily token savings from database")?;
-    let periods = merge_daily(cc_daily, rtk_daily);
+    let periods = merge_daily(cc_daily, ctxcrl_daily);
 
     println!("Daily Economics");
     println!("════════════════════════════════════════════════════");
@@ -566,10 +566,10 @@ fn display_daily(tracker: &Tracker, verbose: u8) -> Result<()> {
 fn display_weekly(tracker: &Tracker, verbose: u8) -> Result<()> {
     let cc_weekly =
         ccusage::fetch(Granularity::Weekly).context("Failed to fetch ccusage weekly data")?;
-    let rtk_weekly = tracker
+    let ctxcrl_weekly = tracker
         .get_by_week()
         .context("Failed to load weekly token savings from database")?;
-    let periods = merge_weekly(cc_weekly, rtk_weekly);
+    let periods = merge_weekly(cc_weekly, ctxcrl_weekly);
 
     println!("Weekly Economics");
     println!("════════════════════════════════════════════════════");
@@ -580,10 +580,10 @@ fn display_weekly(tracker: &Tracker, verbose: u8) -> Result<()> {
 fn display_monthly(tracker: &Tracker, verbose: u8) -> Result<()> {
     let cc_monthly =
         ccusage::fetch(Granularity::Monthly).context("Failed to fetch ccusage monthly data")?;
-    let rtk_monthly = tracker
+    let ctxcrl_monthly = tracker
         .get_by_month()
         .context("Failed to load monthly token savings from database")?;
-    let periods = merge_monthly(cc_monthly, rtk_monthly);
+    let periods = merge_monthly(cc_monthly, ctxcrl_monthly);
 
     println!("Monthly Economics");
     println!("════════════════════════════════════════════════════");
@@ -598,7 +598,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
         // Verbose: include legacy metrics
         println!(
             "{:<12} {:>10} {:>10} {:>10} {:>10} {:>12} {:>12}",
-            "Period", "Spent", "Saved", "Savings", "Active$", "Blended$", "RTK Cmds"
+            "Period", "Spent", "Saved", "Savings", "Active$", "Blended$", "CTXCRL Cmds"
         );
         println!(
             "{:-<12} {:-<10} {:-<10} {:-<10} {:-<10} {:-<12} {:-<12}",
@@ -624,7 +624,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
                 .map(format_usd)
                 .unwrap_or_else(|| "—".to_string());
             let cmds = p
-                .rtk_commands
+                .ctxcrl_commands
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "—".to_string());
 
@@ -637,7 +637,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
         // Default: single Savings column
         println!(
             "{:<12} {:>10} {:>10} {:>10} {:>12}",
-            "Period", "Spent", "Saved", "Savings", "RTK Cmds"
+            "Period", "Spent", "Saved", "Savings", "CTXCRL Cmds"
         );
         println!(
             "{:-<12} {:-<10} {:-<10} {:-<10} {:-<12}",
@@ -655,7 +655,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
                 .map(format_usd)
                 .unwrap_or_else(|| "—".to_string());
             let cmds = p
-                .rtk_commands
+                .ctxcrl_commands
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "—".to_string());
 
@@ -695,28 +695,28 @@ fn export_json(
     if all || daily {
         let cc = ccusage::fetch(Granularity::Daily)
             .context("Failed to fetch ccusage daily data for JSON export")?;
-        let rtk = tracker
+        let ctxcrl = tracker
             .get_all_days()
             .context("Failed to load daily token savings for JSON export")?;
-        export.daily = Some(merge_daily(cc, rtk));
+        export.daily = Some(merge_daily(cc, ctxcrl));
     }
 
     if all || weekly {
         let cc = ccusage::fetch(Granularity::Weekly)
             .context("Failed to fetch ccusage weekly data for export")?;
-        let rtk = tracker
+        let ctxcrl = tracker
             .get_by_week()
             .context("Failed to load weekly token savings for export")?;
-        export.weekly = Some(merge_weekly(cc, rtk));
+        export.weekly = Some(merge_weekly(cc, ctxcrl));
     }
 
     if all || monthly {
         let cc = ccusage::fetch(Granularity::Monthly)
             .context("Failed to fetch ccusage monthly data for export")?;
-        let rtk = tracker
+        let ctxcrl = tracker
             .get_by_month()
             .context("Failed to load monthly token savings for export")?;
-        let periods = merge_monthly(cc, rtk);
+        let periods = merge_monthly(cc, ctxcrl);
         export.totals = Some(compute_totals(&periods));
         export.monthly = Some(periods);
     }
@@ -737,15 +737,15 @@ fn export_csv(
     all: bool,
 ) -> Result<()> {
     // Header (new columns: input_tokens, output_tokens, cache_create, cache_read, weighted_savings)
-    println!("period,spent,input_tokens,output_tokens,cache_create,cache_read,active_tokens,total_tokens,saved_tokens,weighted_savings,active_savings,blended_savings,rtk_commands");
+    println!("period,spent,input_tokens,output_tokens,cache_create,cache_read,active_tokens,total_tokens,saved_tokens,weighted_savings,active_savings,blended_savings,ctxcrl_commands");
 
     if all || daily {
         let cc = ccusage::fetch(Granularity::Daily)
             .context("Failed to fetch ccusage daily data for JSON export")?;
-        let rtk = tracker
+        let ctxcrl = tracker
             .get_all_days()
             .context("Failed to load daily token savings for JSON export")?;
-        let periods = merge_daily(cc, rtk);
+        let periods = merge_daily(cc, ctxcrl);
         for p in periods {
             print_csv_row(&p);
         }
@@ -754,10 +754,10 @@ fn export_csv(
     if all || weekly {
         let cc = ccusage::fetch(Granularity::Weekly)
             .context("Failed to fetch ccusage weekly data for export")?;
-        let rtk = tracker
+        let ctxcrl = tracker
             .get_by_week()
             .context("Failed to load weekly token savings for export")?;
-        let periods = merge_weekly(cc, rtk);
+        let periods = merge_weekly(cc, ctxcrl);
         for p in periods {
             print_csv_row(&p);
         }
@@ -766,10 +766,10 @@ fn export_csv(
     if all || monthly {
         let cc = ccusage::fetch(Granularity::Monthly)
             .context("Failed to fetch ccusage monthly data for export")?;
-        let rtk = tracker
+        let ctxcrl = tracker
             .get_by_month()
             .context("Failed to load monthly token savings for export")?;
-        let periods = merge_monthly(cc, rtk);
+        let periods = merge_monthly(cc, ctxcrl);
         for p in periods {
             print_csv_row(&p);
         }
@@ -814,7 +814,7 @@ fn print_csv_row(p: &PeriodEconomics) {
         .savings_blended
         .map(|s| format!("{:.4}", s))
         .unwrap_or_default();
-    let cmds = p.rtk_commands.map(|c| c.to_string()).unwrap_or_default();
+    let cmds = p.ctxcrl_commands.map(|c| c.to_string()).unwrap_or_default();
 
     println!(
         "{},{},{},{},{},{},{},{},{},{},{},{},{}",
@@ -855,7 +855,7 @@ mod tests {
         let p = PeriodEconomics::new("2026-01");
         assert_eq!(p.label, "2026-01");
         assert!(p.cc_cost.is_none());
-        assert!(p.rtk_commands.is_none());
+        assert!(p.ctxcrl_commands.is_none());
     }
 
     #[test]
@@ -928,7 +928,7 @@ mod tests {
             },
         }];
 
-        let rtk = vec![MonthStats {
+        let ctxcrl = vec![MonthStats {
             month: "2026-01".to_string(),
             commands: 10,
             input_tokens: 800,
@@ -939,11 +939,11 @@ mod tests {
             avg_time_ms: 0,
         }];
 
-        let merged = merge_monthly(Some(cc), rtk);
+        let merged = merge_monthly(Some(cc), ctxcrl);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].label, "2026-01");
         assert_eq!(merged[0].cc_cost, Some(12.34));
-        assert_eq!(merged[0].rtk_commands, Some(10));
+        assert_eq!(merged[0].ctxcrl_commands, Some(10));
     }
 
     #[test]
@@ -963,12 +963,12 @@ mod tests {
         let merged = merge_monthly(Some(cc), vec![]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].cc_cost, Some(12.34));
-        assert!(merged[0].rtk_commands.is_none());
+        assert!(merged[0].ctxcrl_commands.is_none());
     }
 
     #[test]
-    fn test_merge_monthly_only_rtk() {
-        let rtk = vec![MonthStats {
+    fn test_merge_monthly_only_ctxcrl() {
+        let ctxcrl = vec![MonthStats {
             month: "2026-01".to_string(),
             commands: 10,
             input_tokens: 800,
@@ -979,15 +979,15 @@ mod tests {
             avg_time_ms: 0,
         }];
 
-        let merged = merge_monthly(None, rtk);
+        let merged = merge_monthly(None, ctxcrl);
         assert_eq!(merged.len(), 1);
         assert!(merged[0].cc_cost.is_none());
-        assert_eq!(merged[0].rtk_commands, Some(10));
+        assert_eq!(merged[0].ctxcrl_commands, Some(10));
     }
 
     #[test]
     fn test_merge_monthly_sorted() {
-        let rtk = vec![
+        let ctxcrl = vec![
             MonthStats {
                 month: "2026-03".to_string(),
                 commands: 5,
@@ -1010,7 +1010,7 @@ mod tests {
             },
         ];
 
-        let merged = merge_monthly(None, rtk);
+        let merged = merge_monthly(None, ctxcrl);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].label, "2026-01");
         assert_eq!(merged[1].label, "2026-03");
@@ -1116,9 +1116,9 @@ mod tests {
                 cc_output_tokens: Some(5000),
                 cc_cache_create_tokens: Some(100),
                 cc_cache_read_tokens: Some(984_900),
-                rtk_commands: Some(5),
+                ctxcrl_commands: Some(5),
                 ctxcrl_saved_tokens: Some(2000),
-                rtk_savings_pct: Some(50.0),
+                ctxcrl_savings_pct: Some(50.0),
                 weighted_input_cpt: None,
                 savings_weighted: None,
                 blended_cpt: None,
@@ -1135,9 +1135,9 @@ mod tests {
                 cc_output_tokens: Some(10_000),
                 cc_cache_create_tokens: Some(200),
                 cc_cache_read_tokens: Some(1_979_800),
-                rtk_commands: Some(10),
+                ctxcrl_commands: Some(10),
                 ctxcrl_saved_tokens: Some(3000),
-                rtk_savings_pct: Some(60.0),
+                ctxcrl_savings_pct: Some(60.0),
                 weighted_input_cpt: None,
                 savings_weighted: None,
                 blended_cpt: None,
@@ -1153,12 +1153,12 @@ mod tests {
         assert_eq!(totals.cc_active_tokens, 30_000);
         assert_eq!(totals.cc_input_tokens, 15_000);
         assert_eq!(totals.cc_output_tokens, 15_000);
-        assert_eq!(totals.rtk_commands, 15);
+        assert_eq!(totals.ctxcrl_commands, 15);
         assert_eq!(totals.ctxcrl_saved_tokens, 5000);
         // G7/#111: volume-weighted, not an unweighted mean of (50%, 60%).
         // saved=5000, input=15000, output=15000 → 5000/35000 = 14.2857%
         let pct = totals
-            .rtk_avg_savings_pct
+            .ctxcrl_avg_savings_pct
             .expect("ccusage baseline present → Some");
         assert!(
             (pct - (5000.0 / 35_000.0 * 100.0)).abs() < 1e-9,
@@ -1191,7 +1191,7 @@ mod tests {
                 cc_input_tokens: Some(50),
                 cc_output_tokens: Some(50),
                 ctxcrl_saved_tokens: Some(900),
-                rtk_savings_pct: Some(90.0),
+                ctxcrl_savings_pct: Some(90.0),
                 ..PeriodEconomics::new("2026-01")
             },
             PeriodEconomics {
@@ -1199,7 +1199,7 @@ mod tests {
                 cc_input_tokens: Some(4500),
                 cc_output_tokens: Some(4500),
                 ctxcrl_saved_tokens: Some(1000),
-                rtk_savings_pct: Some(10.0),
+                ctxcrl_savings_pct: Some(10.0),
                 ..PeriodEconomics::new("2026-02")
             },
         ];
@@ -1208,7 +1208,7 @@ mod tests {
         // Hand-computed volume-weighted value.
         let expected = 1900.0 / 11_000.0 * 100.0; // ≈ 17.2727%
         let pct = totals
-            .rtk_avg_savings_pct
+            .ctxcrl_avg_savings_pct
             .expect("ccusage baseline present → Some");
         assert!(
             (pct - expected).abs() < 1e-9,
@@ -1223,19 +1223,19 @@ mod tests {
 
     #[test]
     fn test_compute_totals_no_ccusage_baseline_not_100pct() {
-        // #111 G7 follow-up: RTK saved tokens but ZERO ccusage input/output.
+        // #111 G7 follow-up: CTXCRL saved tokens but ZERO ccusage input/output.
         // Without a baseline the old formula degenerated to saved/saved = 100%.
         // The metric must NOT report 100% — it has no baseline, so it is None.
         let periods = vec![
             PeriodEconomics {
                 label: "2026-01".to_string(),
-                rtk_commands: Some(5),
+                ctxcrl_commands: Some(5),
                 ctxcrl_saved_tokens: Some(8000),
                 ..PeriodEconomics::new("2026-01")
             },
             PeriodEconomics {
                 label: "2026-02".to_string(),
-                rtk_commands: Some(3),
+                ctxcrl_commands: Some(3),
                 ctxcrl_saved_tokens: Some(2000),
                 ..PeriodEconomics::new("2026-02")
             },
@@ -1247,9 +1247,9 @@ mod tests {
         assert_eq!(totals.cc_output_tokens, 0);
         // No ccusage baseline → no meaningful pct. Must be None, never 100%.
         assert!(
-            totals.rtk_avg_savings_pct.is_none(),
+            totals.ctxcrl_avg_savings_pct.is_none(),
             "no ccusage baseline must yield None, got {:?}",
-            totals.rtk_avg_savings_pct
+            totals.ctxcrl_avg_savings_pct
         );
     }
 }

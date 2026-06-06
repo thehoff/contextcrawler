@@ -59,7 +59,7 @@ pub enum AgentTarget {
     name = "contextcrawler",
     version,
     about = "ContextCrawler — token-optimized CLI proxy for LLM agents",
-    long_about = "Downstream of rtk-ai/rtk: filters and compresses command output before it reaches your LLM context, with the contextzip session compactor and an opt-in Tirith defense-in-depth gate."
+    long_about = "Downstream of rtk-ai/rtk: filters and compresses command output before it reaches your LLM context, with the session compactor and an opt-in Tirith defense-in-depth gate."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -709,7 +709,7 @@ enum Commands {
         #[arg(long)]
         list: bool,
         /// Operate on the user-global `~/.config/contextcrawler/filters.toml`
-        /// instead of project-local `.rtk/filters.toml`. Closes the H-3
+        /// instead of project-local `.ctxcrl/filters.toml`. Closes the H-3
         /// audit gap (v0.1.6) by exposing the global trust gate to the CLI.
         #[arg(long)]
         global: bool,
@@ -1208,9 +1208,9 @@ enum GoCommands {
     Other(Vec<OsString>),
 }
 
-/// RTK-only subcommands that should never fall back to raw execution.
+/// CTXCRL-only subcommands that should never fall back to raw execution.
 /// If Clap fails to parse these, show the Clap error directly.
-const RTK_META_COMMANDS: &[&str] = &[
+const CTXCRL_META_COMMANDS: &[&str] = &[
     "gain",
     "discover",
     "learn",
@@ -1305,14 +1305,14 @@ fn cloud_fallback_hardening(tool: &str, args: &[String]) -> Option<i32> {
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // No args → show Clap's error (user ran just "rtk" with bad syntax)
+    // No args → show Clap's error (user ran just "contextcrawler" with bad syntax)
     if args.is_empty() {
         parse_error.exit();
     }
 
-    // RTK meta-commands should never fall back to raw execution.
-    // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
-    if RTK_META_COMMANDS.contains(&args[0].as_str()) {
+    // CTXCRL meta-commands should never fall back to raw execution.
+    // e.g. `contextcrawler gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
+    if CTXCRL_META_COMMANDS.contains(&args[0].as_str()) {
         parse_error.exit();
     }
 
@@ -1606,7 +1606,7 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
     // Check if this is a Build or Typecheck command with filters
     match command {
         PnpmCommands::Typecheck { .. } => {
-            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
+            // FIXME: if filters are present, we should find out which workspaces are selected before running ctxcrl dedicated commands
             if !filters.is_empty() {
                 let cmd_name = match command {
                     PnpmCommands::Typecheck { .. } => "tsc",
@@ -1641,7 +1641,7 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
 /// a private IP can still slip through via `--max-redirs`. The proper fix
 /// is per-redirect-hop validation which would replace curl with a Rust
 /// HTTP client we control end-to-end — tracked in docs/ROADMAP.md.
-// Preserved for future SSRF wiring (was previously used by the contextzip
+// Preserved for future SSRF wiring (was previously used by the
 // web_cmd.rs that's been removed). Re-wire from curl/wget filter or a
 // future Rust HTTP client; the IP classification logic is the expensive
 // part to re-derive and is worth keeping in tree.
@@ -1786,7 +1786,7 @@ fn run_simple_passthrough(cmd: &str, args: &[String]) -> Result<i32> {
 }
 
 /// Documented grep format flags that should run raw rather than go through
-/// rtk's filter. Short letters are matched anywhere inside a single-`-` bundle
+/// ctxcrl's filter. Short letters are matched anywhere inside a single-`-` bundle
 /// (e.g. `-c`, `-ci`, `-cE`). Long forms match exactly.
 ///
 /// `-l` is a special case (issue #97). clap's `Grep` variant claims `-l` for
@@ -1870,7 +1870,7 @@ enum GrepPreprocess {
     Quiet(Vec<String>),
 }
 
-/// Boolean (valueless) standard grep flags that the rtk-backed filter can
+/// Boolean (valueless) standard grep flags that the ctxcrl-backed filter can
 /// forward to rg and still filter the output normally. These are reordered
 /// behind the positional pattern/path so clap parses them as `extra_args`.
 /// `r`/`R`/`E` are NOT here — they are stripped separately (no-ops for rg).
@@ -2030,7 +2030,7 @@ fn preprocess_grep_args(args: Vec<String>) -> GrepPreprocess {
     // Pass 3: detect context flags, the print-filename flag (`-H`), or a
     // value-taking flag (`-e`/`-f`/`-m`/`--include`/…). If any present, route
     // to passthrough — rg honours `-A`/`-B`/`-C`, `-H` and value flags
-    // natively, the rtk-backed line-by-line filter can't reorder them safely.
+    // natively, the ctxcrl-backed line-by-line filter can't reorder them safely.
     if has_grep_context_flag(&stripped)
         || has_grep_with_filename_flag(&stripped)
         || stripped.iter().any(|a| is_grep_value_flag(a))
@@ -2135,8 +2135,8 @@ fn has_grep_with_filename_flag(args: &[String]) -> bool {
 /// Run the user's grep command through `rg` (ripgrep), bypassing clap and
 /// parse_failure tracking. We route through `rg` rather than bare `grep`
 /// because rg understands both the documented format flags (`-c`, `-L`, `-o`,
-/// `--null`, `--count`, `--files-with-matches`, etc.) AND the rtk-extra
-/// options the rtk-backed grep path accepts (`--glob`, `--type`/`-t`,
+/// `--null`, `--count`, `--files-with-matches`, etc.) AND the ctxcrl-extra
+/// options the ctxcrl-backed grep path accepts (`--glob`, `--type`/`-t`,
 /// `--include`). Falls back to system `grep` only if rg cannot be located.
 fn run_grep_format_passthrough(args: &[String]) -> Result<i32> {
     run_grep_passthrough_labelled(args, "format-flag passthrough")
@@ -2201,7 +2201,7 @@ fn run_grep_passthrough_labelled(args: &[String], route: &str) -> Result<i32> {
 /// ensures a small result is never inflated by the framing.
 ///
 /// Falls back to a raw passthrough run if rg cannot be located or capture
-/// fails, so the user always gets their matches (RTK fallback discipline).
+/// fails, so the user always gets their matches (ContextCrawler fallback discipline).
 fn run_grep_context_filtered(args: &[String]) -> Result<i32> {
     let raw_command = args.join(" ");
     let timer = core::tracking::TimedExecution::start();
@@ -2214,7 +2214,7 @@ fn run_grep_context_filtered(args: &[String]) -> Result<i32> {
         return Ok(2);
     }
 
-    // rtk-backed filtering needs rg's grouped, machine-parseable output. If rg
+    // ctxcrl-backed filtering needs rg's grouped, machine-parseable output. If rg
     // is not on PATH, fall back to the raw passthrough (system grep) path —
     // we can't reliably filter arbitrary system-grep context output.
     if which::which("rg").is_err() {
@@ -3155,7 +3155,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Tree { args } => tree::run(&args, cli.verbose)?,
 
-        // ISSUE #989: support multiple files (cat file1 file2 → rtk read file1 file2)
+        // ISSUE #989: support multiple files (cat file1 file2 → contextcrawler read file1 file2)
         Commands::Read {
             files,
             level,
@@ -3628,13 +3628,13 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_copilot(ctx)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
-                    anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
+                    anyhow::bail!("Kilo Code is project-scoped. Use: contextcrawler init --agent kilocode");
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
                 if global {
                     anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
+                        "Antigravity is project-scoped. Use: contextcrawler init --agent antigravity"
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
@@ -4847,9 +4847,9 @@ mod tests {
 
     #[test]
     fn test_meta_commands_reject_bad_flags() {
-        // RTK meta-commands should produce parse errors (not fall through to raw execution).
+        // CTXCRL meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
-        for cmd in RTK_META_COMMANDS {
+        for cmd in CTXCRL_META_COMMANDS {
             if matches!(*cmd, "proxy" | "run" | "rewrite" | "session") {
                 continue; // these use trailing_var_arg (accept any args by design)
             }

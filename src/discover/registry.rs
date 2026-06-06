@@ -1,4 +1,4 @@
-//! Matches shell commands against known RTK rewrite rules to decide how to handle them.
+//! Matches shell commands against known CTXCRL rewrite rules to decide how to handle them.
 
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
@@ -79,7 +79,7 @@ lazy_static! {
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
-    // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
+    // `==> name <==` banners that `ctxcrl read --max-lines` cannot reproduce.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
@@ -455,7 +455,7 @@ fn strip_absolute_path(cmd: &str) -> String {
 /// assignment `FOO` = `RTK_DISABLED=1`, so the substring is present even
 /// though `RTK_DISABLED` was never genuinely set. Parse into individual
 /// `KEY=VALUE` tokens and match the key name precisely.
-pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
+pub fn prefix_contains_ctxcrl_disabled(prefix_part: &str) -> bool {
     env_prefix_assignments(prefix_part)
         .iter()
         .any(|(key, _)| *key == "CTXCRL_DISABLED" || *key == "RTK_DISABLED")
@@ -492,9 +492,9 @@ fn env_prefix_assignments(prefix_part: &str) -> Vec<(&str, &str)> {
 }
 
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
-pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
+pub fn cmd_has_ctxcrl_disabled_prefix(cmd: &str) -> bool {
     let (prefix_part, _) = strip_disabled_prefix(cmd);
-    prefix_contains_rtk_disabled(prefix_part)
+    prefix_contains_ctxcrl_disabled(prefix_part)
 }
 
 /// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
@@ -726,7 +726,7 @@ pub fn rewrite_command(
     let compiled = compile_exclude_patterns(excluded);
     let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
 
-    // Simple (non-compound) already-RTK command — return as-is.
+    // Simple (non-compound) already-CTXCRL command — return as-is.
     // For compound commands that start with "rtk" (e.g. "contextcrawler git add . && cargo test"),
     // fall through to rewrite_compound so the remaining segments get rewritten.
     let has_compound = trimmed.contains("&&")
@@ -987,7 +987,7 @@ fn rewrite_segment_inner(
         // #508: warn on stderr so agents learn to stop overusing it
         // G7/#100: match the EXACT key, not a substring — a crafted prefix
         // like `FOO=RTK_DISABLED=1 cmd` must NOT disable rewriting.
-        if prefix_contains_rtk_disabled(env_prefix) {
+        if prefix_contains_ctxcrl_disabled(env_prefix) {
             eprintln!(
                 "[contextcrawler] RTK_DISABLED=1 detected — skipping filter for this command. \
                  Remove RTK_DISABLED=1 to restore token savings."
@@ -1075,7 +1075,7 @@ fn rewrite_segment_inner(
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
 
-    // Already RTK — pass through unchanged
+    // Already CTXCRL — pass through unchanged
     if cmd_part.starts_with("contextcrawler ")
         || cmd_part.starts_with("rtk ")
         || cmd_part == "contextcrawler"
@@ -1089,8 +1089,8 @@ fn rewrite_segment_inner(
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
-    // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
-    // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
+    // semantics than ctxcrl read or no equivalent at all. Only `-n` (line numbers)
+    // maps correctly to `ctxcrl read -n`. Skip rewrite for any other flag.
     if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
         let args = cmd_args.trim_start();
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
@@ -1136,7 +1136,7 @@ fn rewrite_segment_inner(
     }
 
     // #196: gh with --json/--jq/--template produces structured output that
-    // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
+    // ctxcrl gh would corrupt — skip rewrite so the caller gets raw JSON.
     if rule.ctxcrl_cmd == "contextcrawler gh" {
         let args_lower = cmd_part_norm.to_lowercase();
         if args_lower.contains("--json")
@@ -1431,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_rtk_already() {
+    fn test_classify_ctxcrl_already() {
         assert_eq!(classify_command("contextcrawler git status"), Classification::Ignored);
     }
 
@@ -1885,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_already_rtk() {
+    fn test_rewrite_already_ctxcrl() {
         assert_eq!(
             rewrite_command_no_prefixes("contextcrawler git status", &[]),
             Some("contextcrawler git status".into())
@@ -2117,7 +2117,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_mixed_compound_partial() {
-        // First segment already RTK, second gets rewritten
+        // First segment already CTXCRL, second gets rewritten
         assert_eq!(
             rewrite_command_no_prefixes("contextcrawler git add . && cargo test", &[]),
             Some("contextcrawler git add . && contextcrawler cargo test".into())
@@ -2127,7 +2127,7 @@ mod tests {
     // --- #345: RTK_DISABLED ---
 
     #[test]
-    fn test_rewrite_rtk_disabled_curl() {
+    fn test_rewrite_ctxcrl_disabled_curl() {
         assert_eq!(
             rewrite_command_no_prefixes("RTK_DISABLED=1 curl https://example.com", &[]),
             None
@@ -2135,7 +2135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_rtk_disabled_git_status() {
+    fn test_rewrite_ctxcrl_disabled_git_status() {
         assert_eq!(
             rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
             None
@@ -2143,7 +2143,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_rtk_disabled_multi_env() {
+    fn test_rewrite_ctxcrl_disabled_multi_env() {
         assert_eq!(
             rewrite_command_no_prefixes("FOO=1 RTK_DISABLED=1 git status", &[]),
             None
@@ -2151,7 +2151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_rtk_disabled_warns_on_stderr() {
+    fn test_rewrite_ctxcrl_disabled_warns_on_stderr() {
         assert_eq!(
             rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
             None
@@ -2159,28 +2159,28 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_rtk_disabled_subprocess_warns() {
-        let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn test_rewrite_ctxcrl_disabled_subprocess_warns() {
+        let ctxcrl_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("debug")
             .join("rtk");
-        if !rtk_bin.exists() {
+        if !ctxcrl_bin.exists() {
             return;
         }
-        let rtk_mtime = std::fs::metadata(&rtk_bin)
+        let ctxcrl_mtime = std::fs::metadata(&ctxcrl_bin)
             .ok()
             .and_then(|m| m.modified().ok());
         let test_mtime = std::env::current_exe()
             .ok()
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime) {
-            if rtk_t < test_t {
+        if let (Some(ctxcrl_t), Some(test_t)) = (ctxcrl_mtime, test_mtime) {
+            if ctxcrl_t < test_t {
                 return;
             }
         }
 
-        let output = std::process::Command::new(&rtk_bin)
+        let output = std::process::Command::new(&ctxcrl_bin)
             .args(["rewrite", "RTK_DISABLED=1 git status"])
             .output()
             .expect("Failed to run rtk");
@@ -2198,7 +2198,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_non_rtk_disabled_env_still_rewrites() {
+    fn test_rewrite_non_ctxcrl_disabled_env_still_rewrites() {
         assert_eq!(
             rewrite_command_no_prefixes("SOME_VAR=1 git status", &[]),
             Some("SOME_VAR=1 contextcrawler git status".into())
@@ -3983,30 +3983,30 @@ mod tests {
     // --- #508: RTK_DISABLED detection helpers ---
 
     #[test]
-    fn test_cmd_has_rtk_disabled_prefix() {
-        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
-        assert!(cmd_has_rtk_disabled_prefix(
+    fn test_cmd_has_ctxcrl_disabled_prefix() {
+        assert!(cmd_has_ctxcrl_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(cmd_has_ctxcrl_disabled_prefix(
             "FOO=1 RTK_DISABLED=1 cargo test"
         ));
-        assert!(cmd_has_rtk_disabled_prefix(
+        assert!(cmd_has_ctxcrl_disabled_prefix(
             "RTK_DISABLED=true git log --oneline"
         ));
-        assert!(!cmd_has_rtk_disabled_prefix("git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("contextcrawler git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix("git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix("contextcrawler git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix("SOME_VAR=1 git status"));
     }
 
     // --- G7/#100: RTK_DISABLED key must be matched exactly, not as a substring ---
 
     #[test]
-    fn test_rtk_disabled_substring_does_not_bypass() {
+    fn test_ctxcrl_disabled_substring_does_not_bypass() {
         // A crafted prefix where RTK_DISABLED= appears inside another var's
         // VALUE must NOT count as setting RTK_DISABLED.
-        assert!(!cmd_has_rtk_disabled_prefix("FOO=RTK_DISABLED=1 git status"));
-        assert!(!cmd_has_rtk_disabled_prefix(
+        assert!(!cmd_has_ctxcrl_disabled_prefix("FOO=RTK_DISABLED=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
             "X=a RTK_DISABLED_NOT=1 git status"
         ));
-        assert!(!cmd_has_rtk_disabled_prefix("MY_RTK_DISABLED=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix("MY_RTK_DISABLED=1 git status"));
         // ...and rewriting must still happen for the crafted prefix.
         assert_eq!(
             rewrite_command_no_prefixes("FOO=RTK_DISABLED=1 git status", &[]),
@@ -4015,15 +4015,15 @@ mod tests {
     }
 
     #[test]
-    fn test_real_rtk_disabled_still_bypasses() {
+    fn test_real_ctxcrl_disabled_still_bypasses() {
         // A genuine RTK_DISABLED=1 assignment must still disable rewriting.
-        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(cmd_has_ctxcrl_disabled_prefix("RTK_DISABLED=1 git status"));
         assert_eq!(
             rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
             None
         );
         // ...even when preceded by other (innocuous) assignments.
-        assert!(cmd_has_rtk_disabled_prefix("FOO=bar RTK_DISABLED=1 git status"));
+        assert!(cmd_has_ctxcrl_disabled_prefix("FOO=bar RTK_DISABLED=1 git status"));
         assert_eq!(
             rewrite_command_no_prefixes("FOO=bar RTK_DISABLED=1 git status", &[]),
             None
@@ -4036,20 +4036,20 @@ mod tests {
     #[test]
     fn test_both_disable_prefixes_bypass() {
         // Canonical name (new).
-        assert!(cmd_has_rtk_disabled_prefix("CTXCRL_DISABLED=1 git status"));
+        assert!(cmd_has_ctxcrl_disabled_prefix("CTXCRL_DISABLED=1 git status"));
         assert_eq!(
             rewrite_command_no_prefixes("CTXCRL_DISABLED=1 git status", &[]),
             None
         );
         // Legacy name (deprecated, still honoured).
-        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(cmd_has_ctxcrl_disabled_prefix("RTK_DISABLED=1 git status"));
         assert_eq!(
             rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
             None
         );
         // Crafted substring of the canonical key must NOT bypass.
-        assert!(!cmd_has_rtk_disabled_prefix("FOO=CTXCRL_DISABLED=1 git status"));
-        assert!(!cmd_has_rtk_disabled_prefix("CTXCRL_DISABLED_NOT=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix("FOO=CTXCRL_DISABLED=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix("CTXCRL_DISABLED_NOT=1 git status"));
     }
 
     // --- G7/#100: only TRUE absolute paths are normalised to a bare binary ---

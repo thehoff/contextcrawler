@@ -230,7 +230,7 @@ All module `run()` functions return `Result<i32>` where the `i32` is the underly
 |--------------|---------|-----------|
 | `Ok(0)` | Command succeeded | `main.rs` exits 0 |
 | `Ok(N)` | Command failed with code N | `main.rs` exits N |
-| `Err(e)` | RTK itself failed (not the command) | `main.rs` prints error, exits 1 |
+| `Err(e)` | CTXCRL itself failed (not the command) | `main.rs` prints error, exits 1 |
 
 **How exit codes are extracted:**
 

@@ -14,7 +14,7 @@ the verdict when packages fail an age cooldown or carry a HIGH+ CVE.
 
 Trust placement: this module sits inside the
 `PermissionVerdict::Allow` codepath only. Documented in commit
-`f3bdc35` (gate-design comment). Anything not auto-allowed by RTK's
+`f3bdc35` (gate-design comment). Anything not auto-allowed by contextcrawler's
 permission engine never reaches this code.
 
 ## Verdict surface

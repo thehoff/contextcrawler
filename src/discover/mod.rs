@@ -1,4 +1,4 @@
-//! Scans AI coding sessions to find commands that could benefit from RTK filtering.
+//! Scans AI coding sessions to find commands that could benefit from CTXCRL filtering.
 
 pub mod codex;
 pub mod lexer;
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use reconcile::{is_runtime_tracked, load_tracked, TrackedCommand, DEFAULT_MATCH_WINDOW_SECS};
 use registry::{
-    category_avg_tokens, classify_command, cmd_has_rtk_disabled_prefix, split_command_chain,
+    category_avg_tokens, classify_command, cmd_has_ctxcrl_disabled_prefix, split_command_chain,
     strip_disabled_prefix, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
@@ -74,11 +74,11 @@ pub fn run(
     }
 
     let mut total_commands: usize = 0;
-    let mut already_rtk: usize = 0;
-    let mut rtk_via_runtime: usize = 0;
+    let mut already_ctxcrl: usize = 0;
+    let mut ctxcrl_via_runtime: usize = 0;
     let mut parse_errors: usize = 0;
-    let mut rtk_disabled_count: usize = 0;
-    let mut rtk_disabled_cmds: HashMap<String, usize> = HashMap::new();
+    let mut ctxcrl_disabled_count: usize = 0;
+    let mut ctxcrl_disabled_cmds: HashMap<String, usize> = HashMap::new();
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
@@ -165,10 +165,10 @@ pub fn run(
         &tracked,
         DEFAULT_MATCH_WINDOW_SECS,
         &mut total_commands,
-        &mut already_rtk,
-        &mut rtk_via_runtime,
-        &mut rtk_disabled_count,
-        &mut rtk_disabled_cmds,
+        &mut already_ctxcrl,
+        &mut ctxcrl_via_runtime,
+        &mut ctxcrl_disabled_count,
+        &mut ctxcrl_disabled_cmds,
         &mut supported_map,
         &mut unsupported_map,
     );
@@ -215,7 +215,7 @@ pub fn run(
                 category: bucket.category,
                 estimated_savings_tokens: bucket.total_output_tokens,
                 estimated_savings_pct: effective_savings_pct,
-                rtk_status: status,
+                ctxcrl_status: status,
             }
         })
         .collect();
@@ -236,8 +236,8 @@ pub fn run(
     unsupported.sort_by(|a, b| b.count.cmp(&a.count));
 
     // Build RTK_DISABLED examples sorted by frequency (top 5)
-    let rtk_disabled_examples: Vec<String> = {
-        let mut sorted: Vec<_> = rtk_disabled_cmds.into_iter().collect();
+    let ctxcrl_disabled_examples: Vec<String> = {
+        let mut sorted: Vec<_> = ctxcrl_disabled_cmds.into_iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         sorted
             .into_iter()
@@ -249,15 +249,15 @@ pub fn run(
     let report = DiscoverReport {
         sessions_scanned: sessions.len(),
         total_commands,
-        already_rtk,
-        rtk_via_runtime,
+        already_ctxcrl,
+        ctxcrl_via_runtime,
         reconcile_warning,
         since_days,
         supported,
         unsupported,
         parse_errors,
-        rtk_disabled_count,
-        rtk_disabled_examples,
+        ctxcrl_disabled_count,
+        ctxcrl_disabled_examples,
         agent_status: report::AgentIntegrationStatus::detect(),
     };
 
@@ -305,12 +305,12 @@ fn truncate_command(cmd: &str) -> String {
     }
 }
 
-/// Returns true if a tool_use command is already wrapped by RTK/contextcrawler.
+/// Returns true if a tool_use command is already wrapped by CTXCRL/contextcrawler.
 ///
 /// Used by `count_extracted_commands` at the `Classification::Ignored` arm and
 /// by the classifier unit tests. Keep this as the single source of truth — do
 /// not duplicate the prefix check inline. (A2 Codex CRITICAL.)
-fn is_already_rtk_prefix(s: &str) -> bool {
+fn is_already_ctxcrl_prefix(s: &str) -> bool {
     let t = s.trim();
     // branding-lint: allow legacy
     t.starts_with("rtk ") || t.starts_with("contextcrawler ")
@@ -334,10 +334,10 @@ fn count_extracted_commands(
     tracked: &[TrackedCommand],
     window_secs: i64,
     total_commands: &mut usize,
-    already_rtk: &mut usize,
-    rtk_via_runtime: &mut usize,
-    rtk_disabled_count: &mut usize,
-    rtk_disabled_cmds: &mut HashMap<String, usize>,
+    already_ctxcrl: &mut usize,
+    ctxcrl_via_runtime: &mut usize,
+    ctxcrl_disabled_count: &mut usize,
+    ctxcrl_disabled_cmds: &mut HashMap<String, usize>,
     supported_map: &mut HashMap<&'static str, SupportedBucket>,
     unsupported_map: &mut HashMap<String, UnsupportedBucket>,
 ) {
@@ -361,20 +361,20 @@ fn count_extracted_commands(
             if runtime_tracked {
                 // Credit this command to runtime-tracked (the hook handled
                 // it) and skip MISSED SAVINGS accounting entirely.
-                *already_rtk += 1;
-                *rtk_via_runtime += 1;
+                *already_ctxcrl += 1;
+                *ctxcrl_via_runtime += 1;
                 continue;
             }
 
             // Detect RTK_DISABLED= bypass before classification
-            if cmd_has_rtk_disabled_prefix(part) {
+            if cmd_has_ctxcrl_disabled_prefix(part) {
                 let (_prefix, actual_cmd) = strip_disabled_prefix(part);
-                // Only count if the underlying command is one RTK supports
+                // Only count if the underlying command is one CTXCRL supports
                 match classify_command(actual_cmd) {
                     Classification::Supported { .. } => {
-                        *rtk_disabled_count += 1;
+                        *ctxcrl_disabled_count += 1;
                         let display = truncate_command(actual_cmd);
-                        *rtk_disabled_cmds.entry(display).or_insert(0) += 1;
+                        *ctxcrl_disabled_cmds.entry(display).or_insert(0) += 1;
                     }
                     _ => {
                         // RTK_DISABLED on unsupported/ignored command — not interesting
@@ -432,8 +432,8 @@ fn count_extracted_commands(
                     bucket.count += 1;
                 }
                 Classification::Ignored => {
-                    if is_already_rtk_prefix(part) {
-                        *already_rtk += 1;
+                    if is_already_ctxcrl_prefix(part) {
+                        *already_ctxcrl += 1;
                     }
                 }
             }
@@ -491,12 +491,12 @@ mod tests {
     }
 
     #[test]
-    fn test_is_already_rtk_prefix_predicate() {
-        assert!(is_already_rtk_prefix("contextcrawler git status"));
-        assert!(is_already_rtk_prefix("  contextcrawler git diff  "));
-        assert!(is_already_rtk_prefix("rtk git status"));
-        assert!(!is_already_rtk_prefix("git status"));
-        assert!(!is_already_rtk_prefix("contextcrawlerish"));
+    fn test_is_already_ctxcrl_prefix_predicate() {
+        assert!(is_already_ctxcrl_prefix("contextcrawler git status"));
+        assert!(is_already_ctxcrl_prefix("  contextcrawler git diff  "));
+        assert!(is_already_ctxcrl_prefix("rtk git status"));
+        assert!(!is_already_ctxcrl_prefix("git status"));
+        assert!(!is_already_ctxcrl_prefix("contextcrawlerish"));
 
         // Classifier must route these down the Ignored arm so the counter
         // in count_extracted_commands actually fires.
@@ -511,24 +511,24 @@ mod tests {
     }
 
     #[test]
-    fn test_run_loop_counts_already_rtk_via_synthetic_fixture() {
+    fn test_run_loop_counts_already_ctxcrl_via_synthetic_fixture() {
         // A2 #81: drive the actual production counting loop with a synthetic
-        // session fixture and assert the `already_rtk` counter increments
+        // session fixture and assert the `already_ctxcrl` counter increments
         // for both prefixes — covering the run() path itself, not just
         // the helper predicate. Empty `tracked` slice exercises the
         // non-runtime path (F's runtime_tracked short-circuit returns false).
         let extracted = vec![
             mk_cmd("git status"),                  // Supported
-            mk_cmd("contextcrawler git status"),   // Ignored + already_rtk
-            mk_cmd("rtk git log"),                 // Ignored + already_rtk
+            mk_cmd("contextcrawler git status"),   // Ignored + already_ctxcrl
+            mk_cmd("rtk git log"),                 // Ignored + already_ctxcrl
             mk_cmd("frobnicate --all"),            // Unsupported
         ];
 
         let mut total_commands: usize = 0;
-        let mut already_rtk: usize = 0;
-        let mut rtk_via_runtime: usize = 0;
-        let mut rtk_disabled_count: usize = 0;
-        let mut rtk_disabled_cmds: HashMap<String, usize> = HashMap::new();
+        let mut already_ctxcrl: usize = 0;
+        let mut ctxcrl_via_runtime: usize = 0;
+        let mut ctxcrl_disabled_count: usize = 0;
+        let mut ctxcrl_disabled_cmds: HashMap<String, usize> = HashMap::new();
         let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
         let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
@@ -537,21 +537,21 @@ mod tests {
             &[],
             DEFAULT_MATCH_WINDOW_SECS,
             &mut total_commands,
-            &mut already_rtk,
-            &mut rtk_via_runtime,
-            &mut rtk_disabled_count,
-            &mut rtk_disabled_cmds,
+            &mut already_ctxcrl,
+            &mut ctxcrl_via_runtime,
+            &mut ctxcrl_disabled_count,
+            &mut ctxcrl_disabled_cmds,
             &mut supported_map,
             &mut unsupported_map,
         );
 
         assert_eq!(total_commands, 4, "every part should be counted once");
         assert_eq!(
-            already_rtk, 2,
+            already_ctxcrl, 2,
             "both rtk-prefixed forms must increment the counter" // branding-lint: allow legacy
         );
-        assert_eq!(rtk_via_runtime, 0, "no tracked rows → no runtime credit");
-        assert_eq!(rtk_disabled_count, 0);
+        assert_eq!(ctxcrl_via_runtime, 0, "no tracked rows → no runtime credit");
+        assert_eq!(ctxcrl_disabled_count, 0);
         assert!(
             unsupported_map.contains_key("frobnicate"),
             "frobnicate should land in the unsupported bucket (got keys: {:?})",

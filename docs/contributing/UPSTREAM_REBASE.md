@@ -63,7 +63,7 @@ This is the most important lesson from the 2026-05-15 audit — saved as
 | Refactors of `src/runner.rs` / `src/summary.rs` | **Take with review** | Re-verify our argv-mode guard still applies after the refactor. |
 | Telemetry-related work | **Skip** | We disable telemetry downstream; upstream's salt-hash / opt-in flow doesn't apply. |
 | Telemetry-related env vars and docs | **Skip** | Same. |
-| Cosmetic / branding (rtk → contextcrawler) | **Take** | Our rebrand sweep covers user-facing strings; upstream's own renames are typically not relevant. |
+| Cosmetic / branding (contextcrawler → contextcrawler) | **Take** | Our rebrand sweep covers user-facing strings; upstream's own renames are typically not relevant. |
 | Release-please / `chore(master): release …` commits | **Skip** | We have our own release flow. |
 | TOML filter additions | **Take** | Inherits new built-in filters automatically. |
 

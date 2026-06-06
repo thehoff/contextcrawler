@@ -79,7 +79,7 @@ flowchart TD
         C{"TOML valid?\nDuplicate names?"} -->|"fail"| D[["Build fails\nerror points to bad file"]]
         C -->|"ok"| E[["OUT_DIR/builtin_filters.toml\n(generated)"]]
         E --> F["rustc embeds via include_str!"]
-        F --> G[["rtk binary\nBUILTIN_TOML embedded"]]
+        F --> G[["contextcrawler binary\nBUILTIN_TOML embedded"]]
     end
 
     subgraph TESTS ["cargo test"]
@@ -88,8 +88,8 @@ flowchart TD
         L["test_builtin_all_filters_have_inline_tests\nassert!(tested.contains(name))"] -->|"no tests"| M[["FAIL"]]
     end
 
-    subgraph RUNTIME ["rtk my-tool args"]
-        R["TomlFilterRegistry::load()\n1. .rtk/filters.toml\n2. ~/.config/rtk/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
+    subgraph RUNTIME ["contextcrawler my-tool args"]
+        R["TomlFilterRegistry::load()\n1. .ctxcrl/filters.toml\n2. ~/.config/ctxcrl/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
         S{"match_command\nmatches?"} -->|"no match"| T[["exec raw (passthrough)"]]
         S -->|"match"| U["exec command\ncapture stdout"]
         U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
@@ -103,11 +103,11 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    CMD["rtk my-tool args"] --> P1
-    P1{"1. .rtk/filters.toml\n(project-local)"}
+    CMD["contextcrawler my-tool args"] --> P1
+    P1{"1. .ctxcrl/filters.toml\n(project-local)"}
     P1 -->|"match"| WIN["apply filter"]
     P1 -->|"no match"| P2
-    P2{"2. ~/.config/rtk/filters.toml\n(user-global)"}
+    P2{"2. ~/.config/ctxcrl/filters.toml\n(user-global)"}
     P2 -->|"match"| WIN
     P2 -->|"no match"| P3
     P3{"3. BUILTIN_TOML\n(binary)"}
@@ -118,5 +118,5 @@ flowchart LR
 First match wins. A project filter with the same name as a built-in shadows the built-in and triggers a warning:
 
 ```
-[rtk] warning: filter 'make' is shadowing a built-in filter
+[contextcrawler] warning: filter 'make' is shadowing a built-in filter
 ```

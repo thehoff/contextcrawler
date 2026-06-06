@@ -1,73 +1,73 @@
 ---
 title: Troubleshooting
-description: Common RTK issues and how to fix them
+description: Common contextcrawler issues and how to fix them
 sidebar:
   order: 2
 ---
 
 # Troubleshooting
 
-## `rtk gain` says "not a rtk command"
+## `contextcrawler gain` says "not a contextcrawler command"
 
 **Symptom:**
 ```bash
-$ rtk gain
-rtk: 'gain' is not a rtk command. See 'rtk --help'.
+$ contextcrawler gain
+contextcrawler: 'gain' is not a contextcrawler command. See 'contextcrawler --help'.
 ```
 
 **Cause:** You installed **Rust Type Kit** (`reachingforthejack/rtk`) instead of **Rust Token Killer** (`rtk-ai/rtk`). They share the same binary name.
 
 **Fix:**
 ```bash
-cargo uninstall rtk
+cargo uninstall contextcrawler
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
-rtk gain    # should now show token savings stats
+contextcrawler gain    # should now show token savings stats
 ```
 
-## How to tell which rtk you have
+## How to tell which contextcrawler you have
 
-| If `rtk gain`... | You have |
+| If `contextcrawler gain`... | You have |
 |------------------|----------|
 | Shows token savings dashboard | Rust Token Killer ✅ |
-| Returns "not a rtk command" | Rust Type Kit ❌ |
+| Returns "not a contextcrawler command" | Rust Type Kit ❌ |
 
-## AI assistant not using RTK
+## AI assistant not using contextcrawler
 
-**Symptom:** Claude Code (or another agent) runs `cargo test` instead of `rtk cargo test`.
+**Symptom:** Claude Code (or another agent) runs `cargo test` instead of `contextcrawler cargo test`.
 
 **Checklist:**
 
-1. Verify RTK is installed:
+1. Verify contextcrawler is installed:
    ```bash
-   rtk --version
-   rtk gain
+   contextcrawler --version
+   contextcrawler gain
    ```
 
 2. Initialize the hook:
    ```bash
-   rtk init --global    # Claude Code
-   rtk init --global --cursor    # Cursor
-   rtk init --global --opencode  # OpenCode
+   contextcrawler init --global    # Claude Code
+   contextcrawler init --global --cursor    # Cursor
+   contextcrawler init --global --opencode  # OpenCode
    ```
 
 3. Restart your AI assistant.
 
 4. Verify hook status:
    ```bash
-   rtk init --show
+   contextcrawler init --show
    ```
 
 5. Check `settings.json` has the hook registered (Claude Code):
    ```bash
-   cat ~/.claude/settings.json | grep rtk
+   cat ~/.claude/settings.json | grep contextcrawler
    ```
 
-## RTK not found after `cargo install`
+## contextcrawler not found after `cargo install`
 
 **Symptom:**
 ```bash
-$ rtk --version
-zsh: command not found: rtk
+$ contextcrawler --version
+zsh: command not found: contextcrawler
 ```
 
 **Cause:** `~/.cargo/bin` is not in your PATH.
@@ -87,25 +87,25 @@ set -gx PATH $HOME/.cargo/bin $PATH
 Then reload:
 ```bash
 source ~/.zshrc    # or ~/.bashrc
-rtk --version
+contextcrawler --version
 ```
 
-## RTK on Windows
+## contextcrawler on Windows
 
-### Double-clicking rtk.exe does nothing
+### Double-clicking ctxcrl.exe does nothing
 
-**Symptom:** You double-click `rtk.exe`, a terminal flashes and closes instantly.
+**Symptom:** You double-click `ctxcrl.exe`, a terminal flashes and closes instantly.
 
-**Cause:** RTK is a command-line tool. With no arguments, it prints usage and exits. The console window opens and closes before you can read anything.
+**Cause:** contextcrawler is a command-line tool. With no arguments, it prints usage and exits. The console window opens and closes before you can read anything.
 
-**Fix:** Open a terminal first, then run RTK from there:
+**Fix:** Open a terminal first, then run contextcrawler from there:
 - Press `Win+R`, type `cmd`, press Enter
 - Or open PowerShell or Windows Terminal
-- Then run: `rtk --version`
+- Then run: `contextcrawler --version`
 
 ### Hook not working (no auto-rewrite)
 
-**Symptom:** `rtk init -g` shows "Falling back to --claude-md mode" on Windows.
+**Symptom:** `contextcrawler init -g` shows "Falling back to --claude-md mode" on Windows.
 
 **Cause:** The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell. Native Windows doesn't have one.
 
@@ -113,10 +113,10 @@ rtk --version
 ```bash
 # Inside WSL
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-rtk init -g    # full hook mode works in WSL
+contextcrawler init -g    # full hook mode works in WSL
 ```
 
-On native Windows, RTK falls back to CLAUDE.md injection. Your AI assistant gets RTK instructions but won't auto-rewrite commands. It can still use RTK manually: `rtk cargo test`, `rtk git status`, etc.
+On native Windows, contextcrawler falls back to CLAUDE.md injection. Your AI assistant gets contextcrawler instructions but won't auto-rewrite commands. It can still use contextcrawler manually: `contextcrawler cargo test`, `contextcrawler git status`, etc.
 
 ### Node.js tools not found
 
@@ -126,9 +126,9 @@ rtk vitest --run
 Error: program not found
 ```
 
-**Cause:** On Windows, Node.js tools are installed as `.CMD`/`.BAT` wrappers. Older RTK versions couldn't find them.
+**Cause:** On Windows, Node.js tools are installed as `.CMD`/`.BAT` wrappers. Older rtk versions couldn't find them.
 
-**Fix:** Update to RTK v0.23.1+:
+**Fix:** Update to rtk v0.23.1+:
 ```bash
 cargo install --git https://github.com/rtk-ai/rtk
 rtk --version    # should be 0.23.1+
@@ -146,17 +146,17 @@ cargo install --path . --force
 
 Minimum required Rust version: 1.70+.
 
-## OpenCode not using RTK
+## OpenCode not using contextcrawler
 
 ```bash
-rtk init --global --opencode
+contextcrawler init --global --opencode
 # restart OpenCode
-rtk init --show    # should show "OpenCode: plugin installed"
+contextcrawler init --show    # should show "OpenCode: plugin installed"
 ```
 
-## `cargo install rtk` installs the wrong package
+## `cargo install contextcrawler` installs the wrong package
 
-If Rust Type Kit is published to crates.io under the name `rtk`, `cargo install rtk` may install the wrong one.
+If Rust Type Kit is published to crates.io under the name `contextcrawler`, `cargo install contextcrawler` may install the wrong one.
 
 Always use the explicit URL:
 
@@ -166,14 +166,14 @@ cargo install --git https://github.com/rtk-ai/rtk
 
 ## Run the diagnostic script
 
-From the RTK repository root:
+From the contextcrawler repository root:
 
 ```bash
 bash scripts/check-installation.sh
 ```
 
 Checks:
-- RTK installed and in PATH
+- contextcrawler installed and in PATH
 - Correct version (Token Killer, not Type Kit)
 - Available features
 - Claude Code integration

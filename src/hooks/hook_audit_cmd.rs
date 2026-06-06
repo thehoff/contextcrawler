@@ -24,7 +24,7 @@ fn audit_dir() -> PathBuf {
     }
 }
 
-/// Default log file location (aligned with hook's $HOME/.local/share/rtk/).
+/// Default log file location (aligned with hook's $HOME/.local/share/ctxcrl/).
 fn default_log_path() -> PathBuf {
     audit_dir().join("hook-audit.log")
 }
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_token_savings() {
-        // Simulate what rtk hook-audit would output vs raw log dump
+        // Simulate what contextcrawler hook-audit would output vs raw log dump
         let raw_log = r#"2026-02-16T14:30:01Z | rewrite | git status | rtk git status
 2026-02-16T14:30:02Z | skip:no_match | echo hello | -
 2026-02-16T14:30:03Z | rewrite | cargo test | rtk cargo test

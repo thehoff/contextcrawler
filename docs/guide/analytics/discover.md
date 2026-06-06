@@ -1,20 +1,20 @@
 ---
 title: Discover and Session
-description: Find missed savings opportunities with rtk discover, and track RTK adoption with rtk session
+description: Find missed savings opportunities with contextcrawler discover, and track contextcrawler adoption with contextcrawler session
 sidebar:
   order: 2
 ---
 
 # Discover and Session
 
-## rtk discover — find missed savings
+## contextcrawler discover — find missed savings
 
-`rtk discover` analyzes your Claude Code command history to identify commands that ran without RTK filtering and calculates how many tokens you lost.
+`contextcrawler discover` analyzes your Claude Code command history to identify commands that ran without contextcrawler filtering and calculates how many tokens you lost.
 
 ```bash
-rtk discover                    # analyze current project history
-rtk discover --all              # all projects
-rtk discover --all --since 7    # last 7 days, all projects
+contextcrawler discover                    # analyze current project history
+contextcrawler discover --all              # all projects
+contextcrawler discover --all --since 7    # last 7 days, all projects
 ```
 
 **Example output:**
@@ -29,17 +29,17 @@ pnpm list                3      ~6,000 tokens
 ────────────────────────────────────
 Total missed:           23     ~66,000 tokens
 
-Run `rtk init --global` to capture these automatically.
+Run `contextcrawler init --global` to capture these automatically.
 ```
 
-If commands appear in the missed list after installing RTK, it usually means the hook isn't active for that agent. See [Troubleshooting](../resources/troubleshooting.md) — "Agent not using RTK".
+If commands appear in the missed list after installing contextcrawler, it usually means the hook isn't active for that agent. See [Troubleshooting](../resources/troubleshooting.md) — "Agent not using contextcrawler".
 
-## rtk session — adoption tracking
+## contextcrawler session — adoption tracking
 
-`rtk session` shows RTK adoption across recent Claude Code sessions: how many shell commands ran through RTK vs. raw.
+`contextcrawler session` shows contextcrawler adoption across recent Claude Code sessions: how many shell commands ran through contextcrawler vs. raw.
 
 ```bash
-rtk session
+contextcrawler session
 ```
 
 **Example output:**
@@ -47,7 +47,7 @@ rtk session
 ```
 Recent sessions (last 10)
 ─────────────────────────────────────────────────────
-Session                         Total   RTK   Coverage
+Session                         Total   contextcrawler   Coverage
 2026-04-06 14:32  (45 cmds)       45    43      95.6%
 2026-04-05 09:14  (38 cmds)       38    38     100.0%
 2026-04-04 16:50  (52 cmds)       52    49      94.2%
@@ -55,4 +55,4 @@ Session                         Total   RTK   Coverage
 Average coverage: 96.6%
 ```
 
-Low coverage on a session usually means RTK was disabled (`RTK_DISABLED=1`) or the hook wasn't active for a specific subagent.
+Low coverage on a session usually means contextcrawler was disabled (`CTXCRL_DISABLED=1`) or the hook wasn't active for a specific subagent.

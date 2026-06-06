@@ -45,7 +45,7 @@ fn git_cmd(global_args: &[String]) -> Command {
 
 /// Create a git Command for internal parsing that must be locale-stable.
 ///
-/// We only use this for non-user-facing parses where RTK depends on git's
+/// We only use this for non-user-facing parses where CTXCRL depends on git's
 /// English status phrases. User-visible passthrough output keeps the user's
 /// locale.
 fn git_cmd_c_locale(global_args: &[String]) -> Command {
@@ -126,8 +126,8 @@ pub fn run(
 ///
 /// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
 /// first positional argument (before any other positional).  This means:
-///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
-///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
+///   `ctxcrl git diff -- file` → args = ["file"]   (clap ate `--`)
+///   `ctxcrl git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
 ///
 /// Without the `--` separator git may treat an unambiguous path as a revision and
 /// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
@@ -263,7 +263,7 @@ fn run_diff(
         cmd.arg("diff");
         for arg in args {
             if arg == "--no-compact" {
-                continue; // RTK flag, not a git flag
+                continue; // CTXCRL flag, not a git flag
             }
             cmd.arg(arg);
         }
@@ -290,7 +290,7 @@ fn run_diff(
         return Ok(result.exit_code);
     }
 
-    // Default RTK behavior: stat first, then compacted diff
+    // Default CTXCRL behavior: stat first, then compacted diff
     let mut cmd = git_cmd(global_args);
     cmd.arg("diff").arg("--stat");
 
@@ -616,7 +616,7 @@ fn run_log(
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
-    // Apply RTK defaults only if user didn't specify them
+    // Apply CTXCRL defaults only if user didn't specify them
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
     if !has_format_flag {
@@ -661,7 +661,7 @@ fn run_log(
         eprintln!("Git log output:");
     }
 
-    // Post-process: truncate long messages, cap lines only if RTK set the default
+    // Post-process: truncate long messages, cap lines only if CTXCRL set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
     println!("{}", filtered);
 
@@ -687,7 +687,7 @@ fn run_log(
 /// as passthrough (GIT-I1).
 ///
 /// The filter only earns token savings on plain `git log`, where it injects
-/// the RTK pretty-format and strips commit bodies. When the user supplies
+/// the CTXCRL pretty-format and strips commit bodies. When the user supplies
 /// `--oneline` / `--pretty` / `--format`, `filter_log_output` is a
 /// near-identity transform and any difference is at most trailing
 /// whitespace. Comparing trimmed strings classifies those no-op runs as
@@ -773,7 +773,7 @@ pub(crate) fn filter_log_output(
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
     // When user specified their own format (--oneline, --pretty, --format),
-    // RTK did not inject ---END--- markers. Use simple line-based truncation.
+    // CTXCRL did not inject ---END--- markers. Use simple line-based truncation.
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
@@ -785,7 +785,7 @@ pub(crate) fn filter_log_output(
             .join("\n");
     }
 
-    // RTK injected format: split output into commit blocks separated by ---END---
+    // CTXCRL injected format: split output into commit blocks separated by ---END---
     let commits: Vec<&str> = output.split("---END---").collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
@@ -840,7 +840,7 @@ fn truncate_line(line: &str, width: usize) -> String {
     }
 }
 
-/// Preserve RTK's branch/clean framing while keeping porcelain file lines intact.
+/// Preserve CTXCRL's branch/clean framing while keeping porcelain file lines intact.
 pub(crate) fn format_status_output(porcelain: &str) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
@@ -941,7 +941,7 @@ fn detect_status_state(line: &str) -> Option<GitStatusState> {
 /// editing a commit while rebasing ...".
 ///
 /// This helper walks the plain-status output we already capture for tracking
-/// and emits a compact, RTK-style summary rather than dumping git's full prose.
+/// and emits a compact, CTXCRL-style summary rather than dumping git's full prose.
 /// Returns `None` when no state is in progress.
 fn extract_state_header(raw: &str) -> Option<String> {
     // Headers of the file-change blocks — everything relevant to state appears
@@ -2559,7 +2559,7 @@ mod tests {
     }
 
     /// Branch name with `/` that does NOT exist as a file → no injection.
-    /// Regression for issue #1431: `rtk git diff feature/user-auth` must not inject `--`.
+    /// Regression for issue #1431: `ctxcrl git diff feature/user-auth` must not inject `--`.
     #[test]
     fn test_normalize_diff_args_no_injection_for_branch_with_slash() {
         let args = vec!["feature/user-auth".to_string()];
@@ -2571,7 +2571,7 @@ mod tests {
     }
 
     /// Range syntax with `/` → no injection.
-    /// Regression: `rtk git diff main...feature/user-auth` produced no output.
+    /// Regression: `ctxcrl git diff main...feature/user-auth` produced no output.
     #[test]
     fn test_normalize_diff_args_no_injection_for_range_with_slash() {
         let args = vec!["main...feature/user-auth".to_string()];
@@ -2584,7 +2584,7 @@ mod tests {
 
     /// Bare word that happens to exist as a file on disk → still no injection.
     /// A file named "main" must not cause `--` to be injected when the user
-    /// intends `rtk git diff main` as a branch comparison.
+    /// intends `ctxcrl git diff main` as a branch comparison.
     #[test]
     fn test_normalize_diff_args_no_injection_for_bare_word_even_if_file_exists() {
         let args = vec!["main".to_string()];
@@ -2697,11 +2697,11 @@ mod tests {
             "user-set limit must NOT trigger --no-merges injection"
         );
 
-        // RTK default limit (we set -10): inject --no-merges for compression.
-        let rtk_default: Vec<String> = vec![];
+        // CTXCRL default limit (we set -10): inject --no-merges for compression.
+        let ctxcrl_default: Vec<String> = vec![];
         assert!(
-            should_inject_no_merges(&rtk_default, false),
-            "RTK-default limit should inject --no-merges"
+            should_inject_no_merges(&ctxcrl_default, false),
+            "CTXCRL-default limit should inject --no-merges"
         );
 
         // User asked for merges explicitly: never inject regardless of limit.
@@ -3403,7 +3403,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     #[test]
     fn test_log_plain_format_is_tracked() {
-        // Plain `git log`: RTK injects %b + ---END---; the filter strips
+        // Plain `git log`: CTXCRL injects %b + ---END---; the filter strips
         // commit bodies and trailers. Real work → must be tracked.
         let raw = "abc1234 feat: add feature (2 days ago) <author>\n\
                    BREAKING CHANGE: removed old API\n\
@@ -3452,7 +3452,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     #[ignore] // Integration test: requires git repo
     fn test_branch_creation_not_swallowed() {
-        let branch = "test-rtk-create-branch-regression";
+        let branch = "test-ctxcrl-create-branch-regression";
         // Create branch via run_branch
         run_branch(&[branch.to_string()], 0, &[]).expect("run_branch should succeed");
         // Verify it exists
@@ -3474,7 +3474,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     #[ignore] // Integration test: requires git repo
     fn test_branch_creation_from_commit() {
-        let branch = "test-rtk-create-from-commit";
+        let branch = "test-ctxcrl-create-from-commit";
         run_branch(&[branch.to_string(), "HEAD".to_string()], 0, &[])
             .expect("run_branch with start-point should succeed");
         let output = Command::new("git")
@@ -3556,15 +3556,15 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     #[ignore] // Requires `cargo build` first — run with `cargo test --ignored`
     fn test_git_status_not_a_repo_exits_nonzero() {
-        // Run rtk git status in a directory that is not a git repo
-        let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
+        // Run ctxcrl git status in a directory that is not a git repo
+        let tmp = std::env::temp_dir().join("ctxcrl_test_not_a_repo");
         let _ = std::fs::create_dir_all(&tmp);
 
         // Build the path to the test binary
         let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("debug")
-            .join("rtk");
+            .join("ctxcrl");
         assert!(
             bin_path.exists(),
             "Debug binary not found at {:?} — run `cargo build` first",
@@ -3574,7 +3574,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .args(["git", "status"])
             .current_dir(&tmp)
             .output()
-            .expect("Failed to run rtk");
+            .expect("Failed to run ctxcrl");
 
         // Should exit with non-zero (128 from git)
         assert!(

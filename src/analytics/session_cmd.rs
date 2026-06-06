@@ -1,4 +1,4 @@
-//! Compares RTK-routed vs raw commands in a coding session.
+//! Compares CTXCRL-routed vs raw commands in a coding session.
 
 use crate::core::utils::format_tokens;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
@@ -12,7 +12,7 @@ struct SessionSummary {
     id: String,
     date: String,
     total_cmds: usize,
-    rtk_cmds: usize,
+    ctxcrl_cmds: usize,
     output_tokens: usize,
 }
 
@@ -21,11 +21,11 @@ impl SessionSummary {
         if self.total_cmds == 0 {
             return 0.0;
         }
-        self.rtk_cmds as f64 / self.total_cmds as f64 * 100.0
+        self.ctxcrl_cmds as f64 / self.total_cmds as f64 * 100.0
     }
 }
 
-/// Count RTK-covered commands from extracted commands.
+/// Count CTXCRL-covered commands from extracted commands.
 /// A command is "covered" if it either:
 /// - starts with "rtk " or "contextcrawler " (explicit invocation), or
 /// - would be rewritten by the hook (classify_command returns Supported)
@@ -36,10 +36,10 @@ impl SessionSummary {
 /// G7/#111: the live hook emits `contextcrawler <cmd>`; matching only the
 /// legacy `rtk ` prefix counted those as NOT adopted and understated the
 /// Adoption %. Reuses the same predicate logic as
-/// `discover::is_already_rtk_prefix`.
-fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
+/// `discover::is_already_ctxcrl_prefix`.
+fn count_ctxcrl_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
     let mut total: usize = 0;
-    let mut rtk: usize = 0;
+    let mut ctxcrl: usize = 0;
     for c in cmds {
         let parts = split_command_chain(&c.command);
         for part in &parts {
@@ -50,12 +50,12 @@ fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
                 || trimmed.starts_with("contextcrawler ")
                 || matches!(classify_command(part), Classification::Supported { .. })
             {
-                rtk += 1;
+                ctxcrl += 1;
             }
         }
     }
     let output: usize = cmds.iter().filter_map(|c| c.output_len).sum();
-    (total, rtk, output)
+    (total, ctxcrl, output)
 }
 
 fn progress_bar(pct: f64, width: usize) -> String {
@@ -111,7 +111,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             continue;
         }
 
-        let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds);
+        let (total_cmds, ctxcrl_cmds, output_tokens) = count_ctxcrl_commands(&cmds);
 
         // Extract session ID from filename
         let id = path
@@ -144,7 +144,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             id: short_id.to_string(),
             date,
             total_cmds,
-            rtk_cmds,
+            ctxcrl_cmds,
             output_tokens,
         });
     }
@@ -165,20 +165,20 @@ pub fn run(_verbose: u8) -> Result<()> {
     println!("{}", "-".repeat(70));
 
     let mut total_cmds = 0;
-    let mut total_rtk = 0;
+    let mut total_ctxcrl = 0;
 
     for s in &summaries {
         let pct = s.adoption_pct();
         let bar = progress_bar(pct, 5);
         total_cmds += s.total_cmds;
-        total_rtk += s.rtk_cmds;
+        total_ctxcrl += s.ctxcrl_cmds;
 
         println!(
             "{:<12} {:<12} {:>5} {:>5} {:>8.0}% {:<7} {:>8}",
             s.id,
             s.date,
             s.total_cmds,
-            s.rtk_cmds,
+            s.ctxcrl_cmds,
             pct,
             bar,
             format_tokens(s.output_tokens),
@@ -188,7 +188,7 @@ pub fn run(_verbose: u8) -> Result<()> {
     println!("{}", "-".repeat(70));
 
     let avg_adoption = if total_cmds > 0 {
-        total_rtk as f64 / total_cmds as f64 * 100.0
+        total_ctxcrl as f64 / total_cmds as f64 * 100.0
     } else {
         0.0
     };
@@ -227,34 +227,34 @@ mod tests {
         assert_eq!(progress_bar(50.0, 5), "@@@..");
     }
 
-    // --- count_rtk_commands: core counting logic ---
+    // --- count_ctxcrl_commands: core counting logic ---
 
     #[test]
-    fn test_count_all_rtk() {
+    fn test_count_all_ctxcrl() {
         let cmds = vec![
             make_cmd("rtk git status", Some(200)),
             make_cmd("rtk cargo test", Some(5000)),
             make_cmd("rtk git log -10", Some(800)),
         ];
-        let (total, rtk, output) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, output) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 3);
-        assert_eq!(rtk, 3);
+        assert_eq!(ctxcrl, 3);
         assert_eq!(output, 6000);
     }
 
     #[test]
     fn test_count_hook_rewritten_commands() {
         // Hook rewrites "git status" → "rtk git status" but JSONL logs the original.
-        // count_rtk_commands should detect these via classify_command.
+        // count_ctxcrl_commands should detect these via classify_command.
         let cmds = vec![
             make_cmd("git status", Some(500)),
             make_cmd("cargo test", Some(3000)),
             make_cmd("echo hello", Some(100)),
         ];
-        let (total, rtk, output) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, output) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 3);
-        // git status + cargo test are supported by RTK, echo is not
-        assert_eq!(rtk, 2);
+        // git status + cargo test are supported by CTXCRL, echo is not
+        assert_eq!(ctxcrl, 2);
         assert_eq!(output, 3600);
     }
 
@@ -266,9 +266,9 @@ mod tests {
             make_cmd("rtk cargo test", Some(5000)), // explicit rtk
             make_cmd("echo hello", None),           // not supported
         ];
-        let (total, rtk, output) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, output) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 4);
-        assert_eq!(rtk, 3); // rtk git status + git log + rtk cargo test
+        assert_eq!(ctxcrl, 3); // rtk git status + git log + rtk cargo test
         assert_eq!(output, 6200);
     }
 
@@ -283,24 +283,24 @@ mod tests {
             make_cmd("  contextcrawler discover  ", Some(100)),
             make_cmd("echo hello", Some(50)),
         ];
-        let (total, rtk, output) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, output) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 4);
         // All three contextcrawler-prefixed commands count as adopted;
         // echo does not.
-        assert_eq!(rtk, 3, "contextcrawler-prefixed commands must count as adopted");
+        assert_eq!(ctxcrl, 3, "contextcrawler-prefixed commands must count as adopted");
         assert_eq!(output, 750);
     }
 
     #[test]
-    fn test_count_mixed_rtk_and_contextcrawler_prefixes() {
+    fn test_count_mixed_ctxcrl_and_contextcrawler_prefixes() {
         // Legacy "rtk " and current "contextcrawler " prefixes both adopted.
         let cmds = vec![
             make_cmd("rtk git status", Some(100)),
             make_cmd("contextcrawler cargo test", Some(100)),
         ];
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 2);
-        assert_eq!(rtk, 2, "both legacy and current prefixes are adopted");
+        assert_eq!(ctxcrl, 2, "both legacy and current prefixes are adopted");
     }
 
     #[test]
@@ -310,17 +310,17 @@ mod tests {
             make_cmd("mkdir -p /tmp/foo", Some(10)),
             make_cmd("cd /tmp", Some(5)),
         ];
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 3);
-        assert_eq!(rtk, 0);
+        assert_eq!(ctxcrl, 0);
     }
 
     #[test]
     fn test_count_empty_commands() {
         let cmds: Vec<ExtractedCommand> = vec![];
-        let (total, rtk, output) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, output) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 0);
-        assert_eq!(rtk, 0);
+        assert_eq!(ctxcrl, 0);
         assert_eq!(output, 0);
     }
 
@@ -331,35 +331,35 @@ mod tests {
         // "cd ./path && rtk ls" is one ExtractedCommand but two logical commands.
         // cd is ignored/unsupported, ls is supported → 1 out of 2 covered.
         let cmds = vec![make_cmd("cd ./your/app/path && rtk ls", Some(200))];
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 2, "chain should split into 2 commands");
-        assert_eq!(rtk, 1, "only 'rtk ls' is RTK-covered");
+        assert_eq!(ctxcrl, 1, "only 'rtk ls' is CTXCRL-covered");
     }
 
     #[test]
     fn test_count_chained_all_supported() {
-        // Both parts are RTK-supported
+        // Both parts are CTXCRL-supported
         let cmds = vec![make_cmd("git status && git log -5", Some(500))];
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 2, "chain should split into 2 commands");
-        assert_eq!(rtk, 2, "both git commands are RTK-covered");
+        assert_eq!(ctxcrl, 2, "both git commands are CTXCRL-covered");
     }
 
     #[test]
     fn test_count_chained_with_semicolon() {
         let cmds = vec![make_cmd("cd /tmp; git status; echo done", Some(100))];
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 3, "semicolon chain splits into 3 commands");
-        assert_eq!(rtk, 1, "only git status is RTK-covered");
+        assert_eq!(ctxcrl, 1, "only git status is CTXCRL-covered");
     }
 
     #[test]
     fn test_count_chained_no_false_inflation() {
         // Single command should still count as 1
         let cmds = vec![make_cmd("git status", Some(100))];
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 1);
-        assert_eq!(rtk, 1);
+        assert_eq!(ctxcrl, 1);
     }
 
     // --- adoption_pct ---
@@ -370,7 +370,7 @@ mod tests {
             id: "x".to_string(),
             date: "Today".to_string(),
             total_cmds: 0,
-            rtk_cmds: 0,
+            ctxcrl_cmds: 0,
             output_tokens: 0,
         };
         assert_eq!(s.adoption_pct(), 0.0);
@@ -382,7 +382,7 @@ mod tests {
             id: "x".to_string(),
             date: "Today".to_string(),
             total_cmds: 20,
-            rtk_cmds: 15,
+            ctxcrl_cmds: 15,
             output_tokens: 0,
         };
         assert_eq!(s.adoption_pct(), 75.0);
@@ -410,10 +410,10 @@ mod tests {
         let provider = ClaudeProvider;
         let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
 
-        let (total, rtk, _output) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _output) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 3, "should find 3 Bash commands");
-        // All 3 are RTK-covered: 2 explicit "rtk ..." + 1 hook-rewritten "git log"
-        assert_eq!(rtk, 3, "all 3 commands should be RTK-covered");
+        // All 3 are CTXCRL-covered: 2 explicit "rtk ..." + 1 hook-rewritten "git log"
+        assert_eq!(ctxcrl, 3, "all 3 commands should be CTXCRL-covered");
     }
 
     #[test]
@@ -434,9 +434,9 @@ mod tests {
         let provider = ClaudeProvider;
         let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
 
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 1, "only Bash tool should be counted");
-        assert_eq!(rtk, 1, "the one Bash command is rtk");
+        assert_eq!(ctxcrl, 1, "the one Bash command is rtk");
     }
 
     #[test]
@@ -476,9 +476,9 @@ mod tests {
         let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
 
         assert_eq!(cmds.len(), 1, "one Bash tool call");
-        let (total, rtk, _) = count_rtk_commands(&cmds);
+        let (total, ctxcrl, _) = count_ctxcrl_commands(&cmds);
         assert_eq!(total, 2, "chain splits into cd + rtk ls");
-        assert_eq!(rtk, 1, "rtk ls is covered, cd is not");
+        assert_eq!(ctxcrl, 1, "rtk ls is covered, cd is not");
     }
 
     #[test]

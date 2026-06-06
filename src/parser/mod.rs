@@ -5,7 +5,7 @@
 //! - Tier 2 (Degraded): Partial parsing with warnings
 //! - Tier 3 (Passthrough): Raw output truncation with error marker
 //!
-//! The three-tier system ensures RTK never returns false data silently.
+//! The three-tier system ensures CTXCRL never returns false data silently.
 
 pub mod formatter;
 pub mod types;
@@ -85,7 +85,7 @@ pub trait OutputParser: Sized {
     /// Implementation should follow three-tier fallback:
     /// 1. Try JSON parsing (if tool supports --json/--format json)
     /// 2. Try regex/text extraction with partial data
-    /// 3. Return truncated passthrough with `[RTK:PASSTHROUGH]` marker
+    /// 3. Return truncated passthrough with `[CTXCRL:PASSTHROUGH]` marker
     fn parse(input: &str) -> ParseResult<Self::Output>;
 
     /// Parse with explicit tier preference (for testing/debugging)
@@ -115,7 +115,7 @@ pub fn truncate_output(output: &str, max_chars: usize) -> String {
 
     let truncated: String = chars[..max_chars].iter().collect();
     format!(
-        "{}\n\n[RTK:PASSTHROUGH] Output truncated ({} chars → {} chars)",
+        "{}\n\n[CTXCRL:PASSTHROUGH] Output truncated ({} chars → {} chars)",
         truncated,
         chars.len(),
         max_chars
@@ -124,12 +124,12 @@ pub fn truncate_output(output: &str, max_chars: usize) -> String {
 
 /// Helper to emit degradation warning
 pub fn emit_degradation_warning(tool: &str, reason: &str) {
-    eprintln!("[RTK:DEGRADED] {} parser: {}", tool, reason);
+    eprintln!("[CTXCRL:DEGRADED] {} parser: {}", tool, reason);
 }
 
 /// Helper to emit passthrough warning
 pub fn emit_passthrough_warning(tool: &str, reason: &str) {
-    eprintln!("[RTK:PASSTHROUGH] {} parser: {}", tool, reason);
+    eprintln!("[CTXCRL:PASSTHROUGH] {} parser: {}", tool, reason);
 }
 
 /// Extract a complete JSON object from input that may have non-JSON prefix (pnpm banner, dotenv messages, etc.)
@@ -259,7 +259,7 @@ mod tests {
 
         let long = "a".repeat(1000);
         let truncated = truncate_output(&long, 100);
-        assert!(truncated.contains("[RTK:PASSTHROUGH]"));
+        assert!(truncated.contains("[CTXCRL:PASSTHROUGH]"));
         assert!(truncated.contains("1000 chars → 100 chars"));
     }
 
@@ -269,7 +269,7 @@ mod tests {
         let thai = "สวัสดีครับ".repeat(100);
         // Try truncating at a byte offset that might land mid-character
         let result = truncate_output(&thai, 50);
-        assert!(result.contains("[RTK:PASSTHROUGH]"));
+        assert!(result.contains("[CTXCRL:PASSTHROUGH]"));
         // Should be valid UTF-8 (no panic)
         let _ = result.len();
     }
@@ -278,7 +278,7 @@ mod tests {
     fn test_truncate_output_emoji() {
         let emoji = "🎉".repeat(200);
         let result = truncate_output(&emoji, 100);
-        assert!(result.contains("[RTK:PASSTHROUGH]"));
+        assert!(result.contains("[CTXCRL:PASSTHROUGH]"));
     }
 
     #[test]

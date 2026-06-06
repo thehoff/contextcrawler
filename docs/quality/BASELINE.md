@@ -32,7 +32,7 @@ Top warning categories: `collapsible_if`, `unnecessary_sort_by`,
 | Severity | Count | Detail |
 |---|---|---|
 | Vulnerabilities | 0 | No active CVEs in the dep graph |
-| Unmaintained warnings | 1 | `RUSTSEC-2025-0057` — `fxhash 0.2.1` (transitive via `scraper → selectors → fxhash`). Used by the contextzip web-extract code path only. Re-evaluate when `selectors` upgrades. |
+| Unmaintained warnings | 1 | `RUSTSEC-2025-0057` — `fxhash 0.2.1` (transitive via `scraper → selectors → fxhash`). Used by the contextcrawler web-extract code path only. Re-evaluate when `selectors` upgrades. |
 
 Database scanned: RustSec, 1088 advisories.
 

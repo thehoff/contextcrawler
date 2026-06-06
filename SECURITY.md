@@ -51,10 +51,10 @@ Please include:
 
 ContextCrawler is a downstream distribution of
 [`rtk-ai/rtk`](https://github.com/rtk-ai/rtk). If a vulnerability looks
-like it lives in upstream rtk's code (anywhere outside the
+like it lives in upstream contextcrawler's code (anywhere outside the
 `// ===== contextzip-downstream =====` sentinel blocks), please **also**
 report it to upstream's security channel — that fix benefits the broader
-rtk ecosystem and ContextCrawler will inherit it on the next rebase.
+contextcrawler ecosystem and ContextCrawler will inherit it on the next rebase.
 
 Upstream contact details are in
 [`docs/upstream/RTK_README.md`](docs/upstream/RTK_README.md) and the
@@ -97,7 +97,7 @@ In scope:
 
 Out of scope:
 
-- Issues in upstream rtk that aren't materially worsened by our
+- Issues in upstream contextcrawler that aren't materially worsened by our
   downstream additions (please report those to rtk-ai/rtk).
 - Issues in Tirith itself (report to sheeki03/tirith).
 - Configuration mistakes a user makes in their own Claude Code /
@@ -228,9 +228,9 @@ Tracked by [GHSA-2cwv-rr7c-2p4c](https://github.com/thehoff/contextcrawler/secur
 
 ## TOML filter trust — global file gated
 
-`~/.config/rtk/filters.toml` (the user-global filter file) is now
+`~/.config/ctxcrl/filters.toml` (the user-global filter file) is now
 SHA-256 pinned through the same trust store used for project-local
-`.rtk/filters.toml`. Previously the global file was loaded
+`.ctxcrl/filters.toml`. Previously the global file was loaded
 unconditionally, which meant malware that could write to a user's
 home directory could install a filter that silently rewrote any
 command's output before the agent saw it — including hiding security
@@ -246,7 +246,7 @@ contextcrawler trust --list      # show all trusted filters (project + global)
 ```
 
 Content changes auto-revoke trust. The CI env-var override
-(`RTK_TRUST_PROJECT_FILTERS=1` plus a known CI env var) applies to
+(`CTXCRL_TRUST_PROJECT_FILTERS=1` plus a known CI env var) applies to
 both project and global files.
 
 Surfaced during the 2026-05-15 audit's Codex re-review as H-3.

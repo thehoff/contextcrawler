@@ -1,6 +1,6 @@
 //! Utility functions for text processing and command execution.
 //!
-//! Provides common helpers used across rtk commands:
+//! Provides common helpers used across ctxcrl commands:
 //! - ANSI color code stripping
 //! - Text truncation
 //! - Command execution with error context
@@ -2011,7 +2011,7 @@ mod tests {
 
     #[test]
     fn test_detect_package_manager_default() {
-        // In the test environment (rtk repo), there's no JS lockfile
+        // In the test environment (ctxcrl repo), there's no JS lockfile
         // so it should default to "npm"
         let pm = detect_package_manager();
         assert!(["pnpm", "yarn", "npm"].contains(&pm));

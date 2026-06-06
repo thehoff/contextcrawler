@@ -1,13 +1,13 @@
 ---
-title: What RTK Optimizes
-description: Commands and ecosystems automatically optimized by RTK with typical token savings
+title: What contextcrawler Optimizes
+description: Commands and ecosystems automatically optimized by contextcrawler with typical token savings
 sidebar:
   order: 1
 ---
 
-# What RTK Optimizes
+# What contextcrawler Optimizes
 
-Once RTK is installed with a hook, these commands are automatically intercepted and filtered. You run them normally — the hook rewrites them transparently before execution.
+Once contextcrawler is installed with a hook, these commands are automatically intercepted and filtered. You run them normally — the hook rewrites them transparently before execution.
 
 Typical savings: 60-99%.
 
@@ -114,8 +114,8 @@ Typical savings: 60-99%.
 | `grep` | 70% | Truncated lines, grouped by file |
 | `diff` | 65% | Context reduced |
 | `wc` | 60% | Compact counts |
-| `cat` / `head` / `tail <file>` | 60-80% | Smart file reading via `rtk read` |
-| `rtk smart <file>` | 85% | 2-line heuristic code summary (signatures only) |
+| `cat` / `head` / `tail <file>` | 60-80% | Smart file reading via `contextcrawler read` |
+| `contextcrawler smart <file>` | 85% | 2-line heuristic code summary (signatures only) |
 
 ## Cloud and Data
 
@@ -127,7 +127,7 @@ Typical savings: 60-99%.
 
 ## Global flags
 
-These flags apply to all RTK commands and can push savings even higher:
+These flags apply to all contextcrawler commands and can push savings even higher:
 
 | Flag | Description |
 |------|-------------|
@@ -136,10 +136,10 @@ These flags apply to all RTK commands and can push savings even higher:
 
 ```bash
 # Ultra-compact: even smaller output
-rtk git log --ultra-compact
+contextcrawler git log --ultra-compact
 
-# Debug: see what RTK is doing
-rtk git status -vvv
+# Debug: see what contextcrawler is doing
+contextcrawler git status -vvv
 ```
 
 :::note
@@ -148,10 +148,10 @@ Use `--ultra-compact` (long form) rather than `-u` when working with Git command
 
 ## Commands that are not rewritten
 
-If a command isn't in the list above, RTK runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
+If a command isn't in the list above, contextcrawler runs it through passthrough — the output reaches the LLM unchanged. You can explicitly track unsupported commands:
 
 ```bash
-rtk proxy make install    # runs make install, tracks usage, no filtering
+contextcrawler proxy make install    # runs make install, tracks usage, no filtering
 ```
 
-To check which commands were missed opportunities: `rtk discover`.
+To check which commands were missed opportunities: `contextcrawler discover`.

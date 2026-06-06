@@ -41,7 +41,7 @@ pub struct ExtractedCommand {
 ///
 /// Note: Cursor Agent transcripts use a text-only format without structured
 /// tool_use/tool_result blocks, so command extraction is not possible.
-/// Use `rtk gain` to track savings for Cursor sessions instead.
+/// Use `ctxcrl gain` to track savings for Cursor sessions instead.
 pub trait SessionProvider {
     fn discover_sessions(
         &self,
@@ -491,7 +491,7 @@ mod tests {
         // Claude Code replaces both '/' and '.' with '-'.
         // A cwd like /Users/first.last must produce the same slug as
         // Claude's projects directory (-Users-first-last), otherwise
-        // `rtk discover` finds zero sessions for that project.
+        // `ctxcrl discover` finds zero sessions for that project.
         assert_eq!(
             ClaudeProvider::encode_project_path("/Users/first.last/my-project"),
             "-Users-first-last-my-project"

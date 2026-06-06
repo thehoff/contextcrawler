@@ -265,7 +265,7 @@ fn parse_rg_args(args: &[String]) -> ParsedRg {
 /// Defence-in-depth: the parser only emits `Search` when a pattern is
 /// present (line 250), so `pattern` is structurally Some here. If a future
 /// parser change ever violates that invariant, fall through to raw rg
-/// rather than panic — RTK never blocks the user.
+/// rather than panic — CTXCRL never blocks the user.
 fn run_search_mode(parsed: &ParsedRg, args: &[String], verbose: u8) -> Result<i32> {
     let Some(pattern) = parsed.pattern.as_deref() else {
         eprintln!(
@@ -600,7 +600,7 @@ mod tests {
 
     // Fixture-backed: real `rg --files src/` output captured at fixture
     // creation time. Confirms the directory-grouping framing keeps roughly
-    // parity with raw on a real RTK file list.
+    // parity with raw on a real CTXCRL file list.
     #[test]
     fn test_filter_files_real_fixture_keeps_parity() {
         let raw = include_str!("../../../tests/fixtures/rg_files_raw.txt");

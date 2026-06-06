@@ -15,7 +15,7 @@
 //!   notes/research/supply-chain-audit-report.md
 //! in the umbrella repo.
 //!
-//! Subprocess-free internal HTTP via `ureq` (already an rtk dep).
+//! Subprocess-free internal HTTP via `ureq` (already a ContextCrawler dep).
 
 use anyhow::Result;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};

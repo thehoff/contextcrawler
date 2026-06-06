@@ -20,34 +20,34 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
     let diff = compute_diff(&lines1, &lines2);
-    let mut rtk = String::new();
+    let mut ctxcrl = String::new();
 
     if diff.added == 0 && diff.removed == 0 {
-        rtk.push_str("[ok] Files are identical");
-        println!("{}", rtk);
+        ctxcrl.push_str("[ok] Files are identical");
+        println!("{}", ctxcrl);
         timer.track(
             &format!("diff {} {}", file1.display(), file2.display()),
             "contextcrawler diff",
             &raw,
-            &rtk,
+            &ctxcrl,
         );
         return Ok(());
     }
 
-    rtk.push_str(&format!("{} → {}\n", file1.display(), file2.display()));
-    rtk.push_str(&format!(
+    ctxcrl.push_str(&format!("{} → {}\n", file1.display(), file2.display()));
+    ctxcrl.push_str(&format!(
         "   +{} added, -{} removed, ~{} modified\n\n",
         diff.added, diff.removed, diff.modified
     ));
 
-    rtk.push_str(&format_diff_changes(&diff));
+    ctxcrl.push_str(&format_diff_changes(&diff));
 
-    print!("{}", rtk);
+    print!("{}", ctxcrl);
     timer.track(
         &format!("diff {} {}", file1.display(), file2.display()),
         "contextcrawler diff",
         &raw,
-        &rtk,
+        &ctxcrl,
     );
     Ok(())
 }

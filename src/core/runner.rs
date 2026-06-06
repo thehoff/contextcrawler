@@ -111,7 +111,7 @@ pub enum RunMode<'a> {
 /// Shared capture-filter execution path used by both `Filtered` and
 /// `FilteredWithExit`. The filter receives the captured text and the child's
 /// exit code; exit-blind filters simply ignore the second argument. The
-/// no-bloat guard (issue #95) and exit-code propagation (RTK rule #5) are
+/// no-bloat guard (issue #95) and exit-code propagation (CTXCRL rule #5) are
 /// applied identically for both modes.
 fn run_captured_filter<F>(
     mut cmd: Command,
@@ -270,7 +270,7 @@ where
 /// exit code. Use this when a filter's summary message must not contradict the
 /// real exit status (e.g. a build filter that should never print "Success" on
 /// a non-zero exit). Exit-code propagation is unchanged — the child's code is
-/// still returned verbatim (RTK rule #5).
+/// still returned verbatim (CTXCRL rule #5).
 pub fn run_filtered_with_exit<F>(
     cmd: Command,
     tool_name: &str,

@@ -17,7 +17,7 @@ Internal code review of the `contextcrawler web <url>` command path.
 ## Good practices observed
 
 - `core::utils::resolved_command("curl")` resolves curl via the same
-  PATH lookup the rest of rtk uses. Consistent.
+  PATH lookup the rest of contextcrawler uses. Consistent.
 - `-s -L` (silent + follow redirects) — sensible defaults.
 - HTML extraction is offline and well-tested (10 inline tests:
   preserve/strip nav, footer, scripts, code blocks, tables, alt
@@ -143,7 +143,7 @@ println!("{}", filtered);
 
 After HTML extraction, `filtered` might still be large. There's no
 truncation — entire page content reaches the LLM. Token-cost concern
-more than security, but `RTK_TEE_DIR` isn't applied to the web
+more than security, but `CTXCRL_TEE_DIR` isn't applied to the web
 command either. Not a security finding; UX/cost note.
 
 ### F-07: `url` positional arg vs flag injection (INFO)

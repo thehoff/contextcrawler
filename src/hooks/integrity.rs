@@ -92,11 +92,11 @@ const HASH_FILENAME: &str = ".ctxcrl-hook.sha256";
 pub enum IntegrityStatus {
     /// Hash matches — hook is unmodified since last install/update
     Verified,
-    /// Hash mismatch — hook has been modified outside of `rtk init`
+    /// Hash mismatch — hook has been modified outside of `contextcrawler init`
     Tampered { expected: String, actual: String },
     /// Hook exists but no stored hash (installed before integrity checks)
     NoBaseline,
-    /// Neither hook nor hash file exist (RTK not installed)
+    /// Neither hook nor hash file exist (ContextCrawler not installed)
     NotInstalled,
     /// Hash file exists but hook was deleted
     OrphanedHash,
@@ -500,7 +500,7 @@ pub fn resolve_hook_path() -> Result<PathBuf> {
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
-/// Run integrity check and print results (for `rtk verify` subcommand)
+/// Run integrity check and print results (for `contextcrawler verify` subcommand)
 pub fn run_verify(verbose: u8) -> Result<()> {
     let hook_path = resolve_hook_path()?;
     let hash_file = hash_path(&hook_path);
@@ -591,7 +591,7 @@ pub fn run_verify(verbose: u8) -> Result<()> {
 /// - `Tampered`: print warning to stderr, exit 1
 /// - `OrphanedHash`: warn to stderr, continue
 ///
-/// When RTK uses native binary commands (no script file), integrity
+/// When ContextCrawler uses native binary commands (no script file), integrity
 /// checking is a no-op — there is no script to tamper with.
 ///
 /// No env-var bypass is provided — if the hook is legitimately modified,

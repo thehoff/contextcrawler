@@ -1,6 +1,6 @@
-# RTK Tracking API Documentation
+# contextcrawler Tracking API Documentation
 
-Comprehensive documentation for RTK's token savings tracking system.
+Comprehensive documentation for contextcrawler's token savings tracking system.
 
 ## Table of Contents
 
@@ -14,8 +14,8 @@ Comprehensive documentation for RTK's token savings tracking system.
 
 ## Overview
 
-RTK's tracking system records every command execution to provide analytics on token savings. The system:
-- Stores command history in SQLite (~/.local/share/rtk/tracking.db)
+contextcrawler's tracking system records every command execution to provide analytics on token savings. The system:
+- Stores command history in SQLite (~/.local/share/ctxcrl/tracking.db)
 - Tracks input/output tokens, savings percentage, and execution time
 - Automatically cleans up records older than 90 days
 - Provides aggregation APIs (daily/weekly/monthly)
@@ -26,7 +26,7 @@ RTK's tracking system records every command execution to provide analytics on to
 ### Data Flow
 
 ```
-rtk command execution
+contextcrawler command execution
   ↓
 TimedExecution::start()
   ↓
@@ -36,18 +36,18 @@ TimedExecution::track(original_cmd, rtk_cmd, input, output)
   ↓
 Tracker::record(original_cmd, rtk_cmd, input_tokens, output_tokens, exec_time_ms)
   ↓
-SQLite database (~/.local/share/rtk/tracking.db)
+SQLite database (~/.local/share/ctxcrl/tracking.db)
   ↓
 Aggregation APIs (get_summary, get_all_days, etc.)
   ↓
-CLI output (rtk gain) or JSON/CSV export
+CLI output (contextcrawler gain) or JSON/CSV export
 ```
 
 ### Storage Location
 
-- **Linux**: `~/.local/share/rtk/tracking.db`
-- **macOS**: `~/Library/Application Support/rtk/tracking.db`
-- **Windows**: `%APPDATA%\rtk\tracking.db`
+- **Linux**: `~/.local/share/ctxcrl/tracking.db`
+- **macOS**: `~/Library/Application Support/contextcrawler/tracking.db`
+- **Windows**: `%APPDATA%\contextcrawler\tracking.db`
 
 ### Data Retention
 
@@ -74,7 +74,7 @@ impl Tracker {
     pub fn record(
         &self,
         original_cmd: &str,      // Standard command (e.g., "ls -la")
-        rtk_cmd: &str,            // RTK command (e.g., "rtk ls")
+        rtk_cmd: &str,            // contextcrawler command (e.g., "contextcrawler ls")
         input_tokens: usize,      // Estimated input tokens
         output_tokens: usize,     // Actual output tokens
         exec_time_ms: u64,        // Execution time in milliseconds
@@ -177,7 +177,7 @@ Individual command record from history.
 ```rust
 pub struct CommandRecord {
     pub timestamp: DateTime<Utc>, // UTC timestamp
-    pub rtk_cmd: String,           // RTK command used
+    pub rtk_cmd: String,           // contextcrawler command used
     pub saved_tokens: usize,       // Tokens saved
     pub savings_pct: f64,          // Savings percentage
 }
@@ -223,7 +223,7 @@ pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str);
 ### Basic Tracking
 
 ```rust
-use rtk::tracking::{TimedExecution, Tracker};
+use contextcrawler::tracking::{TimedExecution, Tracker};
 
 fn main() -> anyhow::Result<()> {
     // Start timer
@@ -234,7 +234,7 @@ fn main() -> anyhow::Result<()> {
     let output = execute_rtk_command()?;
 
     // Track execution
-    timer.track("ls -la", "rtk ls", &input, &output);
+    timer.track("ls -la", "contextcrawler ls", &input, &output);
 
     Ok(())
 }
@@ -243,7 +243,7 @@ fn main() -> anyhow::Result<()> {
 ### Querying Statistics
 
 ```rust
-use rtk::tracking::Tracker;
+use contextcrawler::tracking::Tracker;
 
 fn main() -> anyhow::Result<()> {
     let tracker = Tracker::new()?;
@@ -277,7 +277,7 @@ fn main() -> anyhow::Result<()> {
 For commands that stream output or run interactively (no output capture):
 
 ```rust
-use rtk::tracking::TimedExecution;
+use contextcrawler::tracking::TimedExecution;
 
 fn main() -> anyhow::Result<()> {
     let timer = TimedExecution::start();
@@ -286,7 +286,7 @@ fn main() -> anyhow::Result<()> {
     execute_streaming_command()?;
 
     // Track timing only (input_tokens=0, output_tokens=0)
-    timer.track_passthrough("git tag --list", "rtk git tag --list");
+    timer.track_passthrough("git tag --list", "contextcrawler git tag --list");
 
     Ok(())
 }
@@ -356,8 +356,8 @@ date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,
 ### GitHub Actions - Track Savings in CI
 
 ```yaml
-# .github/workflows/track-rtk-savings.yml
-name: Track RTK Savings
+# .github/workflows/track-ctxcrl-savings.yml
+name: Track contextcrawler Savings
 
 on:
   schedule:
@@ -368,29 +368,29 @@ jobs:
   track-savings:
     runs-on: ubuntu-latest
     steps:
-      - name: Install RTK
+      - name: Install contextcrawler
         run: cargo install --git https://github.com/rtk-ai/rtk
 
       - name: Export weekly stats
         run: |
-          rtk gain --weekly --format json > rtk-weekly.json
-          cat rtk-weekly.json
+          contextcrawler gain --weekly --format json > ctxcrl-weekly.json
+          cat ctxcrl-weekly.json
 
       - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:
-          name: rtk-metrics
-          path: rtk-weekly.json
+          name: ctxcrl-metrics
+          path: ctxcrl-weekly.json
 
       - name: Post to Slack
         if: success()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
         run: |
-          SAVINGS=$(jq -r '.[0].saved_tokens' rtk-weekly.json)
-          PCT=$(jq -r '.[0].savings_pct' rtk-weekly.json)
+          SAVINGS=$(jq -r '.[0].saved_tokens' ctxcrl-weekly.json)
+          PCT=$(jq -r '.[0].savings_pct' ctxcrl-weekly.json)
           curl -X POST -H 'Content-type: application/json' \
-            --data "{\"text\":\"📊 RTK Weekly: ${SAVINGS} tokens saved (${PCT}%)\"}" \
+            --data "{\"text\":\"📊 contextcrawler Weekly: ${SAVINGS} tokens saved (${PCT}%)\"}" \
             $SLACK_WEBHOOK
 ```
 
@@ -399,16 +399,16 @@ jobs:
 ```python
 #!/usr/bin/env python3
 """
-Export RTK metrics to Grafana/Datadog/etc.
+Export contextcrawler metrics to Grafana/Datadog/etc.
 """
 import json
 import subprocess
 from datetime import datetime
 
 def get_rtk_metrics():
-    """Fetch RTK metrics as JSON."""
+    """Fetch contextcrawler metrics as JSON."""
     result = subprocess.run(
-        ["rtk", "gain", "--all", "--format", "json"],
+        ["contextcrawler", "gain", "--all", "--format", "json"],
         capture_output=True,
         text=True
     )
@@ -422,13 +422,13 @@ def export_to_datadog(metrics):
 
     for day in metrics.get("daily", []):
         datadog.api.Metric.send(
-            metric="rtk.tokens_saved",
+            metric="contextcrawler.tokens_saved",
             points=[(datetime.now().timestamp(), day["saved_tokens"])],
             tags=[f"date:{day['date']}"]
         )
 
         datadog.api.Metric.send(
-            metric="rtk.savings_pct",
+            metric="contextcrawler.savings_pct",
             points=[(datetime.now().timestamp(), day["savings_pct"])],
             tags=[f"date:{day['date']}"]
         )
@@ -439,14 +439,14 @@ if __name__ == "__main__":
     print(f"Exported {len(metrics.get('daily', []))} days to Datadog")
 ```
 
-### Rust Integration (Using RTK as Library)
+### Rust Integration (Using contextcrawler as Library)
 
 ```rust
 // In your Cargo.toml
 // [dependencies]
-// rtk = { git = "https://github.com/rtk-ai/rtk" }
+// contextcrawler = { git = "https://github.com/rtk-ai/rtk" }
 
-use rtk::tracking::{Tracker, TimedExecution};
+use contextcrawler::tracking::{Tracker, TimedExecution};
 use anyhow::Result;
 
 fn main() -> Result<()> {
@@ -490,7 +490,7 @@ CREATE TABLE commands (
     id INTEGER PRIMARY KEY,
     timestamp TEXT NOT NULL,           -- RFC3339 UTC timestamp
     original_cmd TEXT NOT NULL,        -- Original command (e.g., "ls -la")
-    rtk_cmd TEXT NOT NULL,             -- RTK command (e.g., "rtk ls")
+    rtk_cmd TEXT NOT NULL,             -- contextcrawler command (e.g., "contextcrawler ls")
     input_tokens INTEGER NOT NULL,     -- Estimated input tokens
     output_tokens INTEGER NOT NULL,    -- Actual output tokens
     saved_tokens INTEGER NOT NULL,     -- input_tokens - output_tokens
@@ -539,8 +539,8 @@ let _ = conn.execute(
 ## Security & Privacy
 
 - **Local storage only**: Tracking database never leaves the machine
-- **Telemetry requires consent**: RTK can send a daily anonymous usage ping (version, OS, command counts, token savings). Disabled by default, requires explicit consent via `rtk init` or `rtk telemetry enable`. Manage with `rtk telemetry status/disable/forget`. Override: `RTK_TELEMETRY_DISABLED=1`
-- **User control**: Users can delete `~/.local/share/rtk/tracking.db` anytime
+- **Telemetry requires consent**: contextcrawler can send a daily anonymous usage ping (version, OS, command counts, token savings). Disabled by default, requires explicit consent via `contextcrawler init` or `contextcrawler telemetry enable`. Manage with `contextcrawler telemetry status/disable/forget`. Override: `CTXCRL_TELEMETRY_DISABLED=1`
+- **User control**: Users can delete `~/.local/share/ctxcrl/tracking.db` anytime
 - **90-day retention**: Old data automatically purged
 
 ## Troubleshooting
@@ -548,16 +548,16 @@ let _ = conn.execute(
 ### Database locked error
 
 If you see "database is locked" errors:
-- Ensure only one RTK process writes at a time
-- Check file permissions on `~/.local/share/rtk/tracking.db`
-- Delete and recreate: `rm ~/.local/share/rtk/tracking.db && rtk gain`
+- Ensure only one contextcrawler process writes at a time
+- Check file permissions on `~/.local/share/ctxcrl/tracking.db`
+- Delete and recreate: `rm ~/.local/share/ctxcrl/tracking.db && contextcrawler gain`
 
 ### Missing exec_time_ms column
 
-Older databases may not have the `exec_time_ms` column. RTK automatically migrates on first use, but you can force it:
+Older databases may not have the `exec_time_ms` column. contextcrawler automatically migrates on first use, but you can force it:
 
 ```bash
-sqlite3 ~/.local/share/rtk/tracking.db \
+sqlite3 ~/.local/share/ctxcrl/tracking.db \
   "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0"
 ```
 
@@ -579,5 +579,5 @@ Planned improvements (contributions welcome):
 ## See Also
 
 - [README.md](../README.md) - Main project documentation
-- [COMMAND_AUDIT.md](../claudedocs/COMMAND_AUDIT.md) - List of all RTK commands
+- [COMMAND_AUDIT.md](../claudedocs/COMMAND_AUDIT.md) - List of all contextcrawler commands
 - [Rust docs](https://docs.rs/) - Run `cargo doc --open` for API docs

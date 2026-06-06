@@ -42,7 +42,7 @@ fn run_status() -> Result<()> {
     }
     println!("  enabled:       {}", enabled_str);
     if env_override {
-        println!("  env override:  RTK_TELEMETRY_DISABLED=1 (blocked)");
+        println!("  env override:  CTXCRL_TELEMETRY_DISABLED=1 (blocked)");
     }
 
     let salt_path = super::telemetry::salt_file_path();
@@ -69,7 +69,7 @@ fn run_enable() -> Result<()> {
         );
     }
 
-    eprintln!("RTK collects anonymous usage metrics once per day to improve filters.");
+    eprintln!("CTXCRL collects anonymous usage metrics once per day to improve filters.");
     eprintln!();
     eprintln!("  What:    command names (not arguments), token savings, OS, version");
     eprintln!("  Who:     RTK AI Labs, contact@rtk-ai.app");

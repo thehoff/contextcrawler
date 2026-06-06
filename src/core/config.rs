@@ -28,7 +28,7 @@ pub struct Config {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct HooksConfig {
     /// Commands to exclude from auto-rewrite (e.g. ["curl", "playwright"]).
-    /// Survives `rtk init -g` re-runs since config.toml is user-owned.
+    /// Survives `ctxcrl init -g` re-runs since config.toml is user-owned.
     #[serde(default)]
     pub exclude_commands: Vec<String>,
 
@@ -36,7 +36,7 @@ pub struct HooksConfig {
     /// to a filter, then re-prepended on the rewrite. For example, with
     /// `transparent_prefixes = ["docker exec mycontainer"]`, the command
     /// `docker exec mycontainer git status` rewrites to
-    /// `docker exec mycontainer rtk git status` instead of passing through
+    /// `docker exec mycontainer ctxcrl git status` instead of passing through
     /// unrewritten.
     ///
     /// Useful for any per-project env wrapper that sits in front of every

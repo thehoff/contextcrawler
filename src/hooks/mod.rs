@@ -11,6 +11,6 @@ pub mod permissions;
 pub mod rewrite_cmd;
 pub mod trust;
 pub mod verify_cmd;
-// contextzip-downstream:
+// downstream:
 pub mod supply_chain_gate;
 pub mod tirith_gate;

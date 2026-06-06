@@ -31,7 +31,7 @@ Three policy classes emerge:
 | Class | Examples | Timeout policy |
 |---|---|---|
 | **A — hook-blocking** | tirith gate (✓ done), `permissions.rs` git rev-parse, future PreToolUse hooks | Aggressive: **8–10s hard cap**. Hung child = hung agent. |
-| **B — user-driven filter** | `rtk cargo test`, `rtk pnpm install`, `rtk vitest`, `rtk container exec` | No deadline by default. User explicitly invoked, can ^C. Apply a **stdout cap (64 MiB)** as DoS bound, not a wall-clock cap. |
+| **B — user-driven filter** | `contextcrawler cargo test`, `contextcrawler pnpm install`, `contextcrawler vitest`, `contextcrawler container exec` | No deadline by default. User explicitly invoked, can ^C. Apply a **stdout cap (64 MiB)** as DoS bound, not a wall-clock cap. |
 | **C — internal short-lived** | `gh pr view`, `pip list`, `pnpm outdated`, `golangci-lint`, doctor scripts | **Soft deadline (30–60s)** with cap, surfaced as a filter warning, fallback to raw output. |
 
 The hardening therefore is **not** "wrap every site in wait-timeout".
@@ -67,7 +67,7 @@ src/cmds/git/git.rs:1058          git commit (stdin inherit) class B (user-drive
 src/main.rs:1301                  TOML-match filter dispatch class B (user-driven filter)
 src/main.rs:2263                  npx prisma passthrough     class B* (explicit passthrough)
 src/main.rs:2483                  Proxy command              class B* (explicit passthrough)
-src/main.rs:2711                  rtk web curl invocation    in-process timeout via --max-time 30
+src/main.rs:2711                  contextcrawler web curl invocation    in-process timeout via --max-time 30
 src/main.rs:2393                  --shell raw passthrough    class B* (explicit passthrough)
 
 [HOOK-PATH — newly hardened in this branch]
@@ -92,7 +92,7 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
 
 `Command::output()` reads stdout and stderr to completion. A runaway
 child (e.g. `pnpm list` against a circular monorepo, or a malicious
-filter command in `rtk summary "$evil"`) can fill memory until OOM.
+filter command in `contextcrawler summary "$evil"`) can fill memory until OOM.
 18 modules inherit this gap, including `cmds/cloud/curl_cmd.rs`
 (network-attacker-controlled) and `cmds/system/summary.rs` (user-string
 command).
@@ -115,7 +115,7 @@ hangs the agent indefinitely — the same failure mode tirith F-01 had.
 Default budget for hook callers: **10s**. Permissions hook switches to
 this. Same primitive available for any future PreToolUse hook.
 
-### F-03 (MEDIUM) — `rtk summary "$cmd"` runs arbitrary user input
+### F-03 (MEDIUM) — `contextcrawler summary "$cmd"` runs arbitrary user input
 
 `src/cmds/system/summary.rs:65` calls `exec_capture` on a command
 string the user passed. Agent-controlled in CC integration. Mitigated
@@ -146,7 +146,7 @@ $ # (no matches)
 
 Both call sites use raw `Command::new(bin).output()`. The hardening
 either was never committed or got lost in a rebase. **Acute** because
-`security_cmd` runs from `rtk security` — invoked from the dashboard
+`security_cmd` runs from `contextcrawler security` — invoked from the dashboard
 poll path; a hung tirith here is the same UX failure mode tirith F-01
 existed to fix in the hook path.
 
@@ -173,7 +173,7 @@ document why. Defer to a per-caller branch.
 Same as F-07 — direct `cmd.output()` bypassing the cap. Same fix
 recommendation, same `stdin(Stdio::inherit())` constraint. Defer.
 
-### F-09 (informational) — `main.rs:2711` `rtk web` curl call
+### F-09 (informational) — `main.rs:2711` `contextcrawler web` curl call
 
 Not capped at the spawn layer, but curl is invoked with
 `--max-time 30` and `--max-filesize 64M` (v0.1.6 web hardening).
@@ -187,8 +187,8 @@ The `--shell` / raw passthrough path inherits the parent's stdin/stdout
 and uses `.status()`. No timeout, no cap. **This is by design** — it's
 the explicit "I want raw passthrough" escape hatch. The user can ^C
 themselves. Adding a cap or deadline would change documented behaviour
-and break legitimate long-running commands (`rtk proxy 'tail -f log'`,
-`rtk proxy 'cargo watch'`). Document this in THREAT_MODEL.md as an
+and break legitimate long-running commands (`contextcrawler proxy 'tail -f log'`,
+`contextcrawler proxy 'cargo watch'`). Document this in THREAT_MODEL.md as an
 accepted limitation if not already there.
 
 ## Recommended changes

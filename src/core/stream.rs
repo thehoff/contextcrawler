@@ -891,8 +891,8 @@ pub const DEFAULT_CAPTURE_STREAM_MAX: u64 = 64 * 1024 * 1024;
 /// Limits applied to `exec_capture_with_limits`.
 ///
 /// `Default` uses generous caps (64 MiB / 64 MiB) and no wall-clock
-/// timeout — appropriate for user-driven filter runs (`rtk cargo test`,
-/// `rtk pnpm install`) where the user has explicit context and can ^C.
+/// timeout — appropriate for user-driven filter runs (`ctxcrl cargo test`,
+/// `ctxcrl pnpm install`) where the user has explicit context and can ^C.
 /// Hook-path callers should use `exec_capture_short` instead, which sets
 /// `timeout = Some(_)` so a hung child cannot freeze the agent.
 pub struct CaptureLimits {

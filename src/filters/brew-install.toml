@@ -21,9 +21,9 @@ max_lines = 20
 [[tests.brew-install]]
 name = "already installed short-circuits"
 input = """
-Warning: rtk 0.27.1 is already installed and up-to-date.
+Warning: contextcrawler 0.27.1 is already installed and up-to-date.
 To reinstall 0.27.1, run:
-  brew reinstall rtk
+  brew reinstall contextcrawler
 """
 expected = "ok (already installed)"
 

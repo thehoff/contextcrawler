@@ -166,7 +166,7 @@ fn collect_rows(mut rows: rusqlite::Rows<'_>) -> Result<Vec<TrackedCommand>> {
     while let Some(row) = rows.next()? {
         let ts_str: String = row.get(0)?;
         let original: String = row.get(1)?;
-        let rtk: String = row.get(2)?;
+        let ctxcrl: String = row.get(2)?;
         // project_path may be NULL on legacy rows that pre-date the column
         // or have been migrated with DEFAULT ''. Empty strings are treated
         // as "unknown" so they don't pollute the tie-break.
@@ -183,7 +183,7 @@ fn collect_rows(mut rows: rusqlite::Rows<'_>) -> Result<Vec<TrackedCommand>> {
         out.push(TrackedCommand {
             timestamp,
             original_cmd: original,
-            ctxcrl_cmd: rtk,
+            ctxcrl_cmd: ctxcrl,
             project_slug,
         });
     }
@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_rtk_cmd_still_counts() {
+    fn test_fallback_ctxcrl_cmd_still_counts() {
         let db = mk_db(&[(
             "2026-05-19T10:00:00+00:00",
             "unknown-cmd foo",

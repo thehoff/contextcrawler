@@ -1,16 +1,16 @@
-# RTK Coding Practices v1.0
+# contextcrawler Coding Practices v1.0
 
-This document follows the [Design Philosophy](../../CONTRIBUTING.md#design-philosophy) in `CONTRIBUTING.md`. Once you understand the mental model there, this guide describes the coding practices we use day-to-day in RTK and what reviewers will look for on your PR.
+This document follows the [Design Philosophy](../../CONTRIBUTING.md#design-philosophy) in `CONTRIBUTING.md`. Once you understand the mental model there, this guide describes the coding practices we use day-to-day in contextcrawler and what reviewers will look for on your PR.
 
 Our goal is to keep the codebase consistent and easy to extend. PRs that deviate from these practices may be asked for changes during review — this is guidance, not a gate. If a rule seems wrong for your specific case, flag it in the PR and we'll discuss.
 
-> **Heads up:** RTK has grown quickly and some code in the repository predates these practices. You may spot modules that don't fully follow them — this is expected, and core/ecosystem maintainers will refactor them over time. When in doubt, follow the practices below for new code rather than mirroring older patterns.
+> **Heads up:** contextcrawler has grown quickly and some code in the repository predates these practices. You may spot modules that don't fully follow them — this is expected, and core/ecosystem maintainers will refactor them over time. When in doubt, follow the practices below for new code rather than mirroring older patterns.
 
 ---
 
 ## Quick Start for Contributors
 
-New to RTK? The fastest path to a mergeable first PR:
+New to contextcrawler? The fastest path to a mergeable first PR:
 
 1. **Read the flow once.** Start at [`CONTRIBUTING.md`](../../CONTRIBUTING.md), then skim [`docs/contributing/TECHNICAL.md`](TECHNICAL.md) to see how a command flows from `main.rs` → a `*_cmd.rs` filter → tracking → stdout.
 2. **Look at a good example.** [`src/cmds/git/git.rs`](../../src/cmds/git/git.rs) is a representative filter — it shows the `run()` entry point, `lazy_static!` regex setup, filter helpers, and embedded tests all in one file.
@@ -30,9 +30,9 @@ For the full framing (Correctness vs. Token Savings, Transparency, Never Block, 
 
 Two practical reminders that come up often in review:
 
-**Portability.** RTK should behave the same across platforms. Use `#[cfg(target_os = "...")]` for platform-specific code; never assume a single OS.
+**Portability.** contextcrawler should behave the same across platforms. Use `#[cfg(target_os = "...")]` for platform-specific code; never assume a single OS.
 
-**Extensibility.** RTK should be modular. Before writing a new feature or filter, check whether an existing entry point fits — `runner::run_filtered()`, `runner::run_passthrough()`, helpers in `src/core/utils.rs`, etc. If your logic could be reused elsewhere, lift it into a shared component rather than burying it in one `*_cmd.rs` file.
+**Extensibility.** contextcrawler should be modular. Before writing a new feature or filter, check whether an existing entry point fits — `runner::run_filtered()`, `runner::run_passthrough()`, helpers in `src/core/utils.rs`, etc. If your logic could be reused elsewhere, lift it into a shared component rather than burying it in one `*_cmd.rs` file.
 
 ---
 
@@ -79,7 +79,7 @@ In short: avoid noise comments; keep the ones that would save a future reader a 
 
 Use explicit, descriptive names for variables, just like for functions.
 
-Do not hardcode repetitive patterns or values that control behavior — extract them into named constants at the top of the file. For anything a user might want to tune (thresholds, limits, display cutoffs), use `config::limits()` so it flows through `~/.config/rtk/config.toml`.
+Do not hardcode repetitive patterns or values that control behavior — extract them into named constants at the top of the file. For anything a user might want to tune (thresholds, limits, display cutoffs), use `config::limits()` so it flows through `~/.config/ctxcrl/config.toml`.
 
 Example from `src/cmds/git/git.rs`:
 
@@ -101,13 +101,13 @@ Legitimate exceptions include:
 
 When you keep a longer function, aim to make each block obviously cohesive — and consider leaving a short comment on *why* splitting it would hurt.
 
-**Files are expected to be large** in RTK because each module keeps its tests and fixtures alongside the implementation. When a file becomes hard to navigate, split responsibilities across multiple files where possible. If it isn't possible, a big file is acceptable for now.
+**Files are expected to be large** in contextcrawler because each module keeps its tests and fixtures alongside the implementation. When a file becomes hard to navigate, split responsibilities across multiple files where possible. If it isn't possible, a big file is acceptable for now.
 
 ---
 
 ## Imports and Dependencies
 
-RTK is a low-dependency project. Before adding a crate, check whether the functionality is already covered by `std`, an existing dependency, or `src/core/utils.rs`. If a few lines of straightforward code will do the job, prefer that over a new dependency.
+contextcrawler is a low-dependency project. Before adding a crate, check whether the functionality is already covered by `std`, an existing dependency, or `src/core/utils.rs`. If a few lines of straightforward code will do the job, prefer that over a new dependency.
 
 When a new dependency is genuinely needed, justify it in the PR description. For non-trivial additions, it's worth opening a discussion with maintainers first.
 
@@ -124,7 +124,7 @@ Example of the standard fallback pattern for a filter:
 ```rust
 let filtered = filter_output(&output.stdout)
     .unwrap_or_else(|e| {
-        eprintln!("rtk: filter warning: {}", e);
+        eprintln!("contextcrawler: filter warning: {}", e);
         output.stdout.clone() // passthrough on failure — never block the user
     });
 ```
@@ -173,13 +173,13 @@ Fixtures go in `tests/fixtures/` and should be captured from real command output
 
 ## Security
 
-RTK executes shell commands on behalf of the user, so security is a first-class concern.
+contextcrawler executes shell commands on behalf of the user, so security is a first-class concern.
 
 **Command execution.** All commands go through argument arrays via `Command::new().args()` — never through shell string concatenation. This prevents injection. Always use `resolved_command()` from `src/core/utils.rs` instead of a raw `Command::new()`.
 
-**Hook integrity.** RTK verifies hook files via SHA-256 hashes before operational commands. If a hook has been tampered with, RTK exits with code 1. See [`src/hooks/integrity.rs`](../../src/hooks/integrity.rs).
+**Hook integrity.** contextcrawler verifies hook files via SHA-256 hashes before operational commands. If a hook has been tampered with, contextcrawler exits with code 1. See [`src/hooks/integrity.rs`](../../src/hooks/integrity.rs).
 
-**Project filter trust.** `.rtk/filters.toml` files are not loaded until the user explicitly trusts them, and content changes require re-trust. See [`src/hooks/trust.rs`](../../src/hooks/trust.rs).
+**Project filter trust.** `.ctxcrl/filters.toml` files are not loaded until the user explicitly trusts them, and content changes require re-trust. See [`src/hooks/trust.rs`](../../src/hooks/trust.rs).
 
 **Permission whitelist.** `is_operational_command()` in `main.rs` uses a whitelist pattern — new commands are *not* integrity-checked until explicitly added. This is an intentional security posture: fail-open with an audit trail is preferred over false confidence.
 

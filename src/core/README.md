@@ -11,7 +11,7 @@ Owns: configuration loading, token tracking persistence, TOML filter engine, tee
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
 ## Purpose
-Core infrastructure shared by all RTK command modules. Every filter, tracker, and command handler depends on these modules. No inward dependencies — leaf in the dependency graph (no circular imports possible).
+Core infrastructure shared by all CTXCRL command modules. Every filter, tracker, and command handler depends on these modules. No inward dependencies — leaf in the dependency graph (no circular imports possible).
 
 ## TOML Filter Pipeline
 
@@ -27,8 +27,8 @@ The TOML DSL applies 8 stages in order:
 8. **on_empty**: Return message if result is empty after all stages
 
 Three-tier filter lookup (first match wins):
-1. `.rtk/filters.toml` (project-local, requires `rtk trust`)
-2. `~/.config/rtk/filters.toml` (user-global)
+1. `.ctxcrl/filters.toml` (project-local, requires `ctxcrl trust`)
+2. `~/.config/ctxcrl/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
 
 ## Tracking Database Schema
@@ -38,7 +38,7 @@ CREATE TABLE commands (
   id INTEGER PRIMARY KEY,
   timestamp TEXT,              -- UTC ISO8601
   original_cmd TEXT,           -- "ls -la"
-  rtk_cmd TEXT,                -- "rtk ls"
+  ctxcrl_cmd TEXT,             -- "ctxcrl ls"
   project_path TEXT,           -- cwd (for project-scoped stats)
   input_tokens INTEGER,        -- estimated from raw output
   output_tokens INTEGER,       -- estimated from filtered output

@@ -71,17 +71,17 @@ pub fn run(
         )
     };
 
-    let rtk_output = if line_numbers {
+    let ctxcrl_output = if line_numbers {
         format_with_line_numbers(&filtered)
     } else {
         filtered.clone()
     };
-    print!("{}", rtk_output);
+    print!("{}", ctxcrl_output);
     timer.track(
         &format!("cat {}", file.display()),
         "contextcrawler read",
         &content,
-        &rtk_output,
+        &ctxcrl_output,
     );
     Ok(())
 }
@@ -132,7 +132,7 @@ pub fn run_stdin(
             tail_lines,
             &read_config,
             // Apply the cap to stdin too. Piping a huge unrecognised file via
-            // `cat … | rtk read -` should give the same protection as reading
+            // `cat … | ctxcrl read -` should give the same protection as reading
             // it directly. The marker tells the consumer it was capped and how
             // to recover full content if they need it.
             true,
@@ -141,14 +141,14 @@ pub fn run_stdin(
         )
     };
 
-    let rtk_output = if line_numbers {
+    let ctxcrl_output = if line_numbers {
         format_with_line_numbers(&filtered)
     } else {
         filtered.clone()
     };
-    print!("{}", rtk_output);
+    print!("{}", ctxcrl_output);
 
-    timer.track("cat - (stdin)", "contextcrawler read -", &content, &rtk_output);
+    timer.track("cat - (stdin)", "contextcrawler read -", &content, &ctxcrl_output);
     Ok(())
 }
 
@@ -621,17 +621,17 @@ fn main() {{
         assert_eq!(Language::from_extension("code-workspace"), Language::Data);
     }
 
-    fn rtk_bin() -> std::path::PathBuf {
+    fn ctxcrl_bin() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("debug")
-            .join("rtk")
+            .join("ctxcrl")
     }
 
     #[test]
     #[ignore]
     fn test_read_two_valid_files_concatenated() {
-        let bin = rtk_bin();
+        let bin = ctxcrl_bin();
         assert!(bin.exists(), "Run `cargo build` first");
 
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
@@ -642,7 +642,7 @@ fn main() {{
         let output = std::process::Command::new(&bin)
             .args(["read", &f1.path().to_string_lossy(), &f2.path().to_string_lossy()])
             .output()
-            .expect("failed to run rtk read");
+            .expect("failed to run ctxcrl read");
 
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -653,35 +653,35 @@ fn main() {{
     #[test]
     #[ignore]
     fn test_read_valid_and_nonexistent() {
-        let bin = rtk_bin();
+        let bin = ctxcrl_bin();
         assert!(bin.exists(), "Run `cargo build` first");
 
         let mut f1 = NamedTempFile::with_suffix(".txt").unwrap();
         writeln!(f1, "valid content").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), "/tmp/rtk_nonexistent_file.txt"])
+            .args(["read", &f1.path().to_string_lossy(), "/tmp/ctxcrl_nonexistent_file.txt"])
             .output()
-            .expect("failed to run rtk read");
+            .expect("failed to run ctxcrl read");
 
         assert!(!output.status.success(), "should exit non-zero on missing file");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stdout.contains("valid content"), "valid file should still be printed");
-        assert!(stderr.contains("rtk_nonexistent_file"), "should report missing file on stderr");
+        assert!(stderr.contains("ctxcrl_nonexistent_file"), "should report missing file on stderr");
     }
 
     #[test]
     #[ignore]
     fn test_read_stdin_dedup_warning() {
-        let bin = rtk_bin();
+        let bin = ctxcrl_bin();
         assert!(bin.exists(), "Run `cargo build` first");
 
         let output = std::process::Command::new(&bin)
             .args(["read", "-", "-"])
             .stdin(std::process::Stdio::piped())
             .output()
-            .expect("failed to run rtk read");
+            .expect("failed to run ctxcrl read");
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(

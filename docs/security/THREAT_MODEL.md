@@ -28,7 +28,7 @@ defend against a fully compromised local account.
 | The local shell session | The terminal contextcrawler runs in | Auto-approved commands execute here with the user's privileges. |
 | `tracking.db` | `~/.local/share/contextcrawler/` (linux) / `~/Library/Application Support/contextcrawler/` (macOS) | 90-day command log that feeds `gain --history` back into the agent's context. Secrets persisted here re-leak on every read. |
 | The hook integrity hash | `~/.local/share/contextcrawler/` | The SHA-256 of the agent-side rewrite hook. Tampering = silent command injection. |
-| Trusted project filters | `.rtk/filters.toml` per project | A trusted filter can rewrite *any* command's output before the agent sees it (hide vulnerabilities, redirect URLs). |
+| Trusted project filters | `.ctxcrl/filters.toml` per project | A trusted filter can rewrite *any* command's output before the agent sees it (hide vulnerabilities, redirect URLs). |
 | Tirith and supply-chain gate decisions | Subprocess + local cache | Gate downgrades are advisory; bypass undoes downstream defence-in-depth. |
 
 ## Trust zones
@@ -73,7 +73,7 @@ channel.
 | Malicious tool output | Anything reachable via a shell tool the agent runs (curl, npm install, git fetch, file contents…) | Push instructions into the agent's context to make it run something the user wouldn't approve, or exfiltrate secrets via the agent's response. |
 | Malicious upstream package | A dependency the agent installs in response to a user request | Same as above, plus persistence: cron, hook tampering, etc. |
 | Compromised npm postinstall / build script | Runs at install time | Modify `~/.claude/hooks/`, `tracking.db`, contextcrawler binary itself. |
-| Adversarial repo content | `.rtk/filters.toml` shipped in a public repo | Auto-load on cd into the repo and hide security findings or rewrite command output. |
+| Adversarial repo content | `.ctxcrl/filters.toml` shipped in a public repo | Auto-load on cd into the repo and hide security findings or rewrite command output. |
 | Compromised LLM provider | The model itself returns adversarial outputs | Out of scope here — host agent is the controller. |
 | Other users on a shared host | None at our layer | Out of scope — single-user CLI by design. |
 
@@ -92,7 +92,7 @@ via the agent's permission hook.
 | Shell-metacharacter reject (` \| ; & < > backtick $ \n `) | same | **Live** |
 | Refuse known shell binaries (`sh`, `bash`, … and `.exe` variants) and exec wrappers (`env`, `sudo`, `nohup`, …) as first token | same | **Live** |
 | `--shell` opt-in escape hatch (documented trust boundary: agent rewrites must not carry `--shell`) | same | **Live** |
-| Hook integrity SHA-256 check on the agent rewrite hook script (`rtk-rewrite.sh` — filename retains the `rtk-` prefix per the rebrand-internals-later policy in `src/main.rs`) | `src/hooks/integrity.rs` | **Live** (inherited from upstream) |
+| Hook integrity SHA-256 check on the agent rewrite hook script (`rtk-rewrite.sh` — filename retains the `ctxcrl-` prefix per the rebrand-internals-later policy in `src/main.rs`) | `src/hooks/integrity.rs` | **Live** (inherited from upstream) |
 
 **Residual risk:** Argv mode catches the obvious cases. An agent that
 emits a legitimate-looking single-command argv with a credential or
@@ -140,7 +140,7 @@ SECURITY.md.
 
 ### Surface 4: project-local TOML filters
 
-`.rtk/filters.toml` in a repo can rewrite any command's output via
+`.ctxcrl/filters.toml` in a repo can rewrite any command's output via
 `replace` / `match_output` primitives. A malicious public repo could
 ship a filter that silently hides security warnings or rewrites URLs
 in command output.
@@ -218,9 +218,9 @@ v0.1.x. Each has a tracking note elsewhere; re-evaluate at v0.2.0.
 4. **`fxhash` unmaintained advisory** is allow-listed in `deny.toml`.
    No active CVE. Re-evaluate when `scraper` upgrades.
 5. **Global TOML filter trust check not yet inherited.** Project-local
-   `.rtk/filters.toml` is trust-gated (SA-2025-RTK-002 fix is in), but
-   `~/.config/rtk/filters.toml` at `src/core/toml_filter.rs:218` loads
-   without an integrity check. Upstream PR #1068 fixed this in rtk; we
+   `.ctxcrl/filters.toml` is trust-gated (SA-2025-RTK-002 fix is in), but
+   `~/.config/ctxcrl/filters.toml` at `src/core/toml_filter.rs:218` loads
+   without an integrity check. Upstream PR #1068 fixed this in contextcrawler; we
    need to either cherry-pick it or wrap the global load with the same
    `hooks::trust` check. Surfaced during the 2026-05-15 audit's Codex
    re-review; do not carry into v0.2.0.

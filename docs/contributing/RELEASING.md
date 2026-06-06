@@ -25,9 +25,9 @@ commands.
 | Bugfix / security patch / doc-only | patch (`0.1.5 → 0.1.6`) |
 | New capability behind an opt-in flag | patch |
 | Breaking change in CLI surface or default behaviour | minor (`0.1.x → 0.2.0`) |
-| Multi-month overhaul, contextcrawler/rtk-tracking strategy change | minor or major after discussion |
+| Multi-month overhaul, contextcrawler/ctxcrl-tracking strategy change | minor or major after discussion |
 
-We do not chase rtk's own version numbers. When we rebase onto a new
+We do not chase contextcrawler's own version numbers. When we rebase onto a new
 upstream tag, that's reflected in `Cargo.toml`'s `version` field and in
 the `(downstream of rtk X.Y.Z)` substring, but our own version line
 increments per ContextCrawler-side change.

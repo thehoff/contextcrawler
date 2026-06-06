@@ -5,12 +5,12 @@
 
 use super::constants::PRE_TOOL_USE_KEY;
 use super::permissions::{self, PermissionVerdict};
-// ===== contextzip-downstream: defence-in-depth gate imports begin =====
+// ===== downstream: defence-in-depth gate imports begin =====
 // G1 finding #2 (#100): the Tirith + supply-chain gates only ran on the
 // legacy `contextcrawler rewrite` path (rewrite_cmd.rs). Wire them into the
 // live Claude PreToolUse hook path too.
 use super::{supply_chain_gate, tirith_gate};
-// ===== contextzip-downstream: defence-in-depth gate imports end =====
+// ===== downstream: defence-in-depth gate imports end =====
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
@@ -39,7 +39,7 @@ enum HookFormat {
     VsCode { command: String },
     /// GitHub Copilot CLI: camelCase `toolName` + `toolArgs` (JSON string), deny-with-suggestion only.
     CopilotCli { command: String },
-    /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
+    /// Non-bash tool, already uses contextcrawler, or unknown format — pass through silently.
     PassThrough,
 }
 
@@ -269,7 +269,7 @@ fn run_gemini_decision(json: &Value) {
     if permissions::check_command(cmd) == PermissionVerdict::Deny {
         let _ = writeln!(
             io::stdout(),
-            r#"{{"decision":"deny","reason":"Blocked by RTK permission rule"}}"#
+            r#"{{"decision":"deny","reason":"Blocked by ContextCrawler permission rule"}}"#
         );
         return;
     }
@@ -598,7 +598,7 @@ fn process_claude_payload_with_gate(
         };
     }
 
-    // ===== contextzip-downstream: defence-in-depth gates begin =====
+    // ===== downstream: defence-in-depth gates begin =====
     // G1 finding #2 (#100): run the Tirith + supply-chain gates on the live
     // hook path, mirroring `hooks/rewrite_cmd.rs`. Both gates are opt-in and
     // are no-ops when disabled (Tirith → `Unavailable` + not required;
@@ -623,7 +623,7 @@ fn process_claude_payload_with_gate(
             };
         }
     }
-    // ===== contextzip-downstream: defence-in-depth gates end =====
+    // ===== downstream: defence-in-depth gates end =====
 
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,

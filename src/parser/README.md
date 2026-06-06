@@ -41,7 +41,7 @@ The parser infrastructure provides a unified, three-tier parsing system for tool
 
 1. **Implement `OutputParser`** for a tool — try JSON (Tier 1), fall back to regex (Tier 2), then passthrough (Tier 3)
 2. **In command module**: call `Parser::parse()`, then `data.format(FormatMode::from_verbosity(verbose))`
-3. **Degradation warnings**: print `[RTK:DEGRADED]` in verbose mode, `[RTK:PASSTHROUGH]` on full fallback
+3. **Degradation warnings**: print `[CTXCRL:DEGRADED]` in verbose mode, `[CTXCRL:PASSTHROUGH]` on full fallback
 
 See `src/parser/types.rs` for the `OutputParser` trait and `ParseResult` enum.
 
@@ -98,8 +98,8 @@ For build tools (next, webpack, vite, cargo, etc.)
 ### Degradation Warnings
 
 ```
-[RTK:DEGRADED] vitest parser: JSON parse failed at line 42, using regex fallback
-[RTK:PASSTHROUGH] playwright parser: Pattern mismatch, showing truncated output
+[CTXCRL:DEGRADED] vitest parser: JSON parse failed at line 42, using regex fallback
+[CTXCRL:PASSTHROUGH] playwright parser: Pattern mismatch, showing truncated output
 ```
 
 ## Migration Guide
@@ -133,5 +133,5 @@ Run `cargo test parser::tests`. Each parser should have tier validation tests: a
 
 ### Phase 5: Observability
 - [ ] Extend tracking.db: `parse_tier`, `format_mode`
-- [ ] `rtk parse-health` command
+- [ ] `ctxcrl parse-health` command
 - [ ] Alert if degradation > 10%

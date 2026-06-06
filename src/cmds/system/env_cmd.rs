@@ -131,8 +131,8 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         let _ = writeln!(output, "{}={}", k, v);
         output
     });
-    let rtk = format!("{} vars -> {} shown", total, shown);
-    timer.track("env", "contextcrawler env", &raw, &rtk);
+    let ctxcrl = format!("{} vars -> {} shown", total, shown);
+    timer.track("env", "contextcrawler env", &raw, &ctxcrl);
     Ok(())
 }
 

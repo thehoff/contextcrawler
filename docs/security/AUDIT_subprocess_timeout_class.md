@@ -43,11 +43,11 @@ modules which we've already covered.
 The remaining `Command::output()` sites are all on **user-explicit
 invocation paths**:
 
-- `rtk git log`, `rtk cargo test`, `rtk go test`, etc.: the user
+- `contextcrawler git log`, `contextcrawler cargo test`, `contextcrawler go test`, etc.: the user
   typed the command, sees terminal output, can Ctrl-C if it hangs.
-- `rtk init` subprocess probes (looking for `claude`, `tirith`,
+- `contextcrawler init` subprocess probes (looking for `claude`, `tirith`,
   etc.): one-shot init flow; user runs it interactively.
-- `rtk ls`, `rtk grep`, `rtk find`: shell-like helpers; same shape.
+- `contextcrawler ls`, `contextcrawler grep`, `contextcrawler find`: shell-like helpers; same shape.
 
 For these, a hung subprocess is a UX issue, not a security one. The
 agent's outer timeout still catches them; the user has interactive

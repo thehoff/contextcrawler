@@ -1,12 +1,12 @@
 //! Token savings tracking and analytics system.
 //!
-//! This module provides comprehensive tracking of RTK command executions,
+//! This module provides comprehensive tracking of CTXCRL command executions,
 //! recording token savings, execution times, and providing aggregation APIs
 //! for daily/weekly/monthly statistics.
 //!
 //! # Architecture
 //!
-//! - Storage: SQLite database (~/.local/share/rtk/tracking.db)
+//! - Storage: SQLite database (~/.local/share/ctxcrl/tracking.db)
 //! - Retention: 90-day automatic cleanup
 //! - Metrics: Input/output tokens, savings %, execution time
 //!
@@ -53,7 +53,7 @@ use std::time::Instant;
 ///    (`#[test]` fns inside `src/`) regardless of build mode. `cfg!(test)` is
 ///    set during cargo-test compilation in both debug and release.
 ///
-/// Explicit opt-in: if `RTK_DB_PATH` is set, the caller wants tracking writes
+/// Explicit opt-in: if `CTXCRL_DB_PATH` is set, the caller wants tracking writes
 /// against that path (typically a tmpfile in a test that *exercises*
 /// tracking), so we do NOT short-circuit.
 pub(crate) fn is_test_context() -> bool {
@@ -198,9 +198,9 @@ use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
 ///
 /// # Database Location
 ///
-/// - Linux: `~/.local/share/rtk/tracking.db`
-/// - macOS: `~/Library/Application Support/rtk/tracking.db`
-/// - Windows: `%APPDATA%\rtk\tracking.db`
+/// - Linux: `~/.local/share/ctxcrl/tracking.db`
+/// - macOS: `~/Library/Application Support/ctxcrl/tracking.db`
+/// - Windows: `%APPDATA%\ctxcrl\tracking.db`
 ///
 /// # Examples
 ///
@@ -225,7 +225,7 @@ pub struct Tracker {
 pub struct CommandRecord {
     /// UTC timestamp when command was executed
     pub timestamp: DateTime<Utc>,
-    /// RTK command that was executed (e.g., "contextcrawler ls")
+    /// CTXCRL command that was executed (e.g., "contextcrawler ls")
     pub ctxcrl_cmd: String,
     /// Number of tokens saved (input - output)
     pub saved_tokens: usize,
@@ -313,7 +313,7 @@ fn weak_filter_tool_key(ctxcrl_cmd: &str) -> String {
 
 /// Daily statistics for token savings and execution metrics.
 ///
-/// Serializable to JSON for export via `rtk gain --daily --format json`.
+/// Serializable to JSON for export via `ctxcrl gain --daily --format json`.
 ///
 /// # JSON Schema
 ///
@@ -351,7 +351,7 @@ pub struct DayStats {
 
 /// Weekly statistics for token savings and execution metrics.
 ///
-/// Serializable to JSON for export via `rtk gain --weekly --format json`.
+/// Serializable to JSON for export via `ctxcrl gain --weekly --format json`.
 /// Weeks start on Sunday (SQLite default).
 #[derive(Debug, Serialize)]
 pub struct WeekStats {
@@ -377,7 +377,7 @@ pub struct WeekStats {
 
 /// Monthly statistics for token savings and execution metrics.
 ///
-/// Serializable to JSON for export via `rtk gain --monthly --format json`.
+/// Serializable to JSON for export via `ctxcrl gain --monthly --format json`.
 #[derive(Debug, Serialize)]
 pub struct MonthStats {
     /// Month identifier (YYYY-MM)
@@ -697,9 +697,9 @@ impl Tracker {
     /// # Arguments
     ///
     /// - `original_cmd`: The standard command (e.g., "ls -la")
-    /// - `ctxcrl_cmd`: The RTK command used (e.g., "rtk ls")
+    /// - `ctxcrl_cmd`: The CTXCRL command used (e.g., "ctxcrl ls")
     /// - `input_tokens`: Estimated tokens from standard command output
-    /// - `output_tokens`: Actual tokens from RTK output
+    /// - `output_tokens`: Actual tokens from CTXCRL output
     /// - `exec_time_ms`: Execution time in milliseconds
     ///
     /// # Examples
@@ -708,7 +708,7 @@ impl Tracker {
     /// use contextcrawler::core::tracking::Tracker;
     ///
     /// let tracker = Tracker::new()?;
-    /// tracker.record("ls -la", "rtk ls", 1000, 200, 50)?;
+    /// tracker.record("ls -la", "ctxcrl ls", 1000, 200, 50)?;
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn record(
@@ -815,7 +815,7 @@ impl Tracker {
         Ok(())
     }
 
-    /// Get parse failure summary for `rtk gain --failures`.
+    /// Get parse failure summary for `ctxcrl gain --failures`.
     pub fn get_parse_failure_summary(&self) -> Result<ParseFailureSummary> {
         let total: i64 = self
             .conn
@@ -1406,7 +1406,7 @@ impl Tracker {
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cmd: String = row.get(0)?;
-            // Extract just the command name (e.g. "rtk git status" → "git")
+            // Extract just the command name (e.g. "ctxcrl git status" → "git")
             Ok(cmd.split_whitespace().nth(1).unwrap_or(&cmd).to_string())
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -1649,12 +1649,12 @@ fn categorize_command(ctxcrl_cmd: &str) -> String {
 }
 
 fn get_db_path() -> Result<PathBuf> {
-    // Priority 1: Environment variable RTK_DB_PATH (also acts as the explicit
+    // Priority 1: Environment variable CTXCRL_DB_PATH (also acts as the explicit
     // opt-in for `cargo test` runs that want to exercise real writes).
     //
     // The env value is attacker-influenceable (a hostile project `.envrc` /
     // direnv can set process env), so it is confined to $HOME just like the
-    // config-supplied path — and consistent with `RTK_TEE_DIR` (tee.rs).
+    // config-supplied path — and consistent with `CTXCRL_TEE_DIR` (tee.rs).
     if let Some(custom_path) = crate::core::env_compat::env_var("CTXCRL_DB_PATH") {
         return confine_db_path_to_home(PathBuf::from(custom_path));
     }
@@ -1840,8 +1840,8 @@ pub fn estimate_tokens(text: &str) -> usize {
 ///
 /// let timer = TimedExecution::start();
 /// let input = execute_standard_command()?;
-/// let output = execute_rtk_command()?;
-/// timer.track("ls -la", "rtk ls", &input, &output);
+/// let output = execute_ctxcrl_command()?;
+/// timer.track("ls -la", "ctxcrl ls", &input, &output);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub struct TimedExecution {
@@ -1862,7 +1862,7 @@ impl TimedExecution {
     ///
     /// let timer = TimedExecution::start();
     /// // ... execute command ...
-    /// timer.track("cmd", "rtk cmd", "input", "output");
+    /// timer.track("cmd", "ctxcrl cmd", "input", "output");
     /// ```
     pub fn start() -> Self {
         Self {
@@ -1880,9 +1880,9 @@ impl TimedExecution {
     /// # Arguments
     ///
     /// - `original_cmd`: Standard command (e.g., "ls -la")
-    /// - `ctxcrl_cmd`: RTK command used (e.g., "rtk ls")
+    /// - `ctxcrl_cmd`: CTXCRL command used (e.g., "ctxcrl ls")
     /// - `input`: Standard command output (for token estimation)
-    /// - `output`: RTK command output (for token estimation)
+    /// - `output`: CTXCRL command output (for token estimation)
     ///
     /// # Examples
     ///
@@ -1892,7 +1892,7 @@ impl TimedExecution {
     /// let timer = TimedExecution::start();
     /// let input = "long output...";
     /// let output = "short output";
-    /// timer.track("ls -la", "rtk ls", input, output);
+    /// timer.track("ls -la", "ctxcrl ls", input, output);
     /// ```
     pub fn track(&self, original_cmd: &str, ctxcrl_cmd: &str, input: &str, output: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
@@ -1927,7 +1927,7 @@ impl TimedExecution {
     /// # Arguments
     ///
     /// - `original_cmd`: Standard command (e.g., "git tag --list")
-    /// - `ctxcrl_cmd`: RTK command used (e.g., "rtk git tag --list")
+    /// - `ctxcrl_cmd`: CTXCRL command used (e.g., "ctxcrl git tag --list")
     ///
     /// # Examples
     ///
@@ -1936,7 +1936,7 @@ impl TimedExecution {
     ///
     /// let timer = TimedExecution::start();
     /// // ... execute streaming command ...
-    /// timer.track_passthrough("git tag", "rtk git tag");
+    /// timer.track_passthrough("git tag", "ctxcrl git tag");
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, ctxcrl_cmd: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;

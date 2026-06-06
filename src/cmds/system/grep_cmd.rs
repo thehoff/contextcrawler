@@ -154,7 +154,7 @@ pub fn run(
         }
         timer.track(
             &format!("grep -rn '{}' {}", pattern, path),
-            "rtk grep",
+            "ctxcrl grep",
             &raw_display,
             emitted,
         );
@@ -163,7 +163,7 @@ pub fn run(
 
     // Always filter: truncate long lines, apply per-file and global caps.
     // Output in standard file:line:content format that AI agents can parse.
-    // (A passthrough approach yields 0% savings — no reason for RTK to exist on that path.)
+    // (A passthrough approach yields 0% savings — no reason for CTXCRL to exist on that path.)
     let total_matches = result.stdout.lines().count();
 
     let context_re = if context_only {
@@ -181,8 +181,8 @@ pub fn run(
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
-    let mut rtk_output = String::new();
-    rtk_output.push_str(&format!(
+    let mut ctxcrl_output = String::new();
+    ctxcrl_output.push_str(&format!(
         "{} matches in {} files:\n\n",
         total_matches,
         by_file.len()
@@ -203,23 +203,23 @@ pub fn run(
             if shown >= max_results {
                 break;
             }
-            rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+            ctxcrl_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
             shown += 1;
         }
     }
 
     if total_matches > shown {
-        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
+        ctxcrl_output.push_str(&format!("[+{} more]\n", total_matches - shown));
     }
 
     // No-bloat guard (issue #95): for small match sets the grouped framing
     // ("N matches in M files:" + blank line) can exceed the raw rg output.
     // Emit whichever is smaller so the filter never costs more than it saves.
-    let emitted = runner::no_bloat(&raw_display, &rtk_output);
+    let emitted = runner::no_bloat(&raw_display, &ctxcrl_output);
     print!("{}", emitted);
     timer.track(
         &format!("grep -rn '{}' {}", pattern, path),
-        "rtk grep",
+        "ctxcrl grep",
         &raw_display,
         emitted,
     );
@@ -634,9 +634,9 @@ mod tests {
     fn test_small_result_emits_raw_when_framing_inflates() {
         let raw_output = "f.rs:1:x\n";
         // Simulated framed output: header + blank line + match line.
-        let rtk_output = "1 matches in 1 files:\n\nf.rs:1:x\n";
-        assert!(rtk_output.len() > raw_output.len());
-        assert_eq!(runner::no_bloat(raw_output, rtk_output), raw_output);
+        let ctxcrl_output = "1 matches in 1 files:\n\nf.rs:1:x\n";
+        assert!(ctxcrl_output.len() > raw_output.len());
+        assert_eq!(runner::no_bloat(raw_output, ctxcrl_output), raw_output);
     }
 
     // Fix #95: a genuinely large grep result keeps the compact framed form.
@@ -649,9 +649,9 @@ mod tests {
                 i, i
             ));
         }
-        let rtk_output = "200 matches in 200 files:\n\n[+200 more]\n";
-        assert!(rtk_output.len() < raw_output.len());
-        assert_eq!(runner::no_bloat(&raw_output, rtk_output), rtk_output);
+        let ctxcrl_output = "200 matches in 200 files:\n\n[+200 more]\n";
+        assert!(ctxcrl_output.len() < raw_output.len());
+        assert_eq!(runner::no_bloat(&raw_output, ctxcrl_output), ctxcrl_output);
     }
 
     // --- issue #193: context-output filtering ---
@@ -897,13 +897,13 @@ mod tests {
         let raw_display = raw_output.replace('\0', ":");
 
         // Single small match → grouped framing is larger, so no_bloat picks raw.
-        let rtk_output = "1 matches in 1 files:\n\nf.rs:1:let v: Vec = foo::bar();\n";
+        let ctxcrl_output = "1 matches in 1 files:\n\nf.rs:1:let v: Vec = foo::bar();\n";
         assert!(
-            rtk_output.len() > raw_display.len(),
+            ctxcrl_output.len() > raw_display.len(),
             "test premise: compact form must be larger so no_bloat picks raw"
         );
 
-        let emitted = runner::no_bloat(&raw_display, rtk_output);
+        let emitted = runner::no_bloat(&raw_display, ctxcrl_output);
 
         // (a) No NUL byte ever reaches stdout.
         assert!(

@@ -81,8 +81,8 @@ fn run_gt_filtered(
     } else {
         format!("gt {} {}", subcmd_str, args.join(" "))
     };
-    let rtk_label = format!("contextcrawler {}", label);
-    timer.track(&label, &rtk_label, &raw, &output);
+    let ctxcrl_label = format!("contextcrawler {}", label);
+    timer.track(&label, &ctxcrl_label, &raw, &output);
 
     Ok(cmd_output.exit_code)
 }
@@ -144,7 +144,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     let subcommand = args[0].to_string_lossy();
 
     // gt passes unknown subcommands to git, so "gt status" = "git status".
-    // Route known git commands to RTK's git filters for token savings.
+    // Route known git commands to CTXCRL's git filters for token savings.
     // The crate::git::run filters are typed on `&[String]` (clap-derived),
     // so the known-command branches must lossily stringify the tail — an
     // accepted limitation scoped to recognised subcommands only.

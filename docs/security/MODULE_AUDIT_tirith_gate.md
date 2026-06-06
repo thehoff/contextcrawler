@@ -176,7 +176,7 @@ gives a canonical single-line form.
 **Location:** `check` line 46.
 
 `Command::new(&bin).args(...).output()` inherits stdin (from the
-caller, which is the rtk binary). For Tirith, stdin being a pipe
+caller, which is the contextcrawler binary). For Tirith, stdin being a pipe
 from the agent's hook payload could leak whatever's on the agent's
 stdin into Tirith's process. Real risk: low — Tirith doesn't read
 stdin in `--non-interactive` mode — but explicit `Stdio::null()` is

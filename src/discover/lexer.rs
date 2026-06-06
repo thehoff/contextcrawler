@@ -1670,7 +1670,7 @@ mod tests {
     }
 
     // --- contains_unattestable_construct (#2286 security) -------------------
-    // Constructs RTK can't decompose must never be auto-allowed.
+    // Constructs CTXCRL can't decompose must never be auto-allowed.
 
     #[test]
     fn test_unattestable_backtick() {

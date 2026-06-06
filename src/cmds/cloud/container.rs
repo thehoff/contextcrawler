@@ -75,17 +75,17 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
     }
 
     let stdout = result.stdout;
-    let mut rtk = String::new();
+    let mut ctxcrl = String::new();
 
     if stdout.trim().is_empty() {
-        rtk.push_str("[docker] 0 containers");
-        println!("{}", rtk);
-        timer.track("docker ps", "contextcrawler docker ps", &raw, &rtk);
+        ctxcrl.push_str("[docker] 0 containers");
+        println!("{}", ctxcrl);
+        timer.track("docker ps", "contextcrawler docker ps", &raw, &ctxcrl);
         return Ok(0);
     }
 
     let count = stdout.lines().count();
-    rtk.push_str(&format!("[docker] {} containers:\n", count));
+    ctxcrl.push_str(&format!("[docker] {} containers:\n", count));
 
     for line in stdout.lines().take(15) {
         let parts: Vec<&str> = line.split('\t').collect();
@@ -100,9 +100,9 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
                 .unwrap_or("");
             let ports = compact_ports(parts.get(4).unwrap_or(&""));
             if ports == "-" {
-                rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));
+                ctxcrl.push_str(&format!("  {} {} ({})\n", id, name, short_image));
             } else {
-                rtk.push_str(&format!(
+                ctxcrl.push_str(&format!(
                     "  {} {} ({}) [{}]\n",
                     id, name, short_image, ports
                 ));
@@ -110,11 +110,11 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
         }
     }
     if count > 15 {
-        rtk.push_str(&format!("  ... +{} more", count - 15));
+        ctxcrl.push_str(&format!("  ... +{} more", count - 15));
     }
 
-    print!("{}", rtk);
-    timer.track("docker ps", "contextcrawler docker ps", &raw, &rtk);
+    print!("{}", ctxcrl);
+    timer.track("docker ps", "contextcrawler docker ps", &raw, &ctxcrl);
     Ok(0)
 }
 
@@ -140,12 +140,12 @@ fn docker_images(_verbose: u8) -> Result<i32> {
 
     let stdout = result.stdout;
     let lines: Vec<&str> = stdout.lines().collect();
-    let mut rtk = String::new();
+    let mut ctxcrl = String::new();
 
     if lines.is_empty() {
-        rtk.push_str("[docker] 0 images");
-        println!("{}", rtk);
-        timer.track("docker images", "contextcrawler docker images", &raw, &rtk);
+        ctxcrl.push_str("[docker] 0 images");
+        println!("{}", ctxcrl);
+        timer.track("docker images", "contextcrawler docker images", &raw, &ctxcrl);
         return Ok(0);
     }
 
@@ -170,7 +170,7 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     } else {
         format!("{:.0}MB", total_size_mb)
     };
-    rtk.push_str(&format!(
+    ctxcrl.push_str(&format!(
         "[docker] {} images ({})\n",
         lines.len(),
         total_display
@@ -186,15 +186,15 @@ fn docker_images(_verbose: u8) -> Result<i32> {
             } else {
                 image.to_string()
             };
-            rtk.push_str(&format!("  {} [{}]\n", short, size));
+            ctxcrl.push_str(&format!("  {} [{}]\n", short, size));
         }
     }
     if lines.len() > 15 {
-        rtk.push_str(&format!("  ... +{} more", lines.len() - 15));
+        ctxcrl.push_str(&format!("  ... +{} more", lines.len() - 15));
     }
 
-    print!("{}", rtk);
-    timer.track("docker images", "contextcrawler docker images", &raw, &rtk);
+    print!("{}", ctxcrl);
+    timer.track("docker images", "contextcrawler docker images", &raw, &ctxcrl);
     Ok(0)
 }
 
@@ -587,9 +587,9 @@ pub fn run_compose_ps(verbose: u8) -> Result<i32> {
         eprintln!("raw docker compose ps:\n{}", raw);
     }
 
-    let rtk = format_compose_ps(&structured);
-    println!("{}", rtk);
-    timer.track("docker compose ps", "contextcrawler docker compose ps", &raw, &rtk);
+    let ctxcrl = format_compose_ps(&structured);
+    println!("{}", ctxcrl);
+    timer.track("docker compose ps", "contextcrawler docker compose ps", &raw, &ctxcrl);
     Ok(0)
 }
 
