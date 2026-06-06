@@ -277,7 +277,6 @@ fn filter_eslint_json(output: &str) -> String {
         "ESLint: {} errors, {} warnings in {} files\n",
         total_errors, total_warnings, total_files
     ));
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top rules
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
@@ -395,7 +394,6 @@ fn filter_pylint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    result.push_str("═══════════════════════════════════════\n");
 
     // Show top symbols (rules)
     let mut symbol_counts: Vec<_> = by_symbol.iter().collect();
@@ -461,7 +459,6 @@ fn filter_generic_lint(output: &str) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("Lint: {} errors, {} warnings\n", errors, warnings));
-    result.push_str("═══════════════════════════════════════\n");
 
     for issue in issues.iter().take(20) {
         result.push_str(&format!("{}\n", truncate(issue, 100)));

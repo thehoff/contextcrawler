@@ -134,7 +134,6 @@ fn filter_next_build(output: &str, exit_code: i32) -> String {
     // Build filtered output
     let mut result = String::new();
     result.push_str("Next.js Build\n");
-    result.push_str("═══════════════════════════════════════\n");
 
     if already_built && routes_total == 0 {
         result.push_str("Already built (using cache)\n\n");

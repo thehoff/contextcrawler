@@ -207,7 +207,7 @@ where
 /// byte-for-byte output and exit code.
 ///
 /// Task #10 / upstream #1918 (PR #1981 pattern): the compact format breaks
-/// every programmatic consumer, and injected "--- Changes ---" headers
+/// every programmatic consumer, and injected "Changes:" headers
 /// corrupt shell pipelines parsing the output.
 fn is_passthrough_diff(args: &[String]) -> bool {
     args.iter().any(|arg| {
@@ -331,10 +331,10 @@ fn run_diff(
 
     let mut final_output = result.stdout.clone();
     if !diff_result.stdout.is_empty() {
-        println!("\n--- Changes ---");
+        println!("\nChanges:");
         let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
         println!("{}", compacted);
-        final_output.push_str("\n--- Changes ---\n");
+        final_output.push_str("\nChanges:\n");
         final_output.push_str(&compacted);
     }
 
@@ -488,7 +488,7 @@ fn run_show(
     let mut final_output = summary_result.stdout.clone();
     if !diff_text.is_empty() {
         if verbose > 0 {
-            println!("\n--- Changes ---");
+            println!("\nChanges:");
         }
         let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
         println!("{}", compacted);
@@ -2459,7 +2459,7 @@ mod tests {
     #[test]
     fn test_passthrough_diff_machine_flags() {
         // Machine-readable output flags must trigger raw passthrough — no
-        // compaction, no injected "--- Changes ---" header, no prepended
+        // compaction, no injected "Changes:" header, no prepended
         // --stat run that pollutes the output.
         for flag in &[
             "--stat",

@@ -22,7 +22,6 @@ pub fn format_tool_failure(tool: &str, raw: &str, exit_code: i32) -> String {
 
     let mut result = String::new();
     result.push_str(&format!("{}: failed (exit {})\n", tool, exit_code));
-    result.push_str("═══════════════════════════════════════\n");
 
     for (i, line) in lines.iter().take(20).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 120)));

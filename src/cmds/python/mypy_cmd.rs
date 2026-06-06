@@ -186,7 +186,6 @@ pub fn filter_mypy_output(output: &str, exit_code: i32) -> String {
             errors.len(),
             by_file.len()
         ));
-        result.push_str("═══════════════════════════════════════\n");
 
         // Top error codes summary (only when 2+ distinct codes)
         let mut code_counts: Vec<_> = by_code.iter().collect();

@@ -177,7 +177,7 @@ fn filter_rspec_output(output: &str) -> String {
     //
     // Codex G6 follow-up — no user-visible colour regression: both the
     // JSON path (`build_rspec_summary`) and the text fallback emit a
-    // synthesised compact summary ("RSpec: N passed, M failed", "❌
+    // synthesised compact summary ("RSpec: N passed, M failed", "✗
     // <description>"). rspec's original coloured lines are never shown
     // verbatim, so the strip removes no colour the user previously
     // had — no split matcher/display paths needed.
@@ -236,7 +236,6 @@ fn build_rspec_summary(rspec: &RspecOutput) -> String {
         result.push_str(&format!(", {} pending", s.pending_count));
     }
     result.push_str(&format!(" ({:.2}s)\n", s.duration));
-    result.push_str("═══════════════════════════════════════\n");
 
     let failures: Vec<&RspecExample> = rspec
         .examples
@@ -252,7 +251,7 @@ fn build_rspec_summary(rspec: &RspecOutput) -> String {
 
     for (i, example) in failures.iter().take(5).enumerate() {
         result.push_str(&format!(
-            "{}. ❌ {}\n   {}:{}\n",
+            "{}. ✗ {}\n   {}:{}\n",
             i + 1,
             example.full_description,
             example.file_path,
@@ -372,9 +371,8 @@ fn filter_rspec_text(output: &str) -> String {
             return format!("RSpec: {}", summary_line);
         }
         let mut result = format!("RSpec: {}\n", summary_line);
-        result.push_str("═══════════════════════════════════════\n\n");
         for (i, failure) in failures.iter().take(5).enumerate() {
-            result.push_str(&format!("{}. ❌ {}\n", i + 1, failure));
+            result.push_str(&format!("{}. ✗ {}\n", i + 1, failure));
             if i < failures.len().min(5) - 1 {
                 result.push('\n');
             }
@@ -612,7 +610,7 @@ mod tests {
     fn test_filter_rspec_with_failures() {
         let result = filter_rspec_output(with_failures_json());
         assert!(result.contains("1 passed, 1 failed"));
-        assert!(result.contains("❌ User saves to database"));
+        assert!(result.contains("✗ User saves to database"));
         assert!(result.contains("user_spec.rb:10"));
         assert!(result.contains("ExpectationNotMetError"));
         assert!(result.contains("expected true but got false"));
@@ -688,7 +686,7 @@ Failures:
         let result = filter_rspec_output(text);
         assert!(result.contains("RSpec:"));
         assert!(result.contains("4 examples, 1 failure"));
-        assert!(result.contains("❌"), "should show failure marker");
+        assert!(result.contains("✗"), "should show failure marker");
     }
 
     /// G6 #100: rspec colourises text output on a TTY. ANSI escapes
@@ -738,7 +736,7 @@ Failures:
 "#;
         let result = filter_rspec_text(text);
         assert!(result.contains("2 failures"));
-        assert!(result.contains("❌"));
+        assert!(result.contains("✗"));
         // Should show spec file path, not gem backtrace
         assert!(result.contains("spec/models/user_spec.rb:15"));
     }
@@ -781,9 +779,9 @@ Failures:
           "summary_line": "6 examples, 6 failures"
         }"#;
         let result = filter_rspec_output(json);
-        assert!(result.contains("1. ❌"), "should show first failure");
-        assert!(result.contains("5. ❌"), "should show fifth failure");
-        assert!(!result.contains("6. ❌"), "should not show sixth inline");
+        assert!(result.contains("1. ✗"), "should show first failure");
+        assert!(result.contains("5. ✗"), "should show fifth failure");
+        assert!(!result.contains("6. ✗"), "should not show sixth inline");
         assert!(
             result.contains("+1 more"),
             "should show overflow count: {}",
@@ -986,9 +984,9 @@ Failures:
 14 examples, 7 failures
 "#;
         let result = filter_rspec_text(text);
-        assert!(result.contains("1. ❌"), "should show first failure");
-        assert!(result.contains("5. ❌"), "should show fifth failure");
-        assert!(!result.contains("6. ❌"), "should not show sixth inline");
+        assert!(result.contains("1. ✗"), "should show first failure");
+        assert!(result.contains("5. ✗"), "should show fifth failure");
+        assert!(!result.contains("6. ✗"), "should not show sixth inline");
         assert!(
             result.contains("+2 more"),
             "should show overflow count: {}",

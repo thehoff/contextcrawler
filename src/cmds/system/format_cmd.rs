@@ -234,7 +234,6 @@ fn filter_black_output(output: &str) -> String {
             "Format (black): {} files need formatting\n",
             count
         ));
-        result.push_str("═══════════════════════════════════════\n");
 
         if !files_to_format.is_empty() {
             for (i, file) in files_to_format.iter().take(10).enumerate() {

@@ -115,7 +115,6 @@ pub fn filter_prettier_output(output: &str) -> String {
                 "Prettier: {} files need formatting\n",
                 files_to_format.len()
             ));
-            result.push_str("═══════════════════════════════════════\n");
 
             for (i, file) in files_to_format.iter().take(10).enumerate() {
                 result.push_str(&format!("{}. {}\n", i + 1, file));
