@@ -3,6 +3,54 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] — 2026-06-06
+
+Consolidation baseline before the library/CLI pivot. Bundles the 2026-06-06
+fix batch plus the first external community contribution (a library build).
+This is the tagged baseline (`contextcrawler-v0.2.0`) we branch the lib pivot from.
+
+### Security
+
+- **Permission gate never auto-allows not-evaluable constructs** (#2286 port of
+  rtk-ai/rtk 952245d + e16aa26, reconciled with the fork's &/newline split). The
+  gate downgrades command/process substitution (`$()`, backticks, `<()`/`>()`)
+  and real file-write redirects (`>file`, `>>file`, `>&word`, `&>file`) from
+  Allow to Ask; keeps `2>&1`, `/dev/null`, arithmetic `$((..))` and input
+  redirects evaluable. Centralised in `check_command_with_rules` so both the live
+  hook and legacy rewrite paths inherit it.
+- **Live-path Ask surfaced for non-rewritable commands.** The #2286 Ask verdict
+  was silently dropped on the live hook path when a command had no rewrite,
+  letting the host auto-allow e.g. `git status $(whoami)` via a `Bash(git:*)`
+  rule. The no-rewrite branch now emits an explicit `ask` whenever the verdict is
+  Ask (not only on a defence-in-depth gate). Found by empirical testing of the
+  built binary.
+
+### Fixed
+
+- **tsc / mypy / next build no longer report success on a failed run.** These
+  filters printed "no errors"/a fake summary and discarded the real error text
+  when the wrapped command failed. A shared `format_tool_failure` surfaces raw
+  output on a non-zero exit. (Exit-code propagation was already correct.)
+
+### Performance
+
+- **grep / find pipe wrappers: ~40% → ~67% token savings.** grep now shows 5
+  sample matches plus a compact comma-joined list of *every* remaining match's
+  line number (more locational signal, fewer tokens); find caps samples at 5.
+- **Decorator noise stripped from filter output** (#2289 port) — box-drawing
+  `═══` separators, `--- x ---` dash headers, and `❌`→`✗` removed from
+  LLM-bound output across ~16 filters. Dashboard/TTY output left intact.
+
+### Added
+
+- **Library build (lib + bin).** The crate now exposes `summarize_command_output`
+  + `CommandOutputSummaryOptions` and `no_bloat` via `src/lib.rs`, so downstream
+  Rust tools can embed the summariser without spawning the CLI. First external
+  community contribution — thanks to Danny Wilson (@vizanto), PR #185.
+  NOTE: this is an MVP surface; the lib build currently emits dead-code warnings
+  because the binary does not yet consume the library. The "CLI consumes the API"
+  refactor is the headline of the next (pivot) release.
+
 ## [0.1.7] — 2026-05-18
 
 Read-filter, grep, and downstream-rebrand cleanup release. Lands the

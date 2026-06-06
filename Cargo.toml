@@ -3,7 +3,7 @@
 # The source-level module/use/struct identifiers still use 'rtk' — this only
 # changes the cargo target binary name. Single binary, single mental model.
 name = "contextcrawler"
-version = "0.1.10"
+version = "0.2.0"
 edition = "2021"
 # Minimum supported Rust: 1.80 for std::net::Ipv6Addr::to_ipv4_mapped()
 # used in the SSRF block check, plus IpAddr::is_private stabilization.
