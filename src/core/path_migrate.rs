@@ -92,13 +92,47 @@ fn migrate_file(old_dir: &Path, new_dir: &Path, name: &str) -> bool {
 /// otherwise migrates the known per-file payload so a partially-created
 /// `.ctxcrl` still gets the project filters.
 fn migrate_project_local(old_dir: &Path, new_dir: &Path) {
-    if !old_dir.exists() {
+    // Use `symlink_metadata` (does NOT follow symlinks) so a missing path and a
+    // dangling symlink are both detected here.
+    let Ok(meta) = old_dir.symlink_metadata() else {
+        return; // nothing to migrate
+    };
+    // Symlink guard: never `rename` a symlinked `.rtk` — an attacker could plant
+    // a symlink to redirect the move at the new path. Treat a symlinked legacy
+    // dir as "do not migrate" (same-user local hardening).
+    if meta.file_type().is_symlink() {
         return;
     }
     if !new_dir.exists() {
         move_path(old_dir, new_dir);
     } else {
         migrate_file(old_dir, new_dir, FILTERS_TOML);
+        // Also migrate custom project filters under `.rtk/filters/*.toml` into
+        // `.ctxcrl/filters/` (per-file, never overwriting an existing one).
+        migrate_filters_subdir(old_dir, new_dir);
+    }
+}
+
+/// Per-file migration of `*.toml` under `old_dir/filters/` into
+/// `new_dir/filters/`. Never overwrites an existing destination file. No-op if
+/// the source subdir is absent.
+fn migrate_filters_subdir(old_dir: &Path, new_dir: &Path) {
+    let old_filters = old_dir.join("filters");
+    if !old_filters.is_dir() {
+        return;
+    }
+    let new_filters = new_dir.join("filters");
+    let Ok(entries) = std::fs::read_dir(&old_filters) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            migrate_file(&old_filters, &new_filters, name);
+        }
     }
 }
 
@@ -295,6 +329,78 @@ mod tests {
 
         assert!(new_dir.join(FILTERS_TOML).exists(), "filters.toml migrated");
         assert!(!old_dir.join(FILTERS_TOML).exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Project-local: dest exists + `.rtk/filters/*.toml` -> custom project
+    // filters migrate per-file into `.ctxcrl/filters/`, never overwriting an
+    // existing destination file. (Fix 3)
+    #[test]
+    fn project_local_migrates_filters_subdir_when_new_dir_exists() {
+        let root = unique_tmp();
+        let old_dir = root.join(".rtk");
+        let new_dir = root.join(".ctxcrl");
+        std::fs::create_dir_all(old_dir.join("filters")).unwrap();
+        std::fs::create_dir_all(new_dir.join("filters")).unwrap();
+        std::fs::write(old_dir.join("filters").join("custom.toml"), b"new").unwrap();
+        std::fs::write(old_dir.join("filters").join("keep.toml"), b"src").unwrap();
+        // Non-toml files are ignored.
+        std::fs::write(old_dir.join("filters").join("README.md"), b"doc").unwrap();
+        // Pre-existing dest filter must NOT be overwritten.
+        std::fs::write(new_dir.join("filters").join("keep.toml"), b"DEST").unwrap();
+
+        migrate_project_local(&old_dir, &new_dir);
+
+        assert!(
+            new_dir.join("filters").join("custom.toml").exists(),
+            "custom filter migrated into .ctxcrl/filters/"
+        );
+        assert_eq!(
+            std::fs::read(new_dir.join("filters").join("custom.toml")).unwrap(),
+            b"new"
+        );
+        // Existing dest kept; un-migrated source left intact (never overwritten).
+        assert_eq!(
+            std::fs::read(new_dir.join("filters").join("keep.toml")).unwrap(),
+            b"DEST"
+        );
+        assert!(
+            old_dir.join("filters").join("keep.toml").exists(),
+            "source of skipped (already-present) filter left intact"
+        );
+        assert!(
+            !new_dir.join("filters").join("README.md").exists(),
+            "non-toml files are not migrated"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Project-local: a symlinked `.rtk` is NEVER migrated (symlink guard). (Fix 4)
+    #[cfg(unix)]
+    #[test]
+    fn project_local_skips_symlinked_legacy_dir() {
+        use std::os::unix::fs::symlink;
+        let root = unique_tmp();
+        let real = root.join("real");
+        let old_dir = root.join(".rtk");
+        let new_dir = root.join(".ctxcrl");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join(FILTERS_TOML), b"f").unwrap();
+        symlink(&real, &old_dir).unwrap();
+
+        migrate_project_local(&old_dir, &new_dir);
+
+        assert!(!new_dir.exists(), "symlinked legacy dir must not be migrated");
+        assert!(
+            old_dir
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted symlink is left untouched"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

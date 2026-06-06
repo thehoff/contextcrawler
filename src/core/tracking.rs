@@ -1837,6 +1837,8 @@ pub fn estimate_tokens(text: &str) -> usize {
 ///
 /// ```no_run
 /// use contextcrawler::core::tracking::TimedExecution;
+/// # fn execute_standard_command() -> anyhow::Result<String> { Ok(String::new()) }
+/// # fn execute_ctxcrl_command() -> anyhow::Result<String> { Ok(String::new()) }
 ///
 /// let timer = TimedExecution::start();
 /// let input = execute_standard_command()?;

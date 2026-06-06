@@ -245,6 +245,34 @@ const LEGACY_CTXCRL_MD_FILES: &[&str] = &["RTK.md"]; // branding-lint: allow leg
 const CTXCRL_BLOCK_START: &str = "<!-- ctxcrl-instructions";
 const CTXCRL_BLOCK_END: &str = "<!-- /ctxcrl-instructions -->";
 
+/// Pre-0.3.0 installs wrote the managed block with `rtk-instructions` markers.
+/// We RECOGNISE these legacy markers for FINDING/REMOVING an existing block (so
+/// upgrade replaces it in place rather than appending a duplicate, and uninstall
+/// strips it), but always WRITE the canonical `ctxcrl-instructions` markers.
+/// Mirrors the "recognise legacy, write new" pattern used for
+/// `LEGACY_CTXCRL_MD_FILES`.
+const LEGACY_BLOCK_START: &str = "<!-- rtk-instructions"; // branding-lint: allow legacy
+const LEGACY_BLOCK_END: &str = "<!-- /rtk-instructions -->"; // branding-lint: allow legacy
+
+/// True if `content` holds a managed block under either the canonical or the
+/// legacy markers.
+fn contains_ctxcrl_block(content: &str) -> bool {
+    content.contains(CTXCRL_BLOCK_START) || content.contains(LEGACY_BLOCK_START)
+}
+
+/// Return the `(start, end)` marker pair for the managed block present in
+/// `content`, trying the canonical markers first and falling back to the legacy
+/// `rtk-instructions` markers. `None` if no opening marker is present.
+fn block_markers_in(content: &str) -> Option<(&'static str, &'static str)> {
+    if content.contains(CTXCRL_BLOCK_START) {
+        Some((CTXCRL_BLOCK_START, CTXCRL_BLOCK_END))
+    } else if content.contains(LEGACY_BLOCK_START) {
+        Some((LEGACY_BLOCK_START, LEGACY_BLOCK_END))
+    } else {
+        None
+    }
+}
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -960,7 +988,7 @@ pub fn uninstall(
             removed.push("CLAUDE.md: removed @CONTEXTCRAWLER.md reference".to_string());
         }
 
-        if working_content.contains(CTXCRL_BLOCK_START) {
+        if contains_ctxcrl_block(&working_content) {
             let (cleaned, did_remove) = remove_ctxcrl_block(&working_content);
             if did_remove {
                 working_content = cleaned;
@@ -1117,7 +1145,7 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         let mut block_removed = false;
         let mut ref_removed = false;
 
-        if working_content.contains(CTXCRL_BLOCK_START) {
+        if contains_ctxcrl_block(&working_content) {
             let (cleaned, did_remove) = remove_ctxcrl_block(&working_content);
             if did_remove {
                 working_content = cleaned;
@@ -2640,8 +2668,11 @@ enum CtxcrlBlockUpsert {
 /// Returns `(new_content, action)` describing what happened.
 /// The caller decides whether to write `new_content` based on `action`.
 fn upsert_ctxcrl_block(content: &str, block: &str) -> (String, CtxcrlBlockUpsert) {
-    let start_marker = CTXCRL_BLOCK_START;
-    let end_marker = CTXCRL_BLOCK_END;
+    // Recognise an existing block under either the canonical or the legacy
+    // markers; we always WRITE the canonical block (`block` carries the new
+    // markers), so a legacy block is replaced in place on upgrade.
+    let (start_marker, end_marker) = block_markers_in(content)
+        .unwrap_or((CTXCRL_BLOCK_START, CTXCRL_BLOCK_END));
 
     if let Some(start) = content.find(start_marker) {
         if let Some(relative_end) = content[start..].find(end_marker) {
@@ -2771,7 +2802,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
     let mut migrated = false;
 
     // Check for old block and migrate
-    if content.contains(CTXCRL_BLOCK_START) {
+    if contains_ctxcrl_block(&content) {
         let (new_content, did_migrate) = remove_ctxcrl_block(&content);
         if did_migrate {
             content = new_content;
@@ -2875,7 +2906,7 @@ fn patch_agents_md(path: &Path, ctxcrl_md_ref: &str, ctx: InitContext) -> Result
     };
 
     let mut migrated = false;
-    if content.contains(CTXCRL_BLOCK_START) {
+    if contains_ctxcrl_block(&content) {
         let (new_content, did_migrate) = remove_ctxcrl_block(&content);
         if did_migrate {
             content = new_content;
@@ -2966,8 +2997,13 @@ fn has_rtk_reference(content: &str, refs: &[&str]) -> bool {
 
 /// Remove old ContextCrawler block from CLAUDE.md (migration helper)
 fn remove_ctxcrl_block(content: &str) -> (String, bool) {
-    if let (Some(start), Some(end)) = (content.find(CTXCRL_BLOCK_START), content.find(CTXCRL_BLOCK_END)) {
-        let end_pos = end + CTXCRL_BLOCK_END.len();
+    // Recognise both canonical and legacy markers so an upgraded/legacy block is
+    // removed in place. `None` => no block at all.
+    let Some((start_marker, end_marker)) = block_markers_in(content) else {
+        return (content.to_string(), false);
+    };
+    if let (Some(start), Some(end)) = (content.find(start_marker), content.find(end_marker)) {
+        let end_pos = end + end_marker.len();
         let before = content[..start].trim_end();
         let after = content[end_pos..].trim_start();
 
@@ -2978,25 +3014,24 @@ fn remove_ctxcrl_block(content: &str) -> (String, bool) {
         };
 
         (result, true) // migrated
-    } else if content.contains(CTXCRL_BLOCK_START) {
+    } else {
+        // Opening marker present without its closing marker — malformed.
         eprintln!(
             "[warn] Warning: Found '{}' without closing marker.",
-            CTXCRL_BLOCK_START
+            start_marker
         );
         eprintln!("    This can happen if CLAUDE.md was manually edited.");
 
         if let Some((line_num, _)) = content
             .lines()
             .enumerate()
-            .find(|(_, line)| line.contains(CTXCRL_BLOCK_START))
+            .find(|(_, line)| line.contains(start_marker))
         {
             eprintln!("    Location: line {}", line_num + 1);
         }
 
         eprintln!("    Action: Manually remove the incomplete block, then re-run:");
         eprintln!("            contextcrawler init -g");
-        (content.to_string(), false)
-    } else {
         (content.to_string(), false)
     }
 }
@@ -3022,7 +3057,7 @@ fn strip_ctxcrl_block_from_file(
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}: {}", label, path.display()))?;
 
-    if !content.contains(CTXCRL_BLOCK_START) {
+    if !contains_ctxcrl_block(&content) {
         return Ok(None);
     }
 
@@ -4038,7 +4073,7 @@ fn show_claude_config() -> Result<()> {
         let content = fs::read_to_string(&global_claude_md)?;
         if content.contains(CTXCRL_MD_REF) {
             println!("[ok] Global (~/.claude/CLAUDE.md): @CONTEXTCRAWLER.md reference");
-        } else if content.contains(CTXCRL_BLOCK_START) {
+        } else if contains_ctxcrl_block(&content) {
             println!(
                 "[warn] Global (~/.claude/CLAUDE.md): old ContextCrawler block (run: contextcrawler init -g to migrate)"
             );
@@ -4059,7 +4094,7 @@ fn show_claude_config() -> Result<()> {
         let content = fs::read_to_string(&local_claude_md)?;
         if content.contains(CTXCRL_MD_REF) {
             println!("[ok] Local (./CLAUDE.md): @CONTEXTCRAWLER.md reference");
-        } else if content.contains(CTXCRL_BLOCK_START) {
+        } else if contains_ctxcrl_block(&content) {
             println!(
                 "[warn] Local (./CLAUDE.md): old ContextCrawler block (run: contextcrawler init to migrate)"
             );
@@ -4216,7 +4251,7 @@ fn show_codex_config() -> Result<()> {
         let all_refs_borrowed: Vec<&str> = all_refs.iter().map(|s| s.as_str()).collect();
         if has_rtk_reference(&content, &all_refs_borrowed) {
             println!("[ok] Global AGENTS.md: CONTEXTCRAWLER.md reference");
-        } else if content.contains(CTXCRL_BLOCK_START) {
+        } else if contains_ctxcrl_block(&content) {
             println!("[!!] Global AGENTS.md: old inline ContextCrawler block");
         } else {
             println!("[--] Global AGENTS.md: exists but ContextCrawler not configured");
@@ -4241,7 +4276,7 @@ fn show_codex_config() -> Result<()> {
             all_local_refs.iter().map(|s| s.as_str()).collect();
         if has_rtk_reference(&content, &all_local_refs_borrowed) {
             println!("[ok] Local AGENTS.md: @CONTEXTCRAWLER.md reference");
-        } else if content.contains(CTXCRL_BLOCK_START) {
+        } else if contains_ctxcrl_block(&content) {
             println!("[!!] Local AGENTS.md: old inline ContextCrawler block");
         } else {
             println!("[--] Local AGENTS.md: exists but ContextCrawler not configured");
@@ -5296,6 +5331,56 @@ mod tests {
         let (content, action) = upsert_ctxcrl_block(&input, CTXCRL_INSTRUCTIONS);
         assert_eq!(action, CtxcrlBlockUpsert::Malformed);
         assert_eq!(content, input);
+    }
+
+    // Fix 1: a pre-0.3.0 install's legacy `rtk-instructions` block must be
+    // REPLACED in place on upgrade (not appended-to), leaving exactly ONE block
+    // under the new ctxcrl markers and no leftover legacy block.
+    #[test]
+    fn test_upsert_replaces_legacy_rtk_block_in_place() {
+        let input = format!(
+            "# Team instructions\n\n{} v3 -->\nOLD RTK CONTENT\n{}\n\nMore notes\n",
+            LEGACY_BLOCK_START, LEGACY_BLOCK_END
+        );
+
+        let (content, action) = upsert_ctxcrl_block(&input, CTXCRL_INSTRUCTIONS);
+
+        assert_eq!(action, CtxcrlBlockUpsert::Updated);
+        // Legacy block gone — both the body and the legacy markers.
+        assert!(!content.contains("OLD RTK CONTENT"));
+        assert!(!content.contains(LEGACY_BLOCK_START), "legacy start marker left behind");
+        assert!(!content.contains(LEGACY_BLOCK_END), "legacy end marker left behind");
+        // Exactly ONE canonical block now present.
+        assert_eq!(
+            content.matches(CTXCRL_BLOCK_START).count(),
+            1,
+            "expected exactly one ctxcrl block after upgrade, got duplicates"
+        );
+        // User content preserved.
+        assert!(content.contains("# Team instructions"));
+        assert!(content.contains("More notes"));
+    }
+
+    // Fix 1: strip/uninstall must also remove a legacy `rtk-instructions` block.
+    #[test]
+    fn test_strip_removes_legacy_rtk_block() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let body = format!(
+            "# Notes\n\n{} v3 -->\nLEGACY BODY\n{}\n\nkeep me\n",
+            LEGACY_BLOCK_START, LEGACY_BLOCK_END
+        );
+        fs::write(&agents_md, &body).unwrap();
+
+        let desc = strip_ctxcrl_block_from_file(&agents_md, "guidance", InitContext::default())
+            .unwrap();
+        assert!(desc.is_some(), "strip should report removal of a legacy block");
+
+        let after = fs::read_to_string(&agents_md).unwrap();
+        assert!(!after.contains(LEGACY_BLOCK_START), "legacy block not stripped");
+        assert!(!after.contains("LEGACY BODY"));
+        assert!(after.contains("# Notes"));
+        assert!(after.contains("keep me"));
     }
 
     #[test]
