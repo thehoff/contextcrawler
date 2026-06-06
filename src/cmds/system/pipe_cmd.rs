@@ -16,7 +16,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "git-log" => Some(git_log_wrapper),
         "git-diff" => Some(git_diff_wrapper),
         "git-status" => Some(crate::cmds::git::git::format_status_output),
-        "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
+        "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output_piped),
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
@@ -149,7 +149,7 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     }
 
     if first_1k.contains(": error:") && first_1k.contains(".py:") {
-        return crate::cmds::python::mypy_cmd::filter_mypy_output;
+        return crate::cmds::python::mypy_cmd::filter_mypy_output_piped;
     }
 
     // grep/rg: lines matching file:number:content

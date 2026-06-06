@@ -204,7 +204,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             }
         }
         "pylint" => filter_pylint_json(&result.stdout),
-        "mypy" => mypy_cmd::filter_mypy_output(&raw),
+        "mypy" => mypy_cmd::filter_mypy_output(&raw, result.exit_code),
         _ => filter_generic_lint(&raw),
     };
 

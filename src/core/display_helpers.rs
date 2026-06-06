@@ -4,7 +4,36 @@
 //! a unified trait-based system for displaying daily/weekly/monthly data.
 
 use crate::core::tracking::{DayStats, MonthStats, WeekStats};
-use crate::core::utils::format_tokens;
+use crate::core::utils::{format_tokens, truncate};
+
+/// Render a non-zero-exit failure whose output matched none of a filter's
+/// success/error heuristics. Surfaces the raw output (capped) so a failed run
+/// is never misreported as success. Mirrors go_cmd::format_go_build_failure.
+pub fn format_tool_failure(tool: &str, raw: &str, exit_code: i32) -> String {
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return format!("{}: failed (exit {})", tool, exit_code);
+    }
+
+    let mut result = String::new();
+    result.push_str(&format!("{}: failed (exit {})\n", tool, exit_code));
+    result.push_str("═══════════════════════════════════════\n");
+
+    for (i, line) in lines.iter().take(20).enumerate() {
+        result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 120)));
+    }
+
+    if lines.len() > 20 {
+        result.push_str(&format!("\n... +{} more output lines\n", lines.len() - 20));
+    }
+
+    result.trim().to_string()
+}
 
 /// Format duration in milliseconds to human-readable string
 pub fn format_duration(ms: u64) -> String {

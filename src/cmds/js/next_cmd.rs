@@ -33,7 +33,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} build", tool);
     }
 
-    runner::run_filtered(
+    runner::run_filtered_with_exit(
         cmd,
         "next build",
         &args.join(" "),
@@ -43,7 +43,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 /// Filter Next.js build output - extract routes, bundles, warnings
-fn filter_next_build(output: &str) -> String {
+fn filter_next_build(output: &str, exit_code: i32) -> String {
     lazy_static::lazy_static! {
         // Route line pattern: ○ /dashboard    1.2 kB  132 kB
         static ref ROUTE_PATTERN: Regex = Regex::new(
@@ -111,10 +111,25 @@ fn filter_next_build(output: &str) -> String {
         }
     }
 
-    // Detect if build was skipped (already built)
-    let already_built = clean_output.contains("already optimized")
-        || clean_output.contains("Cache")
-        || (routes_total == 0 && clean_output.contains("Ready"));
+    // A failed build that produced no parseable routes/bundles would otherwise
+    // be summarised as "Errors: N | Warnings: M" (or worse, "Already built")
+    // while discarding the actual compiler error text. Surface the raw output
+    // instead so a failed build is never misreported. Only reachable on the live
+    // exit-aware runner path; exit 0 keeps the normal summary.
+    if exit_code != 0 && routes_total == 0 && bundles.is_empty() {
+        return crate::core::display_helpers::format_tool_failure(
+            "Next.js build",
+            output,
+            exit_code,
+        );
+    }
+
+    // Detect if build was skipped (already built). Gated on exit 0 so a FAILED
+    // build that merely mentions "Cache" can never claim it was already built.
+    let already_built = exit_code == 0
+        && (clean_output.contains("already optimized")
+            || clean_output.contains("Cache")
+            || (routes_total == 0 && clean_output.contains("Ready")));
 
     // Build filtered output
     let mut result = String::new();
@@ -211,10 +226,40 @@ Route (app)                    Size     First Load JS
 
 ✓ Built in 34.2s
 "#;
-        let result = filter_next_build(output);
+        let result = filter_next_build(output, 0);
         assert!(result.contains("Next.js Build"));
         assert!(result.contains("routes"));
         assert!(!result.contains("Creating an optimized")); // Should filter verbose logs
+    }
+
+    #[test]
+    fn test_filter_next_build_failure_not_reported_as_success() {
+        // Regression: a failed `next build` with a type error produces no
+        // parseable routes/bundles. The filter must NOT print
+        // "Already built (using cache)" (the word "Cache" appears in some
+        // failures) and must surface the real error on a non-zero exit.
+        let output = r#"
+   ▲ Next.js 15.2.0
+
+   Creating an optimized production build ...
+Failed to compile.
+
+./src/app/page.tsx:12:7
+Type error: Type 'string' is not assignable to type 'number'.
+Cache restored from previous build.
+"#;
+        let result = filter_next_build(output, 1);
+        assert!(
+            !result.contains("Already built"),
+            "must not claim already-built on a failed run: {}",
+            result
+        );
+        assert!(
+            result.contains("Failed to compile") || result.contains("Type error"),
+            "must surface real error: {}",
+            result
+        );
+        assert!(result.contains("failed (exit 1)"), "got: {}", result);
     }
 
     #[test]

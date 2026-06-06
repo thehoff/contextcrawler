@@ -81,9 +81,21 @@ impl BlockHandler for TscHandler {
         line.starts_with("  ") || line.starts_with('\t')
     }
 
-    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
         if self.error_count == 0 {
-            return Some("TypeScript: No errors found\n".to_string());
+            // Config errors (TS5083/TS18003/TS5057) and tsc crashes carry no
+            // `file(line,col):` prefix, so they never increment error_count. On
+            // a non-zero exit with zero recognised diagnostics, surface the raw
+            // output instead of lying with "No errors found".
+            return if exit_code == 0 {
+                Some("TypeScript: No errors found\n".to_string())
+            } else {
+                Some(crate::core::display_helpers::format_tool_failure(
+                    "TypeScript",
+                    raw,
+                    exit_code,
+                ))
+            };
         }
 
         let mut result = format!(
@@ -107,6 +119,12 @@ impl BlockHandler for TscHandler {
     }
 }
 
+/// Non-streaming tsc filter. Reachable only via the `contextcrawler pipe tsc`
+/// path (`pipe_cmd::resolve_filter`), which pipes stdin through an
+/// `fn(&str) -> String` and therefore has NO exit code to act on. The live
+/// `run()` path uses the streaming [`TscHandler::format_summary`] instead, which
+/// is exit-aware. Because no exit status is available here, this variant cannot
+/// misreport a failed exit as success — it only ever sees raw text.
 pub(crate) fn filter_tsc_output(output: &str) -> String {
     struct TsError {
         file: String,
@@ -324,6 +342,23 @@ Found 3 errors in 2 files.
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, input, 0);
         assert!(result.contains("No errors found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_config_error_not_reported_as_success() {
+        // Regression: a tsc config error (TS5083) carries no `file(line,col):`
+        // prefix, so error_count stays 0. On a non-zero exit the filter must
+        // NOT print "No errors found" and MUST surface the real error.
+        let input = "error TS5083: Cannot read file 'tsconfig.json'.\n";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(
+            !result.contains("No errors found"),
+            "must not claim success on failed run: {}",
+            result
+        );
+        assert!(result.contains("TS5083"), "must surface real error: {}", result);
+        assert!(result.contains("failed (exit 1)"), "got: {}", result);
     }
 
     #[test]
