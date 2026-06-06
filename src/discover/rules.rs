@@ -1,19 +1,19 @@
-use super::report::RtkStatus;
+use super::report::CtxcrlStatus;
 
-pub struct RtkRule {
+pub struct CtxcrlRule {
     pub pattern: &'static str,
-    pub rtk_cmd: &'static str,
+    pub ctxcrl_cmd: &'static str,
     pub rewrite_prefixes: &'static [&'static str],
     pub category: &'static str,
     pub savings_pct: f64,
     pub subcmd_savings: &'static [(&'static str, f64)],
-    pub subcmd_status: &'static [(&'static str, RtkStatus)],
+    pub subcmd_status: &'static [(&'static str, CtxcrlStatus)],
 }
 
-pub const RULES: &[RtkRule] = &[
-    RtkRule {
+pub const RULES: &[CtxcrlRule] = &[
+    CtxcrlRule {
         pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|checkout|switch|restore|merge|rebase|reset|tag|remote|cherry-pick)(?:\s|$)",
-        rtk_cmd: "contextcrawler git",
+        ctxcrl_cmd: "contextcrawler git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
         savings_pct: 70.0,
@@ -34,103 +34,103 @@ pub const RULES: &[RtkRule] = &[
         ],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
-        rtk_cmd: "contextcrawler gh",
+        ctxcrl_cmd: "contextcrawler gh",
         rewrite_prefixes: &["gh"],
         category: "GitHub",
         savings_pct: 82.0,
         subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^glab\s+(mr|issue|ci|pipeline|api|release)",
-        rtk_cmd: "contextcrawler glab",
+        ctxcrl_cmd: "contextcrawler glab",
         rewrite_prefixes: &["glab"],
         category: "GitLab",
         savings_pct: 82.0,
         subcmd_savings: &[("mr", 87.0), ("ci", 82.0), ("issue", 80.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         // `(?:\+\S+\s+)?` tolerates a rustup `+toolchain` selector
         // (`cargo +nightly test`). `normalise_command` strips it before the
         // classifier runs, but accepting it inline keeps classification robust
         // regardless of normalisation order. Subcommand stays in capture 1.
         pattern: r"^cargo\s+(?:\+\S+\s+)?(build|test|clippy|check|fmt|install)",
-        rtk_cmd: "contextcrawler cargo",
+        ctxcrl_cmd: "contextcrawler cargo",
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
         savings_pct: 80.0,
         subcmd_savings: &[("test", 90.0), ("check", 80.0)],
-        subcmd_status: &[("fmt", RtkStatus::Passthrough)],
+        subcmd_status: &[("fmt", CtxcrlStatus::Passthrough)],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
-        rtk_cmd: "contextcrawler pnpm",
+        ctxcrl_cmd: "contextcrawler pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
         savings_pct: 80.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
-        rtk_cmd: "contextcrawler npm",
+        ctxcrl_cmd: "contextcrawler npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^npx\s+",
-        rtk_cmd: "contextcrawler npx",
+        ctxcrl_cmd: "contextcrawler npx",
         rewrite_prefixes: &["npx"],
         category: "PackageManager",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(cat|head|tail)\s+",
-        rtk_cmd: "contextcrawler read",
+        ctxcrl_cmd: "contextcrawler read",
         rewrite_prefixes: &["cat", "head", "tail"],
         category: "Files",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(rg|grep)\s+",
-        rtk_cmd: "contextcrawler grep",
+        ctxcrl_cmd: "contextcrawler grep",
         rewrite_prefixes: &["rg", "grep"],
         category: "Files",
         savings_pct: 75.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^ls(\s|$)",
-        rtk_cmd: "contextcrawler ls",
+        ctxcrl_cmd: "contextcrawler ls",
         rewrite_prefixes: &["ls"],
         category: "Files",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^find\s+",
-        rtk_cmd: "contextcrawler find",
+        ctxcrl_cmd: "contextcrawler find",
         rewrite_prefixes: &["find"],
         category: "Files",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?tsc(\s|$)",
-        rtk_cmd: "contextcrawler tsc",
+        ctxcrl_cmd: "contextcrawler tsc",
         rewrite_prefixes: &[
             "npm exec tsc",
             "npm rum tsc",
@@ -153,9 +153,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?(biome|eslint|lint)(\s|$)",
-        rtk_cmd: "contextcrawler lint",
+        ctxcrl_cmd: "contextcrawler lint",
         rewrite_prefixes: &[
             "biome",
             "eslint",
@@ -204,9 +204,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prettier",
-        rtk_cmd: "contextcrawler prettier",
+        ctxcrl_cmd: "contextcrawler prettier",
         rewrite_prefixes: &[
             "npm exec prettier",
             "npm prettier",
@@ -229,9 +229,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?next\s+build",
-        rtk_cmd: "contextcrawler next",
+        ctxcrl_cmd: "contextcrawler next",
         rewrite_prefixes: &[
             "next build",
             "npm exec next build",
@@ -254,9 +254,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?jest(\s+run)?(\s|$)",
-        rtk_cmd: "contextcrawler jest",
+        ctxcrl_cmd: "contextcrawler jest",
         rewrite_prefixes: &[
             "jest run",
             "jest",
@@ -294,9 +294,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?vitest(\s+run)?(\s|$)",
-        rtk_cmd: "contextcrawler vitest",
+        ctxcrl_cmd: "contextcrawler vitest",
         rewrite_prefixes: &[
             "npm exec vitest run",
             "npm exec vitest",
@@ -334,9 +334,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright",
-        rtk_cmd: "contextcrawler playwright",
+        ctxcrl_cmd: "contextcrawler playwright",
         rewrite_prefixes: &[
             "npm exec playwright",
             "npm playwright",
@@ -359,9 +359,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma",
-        rtk_cmd: "contextcrawler prisma",
+        ctxcrl_cmd: "contextcrawler prisma",
         rewrite_prefixes: &[
             "npm exec prisma",
             "npm prisma",
@@ -384,126 +384,126 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
-        rtk_cmd: "contextcrawler docker",
+        ctxcrl_cmd: "contextcrawler docker",
         rewrite_prefixes: &["docker"],
         category: "Infra",
         savings_pct: 85.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^kubectl\s+(get|logs|describe|apply)",
-        rtk_cmd: "contextcrawler kubectl",
+        ctxcrl_cmd: "contextcrawler kubectl",
         rewrite_prefixes: &["kubectl"],
         category: "Infra",
         savings_pct: 85.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^tree(\s|$)",
-        rtk_cmd: "contextcrawler tree",
+        ctxcrl_cmd: "contextcrawler tree",
         rewrite_prefixes: &["tree"],
         category: "Files",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^diff\s+",
-        rtk_cmd: "contextcrawler diff",
+        ctxcrl_cmd: "contextcrawler diff",
         rewrite_prefixes: &["diff"],
         category: "Files",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^curl\s+",
-        rtk_cmd: "contextcrawler curl",
+        ctxcrl_cmd: "contextcrawler curl",
         rewrite_prefixes: &["curl"],
         category: "Network",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^wget\s+",
-        rtk_cmd: "contextcrawler wget",
+        ctxcrl_cmd: "contextcrawler wget",
         rewrite_prefixes: &["wget"],
         category: "Network",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
-        rtk_cmd: "contextcrawler mypy",
+        ctxcrl_cmd: "contextcrawler mypy",
         rewrite_prefixes: &["python3 -m mypy", "python -m mypy", "mypy"],
         category: "Build",
         savings_pct: 80.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^ruff\s+(check|format)",
-        rtk_cmd: "contextcrawler ruff",
+        ctxcrl_cmd: "contextcrawler ruff",
         rewrite_prefixes: &["ruff"],
         category: "Python",
         savings_pct: 80.0,
         subcmd_savings: &[("check", 80.0), ("format", 75.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(python[0-9.]*\s+-m\s+)?pytest(\s|$)",
-        rtk_cmd: "contextcrawler pytest",
+        ctxcrl_cmd: "contextcrawler pytest",
         rewrite_prefixes: &["python3 -m pytest", "python -m pytest", "pytest"],
         category: "Python",
         savings_pct: 90.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
-        rtk_cmd: "contextcrawler pip",
+        ctxcrl_cmd: "contextcrawler pip",
         rewrite_prefixes: &["pip3", "pip", "uv pip"],
         category: "Python",
         savings_pct: 75.0,
         subcmd_savings: &[("list", 75.0), ("outdated", 80.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^go\s+(test|build|vet)",
-        rtk_cmd: "contextcrawler go",
+        ctxcrl_cmd: "contextcrawler go",
         rewrite_prefixes: &["go"],
         category: "Go",
         savings_pct: 85.0,
         subcmd_savings: &[("test", 90.0), ("build", 80.0), ("vet", 75.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(?:golangci-lint|golangci)\s+(run)(?:\s|$)",
-        rtk_cmd: "contextcrawler golangci-lint run",
+        ctxcrl_cmd: "contextcrawler golangci-lint run",
         rewrite_prefixes: &["golangci-lint run", "golangci run"],
         category: "Go",
         savings_pct: 85.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^bundle\s+(install|update)\b",
-        rtk_cmd: "contextcrawler bundle",
+        ctxcrl_cmd: "contextcrawler bundle",
         rewrite_prefixes: &["bundle"],
         category: "Ruby",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
-        rtk_cmd: "contextcrawler rake",
+        ctxcrl_cmd: "contextcrawler rake",
         rewrite_prefixes: &[
             "bundle exec rails",
             "bundle exec rake",
@@ -516,27 +516,27 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[("test", 90.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
-        rtk_cmd: "contextcrawler rspec",
+        ctxcrl_cmd: "contextcrawler rspec",
         rewrite_prefixes: &["bundle exec rspec", "bin/rspec", "rspec"],
         category: "Tests",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
-        rtk_cmd: "contextcrawler rubocop",
+        ctxcrl_cmd: "contextcrawler rubocop",
         rewrite_prefixes: &["bundle exec rubocop", "rubocop"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^aws\s+",
-        rtk_cmd: "contextcrawler aws",
+        ctxcrl_cmd: "contextcrawler aws",
         rewrite_prefixes: &["aws"],
         category: "Infra",
         savings_pct: 80.0,
@@ -558,333 +558,333 @@ pub const RULES: &[RtkRule] = &[
         ],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^psql(\s|$)",
-        rtk_cmd: "contextcrawler psql",
+        ctxcrl_cmd: "contextcrawler psql",
         rewrite_prefixes: &["psql"],
         category: "Infra",
         savings_pct: 75.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^ansible-playbook\b",
-        rtk_cmd: "contextcrawler ansible-playbook",
+        ctxcrl_cmd: "contextcrawler ansible-playbook",
         rewrite_prefixes: &["ansible-playbook"],
         category: "Infra",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^brew\s+(install|upgrade)\b",
-        rtk_cmd: "contextcrawler brew",
+        ctxcrl_cmd: "contextcrawler brew",
         rewrite_prefixes: &["brew"],
         category: "PackageManager",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^composer\s+(install|update|require)\b",
-        rtk_cmd: "contextcrawler composer",
+        ctxcrl_cmd: "contextcrawler composer",
         rewrite_prefixes: &["composer"],
         category: "PackageManager",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^df(\s|$)",
-        rtk_cmd: "contextcrawler df",
+        ctxcrl_cmd: "contextcrawler df",
         rewrite_prefixes: &["df"],
         category: "System",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^dotnet\s+build\b",
-        rtk_cmd: "contextcrawler dotnet",
+        ctxcrl_cmd: "contextcrawler dotnet",
         rewrite_prefixes: &["dotnet"],
         category: "Build",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^du\b",
-        rtk_cmd: "contextcrawler du",
+        ctxcrl_cmd: "contextcrawler du",
         rewrite_prefixes: &["du"],
         category: "System",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^fail2ban-client\b",
-        rtk_cmd: "contextcrawler fail2ban-client",
+        ctxcrl_cmd: "contextcrawler fail2ban-client",
         rewrite_prefixes: &["fail2ban-client"],
         category: "Infra",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^gcloud\b",
-        rtk_cmd: "contextcrawler gcloud",
+        ctxcrl_cmd: "contextcrawler gcloud",
         rewrite_prefixes: &["gcloud"],
         category: "Infra",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^(?:\./gradlew|gradlew\.bat|gradlew|gradle)(?:\s+(test|build|clean|assemble\w*|install\w*|check|lint\w*|dependencies))?(\s|$)",
-        rtk_cmd: "contextcrawler gradlew",
+        ctxcrl_cmd: "contextcrawler gradlew",
         rewrite_prefixes: &["./gradlew", "gradlew.bat", "gradlew", "gradle"],
         category: "Build",
         savings_pct: 75.0,
         subcmd_savings: &[("test", 90.0), ("build", 80.0), ("check", 80.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^hadolint\b",
-        rtk_cmd: "contextcrawler hadolint",
+        ctxcrl_cmd: "contextcrawler hadolint",
         rewrite_prefixes: &["hadolint"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^helm\b",
-        rtk_cmd: "contextcrawler helm",
+        ctxcrl_cmd: "contextcrawler helm",
         rewrite_prefixes: &["helm"],
         category: "Infra",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^iptables\b",
-        rtk_cmd: "contextcrawler iptables",
+        ctxcrl_cmd: "contextcrawler iptables",
         rewrite_prefixes: &["iptables"],
         category: "Infra",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^make\b",
-        rtk_cmd: "contextcrawler make",
+        ctxcrl_cmd: "contextcrawler make",
         rewrite_prefixes: &["make"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^markdownlint\b",
-        rtk_cmd: "contextcrawler markdownlint",
+        ctxcrl_cmd: "contextcrawler markdownlint",
         rewrite_prefixes: &["markdownlint"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^mix\s+(compile|format)(\s|$)",
-        rtk_cmd: "contextcrawler mix",
+        ctxcrl_cmd: "contextcrawler mix",
         rewrite_prefixes: &["mix"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^mvn\s+(compile|package|clean|install)\b",
-        rtk_cmd: "contextcrawler mvn",
+        ctxcrl_cmd: "contextcrawler mvn",
         rewrite_prefixes: &["mvn"],
         category: "Build",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^ping\b",
-        rtk_cmd: "contextcrawler ping",
+        ctxcrl_cmd: "contextcrawler ping",
         rewrite_prefixes: &["ping"],
         category: "Network",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^pio\s+run",
-        rtk_cmd: "contextcrawler pio",
+        ctxcrl_cmd: "contextcrawler pio",
         rewrite_prefixes: &["pio"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^poetry\s+(install|lock|update)\b",
-        rtk_cmd: "contextcrawler poetry",
+        ctxcrl_cmd: "contextcrawler poetry",
         rewrite_prefixes: &["poetry"],
         category: "Python",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^pre-commit\b",
-        rtk_cmd: "contextcrawler pre-commit",
+        ctxcrl_cmd: "contextcrawler pre-commit",
         rewrite_prefixes: &["pre-commit"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^ps(\s|$)",
-        rtk_cmd: "contextcrawler ps",
+        ctxcrl_cmd: "contextcrawler ps",
         rewrite_prefixes: &["ps"],
         category: "System",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^quarto\s+render",
-        rtk_cmd: "contextcrawler quarto",
+        ctxcrl_cmd: "contextcrawler quarto",
         rewrite_prefixes: &["quarto"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^rsync\b",
-        rtk_cmd: "contextcrawler rsync",
+        ctxcrl_cmd: "contextcrawler rsync",
         rewrite_prefixes: &["rsync"],
         category: "Network",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^shellcheck\b",
-        rtk_cmd: "contextcrawler shellcheck",
+        ctxcrl_cmd: "contextcrawler shellcheck",
         rewrite_prefixes: &["shellcheck"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^shopify\s+theme\s+(push|pull)",
-        rtk_cmd: "contextcrawler shopify",
+        ctxcrl_cmd: "contextcrawler shopify",
         rewrite_prefixes: &["shopify"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^sops\b",
-        rtk_cmd: "contextcrawler sops",
+        ctxcrl_cmd: "contextcrawler sops",
         rewrite_prefixes: &["sops"],
         category: "Infra",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^swift\s+(build|test)\b",
-        rtk_cmd: "contextcrawler swift",
+        ctxcrl_cmd: "contextcrawler swift",
         rewrite_prefixes: &["swift"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[("test", 90.0)],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^systemctl\s+status\b",
-        rtk_cmd: "contextcrawler systemctl",
+        ctxcrl_cmd: "contextcrawler systemctl",
         rewrite_prefixes: &["systemctl"],
         category: "System",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^terraform\s+plan",
-        rtk_cmd: "contextcrawler terraform",
+        ctxcrl_cmd: "contextcrawler terraform",
         rewrite_prefixes: &["terraform"],
         category: "Infra",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^tofu\s+(fmt|init|plan|validate)(\s|$)",
-        rtk_cmd: "contextcrawler tofu",
+        ctxcrl_cmd: "contextcrawler tofu",
         rewrite_prefixes: &["tofu"],
         category: "Infra",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^trunk\s+build",
-        rtk_cmd: "contextcrawler trunk",
+        ctxcrl_cmd: "contextcrawler trunk",
         rewrite_prefixes: &["trunk"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^uv\s+(sync|pip\s+install)\b",
-        rtk_cmd: "contextcrawler uv",
+        ctxcrl_cmd: "contextcrawler uv",
         rewrite_prefixes: &["uv"],
         category: "Python",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^yamllint\b",
-        rtk_cmd: "contextcrawler yamllint",
+        ctxcrl_cmd: "contextcrawler yamllint",
         rewrite_prefixes: &["yamllint"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^wc(\s|$)",
-        rtk_cmd: "contextcrawler wc",
+        ctxcrl_cmd: "contextcrawler wc",
         rewrite_prefixes: &["wc"],
         category: "Files",
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^gt\s+",
-        rtk_cmd: "contextcrawler gt",
+        ctxcrl_cmd: "contextcrawler gt",
         rewrite_prefixes: &["gt"],
         category: "Git",
         savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    RtkRule {
+    CtxcrlRule {
         pattern: r"^liquibase(?:\s|$)",
-        rtk_cmd: "contextcrawler liquibase",
+        ctxcrl_cmd: "contextcrawler liquibase",
         rewrite_prefixes: &["liquibase"],
         category: "Infra",
         savings_pct: 65.0,

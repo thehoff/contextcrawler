@@ -673,11 +673,11 @@ fn run_log(
     // structural change, record it as passthrough (0/0 tokens) so `gain`
     // reports honestly; otherwise track the real savings.
     let original_cmd = format!("git log {}", args.join(" "));
-    let rtk_cmd = format!("contextcrawler git log {}", args.join(" "));
+    let ctxcrl_cmd = format!("contextcrawler git log {}", args.join(" "));
     if log_run_is_passthrough(&result.stdout, &filtered) {
-        timer.track_passthrough(&original_cmd, &rtk_cmd);
+        timer.track_passthrough(&original_cmd, &ctxcrl_cmd);
     } else {
-        timer.track(&original_cmd, &rtk_cmd, &result.stdout, &filtered);
+        timer.track(&original_cmd, &ctxcrl_cmd, &result.stdout, &filtered);
     }
 
     Ok(0)
@@ -1080,12 +1080,12 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         } else {
             format!("git status {}", args.join(" "))
         };
-        let rtk_cmd = if args.is_empty() {
+        let ctxcrl_cmd = if args.is_empty() {
             "contextcrawler git status".to_string()
         } else {
             format!("contextcrawler git status {}", args.join(" "))
         };
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, &message);
+        timer.track(&original_cmd, &ctxcrl_cmd, &raw_output, &message);
         return Ok(result.exit_code);
     }
 
@@ -1101,12 +1101,12 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         } else {
             format!("git status {}", args.join(" "))
         };
-        let rtk_cmd = if args.is_empty() {
+        let ctxcrl_cmd = if args.is_empty() {
             "contextcrawler git status".to_string()
         } else {
             format!("contextcrawler git status {}", args.join(" "))
         };
-        timer.track(&original_cmd, &rtk_cmd, &raw_output, &result.stdout);
+        timer.track(&original_cmd, &ctxcrl_cmd, &raw_output, &result.stdout);
         return Ok(result.exit_code);
     }
 
@@ -1133,13 +1133,13 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     } else {
         format!("git status {}", args.join(" "))
     };
-    let rtk_cmd = if args.is_empty() {
+    let ctxcrl_cmd = if args.is_empty() {
         "contextcrawler git status".to_string()
     } else {
         format!("contextcrawler git status {}", args.join(" "))
     };
 
-    timer.track(&original_cmd, &rtk_cmd, &raw_output, &final_output);
+    timer.track(&original_cmd, &ctxcrl_cmd, &raw_output, &final_output);
 
     Ok(0)
 }

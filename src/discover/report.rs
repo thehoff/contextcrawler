@@ -9,7 +9,7 @@ use std::path::Path;
 
 /// RTK support status for a command.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-pub enum RtkStatus {
+pub enum CtxcrlStatus {
     /// Dedicated handler with filtering (e.g., git status → git.rs:run_status())
     Existing,
     /// Works via external_subcommand passthrough, no filtering (e.g., cargo fmt → Other)
@@ -18,12 +18,12 @@ pub enum RtkStatus {
     NotSupported,
 }
 
-impl RtkStatus {
+impl CtxcrlStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            RtkStatus::Existing => "existing",
-            RtkStatus::Passthrough => "passthrough",
-            RtkStatus::NotSupported => "not-supported",
+            CtxcrlStatus::Existing => "existing",
+            CtxcrlStatus::Passthrough => "passthrough",
+            CtxcrlStatus::NotSupported => "not-supported",
         }
     }
 }
@@ -33,11 +33,11 @@ impl RtkStatus {
 pub struct SupportedEntry {
     pub command: String,
     pub count: usize,
-    pub rtk_equivalent: &'static str,
+    pub ctxcrl_equivalent: &'static str,
     pub category: &'static str,
     pub estimated_savings_tokens: usize,
     pub estimated_savings_pct: f64,
-    pub rtk_status: RtkStatus,
+    pub rtk_status: CtxcrlStatus,
 }
 
 /// An unsupported command not yet handled by RTK.
@@ -169,7 +169,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
                 "{:<24} {:>5}    {:<18} {:<13} ~{}\n",
                 truncate_str(&entry.command, 23),
                 entry.count,
-                entry.rtk_equivalent,
+                entry.ctxcrl_equivalent,
                 entry.rtk_status.as_str(),
                 format_tokens(entry.estimated_savings_tokens),
             ));

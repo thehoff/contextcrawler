@@ -94,7 +94,7 @@ fn canonical_key(filter_path: &Path) -> Result<String> {
 /// recognized CI env var is set. None otherwise (caller proceeds to the
 /// real hash check).
 fn env_override_status() -> Option<TrustStatus> {
-    if std::env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Ok("1") {
+    if crate::core::env_compat::env_flag("CTXCRL_TRUST_PROJECT_FILTERS") {
         let in_ci = std::env::var("CI").is_ok()
             || std::env::var("GITHUB_ACTIONS").is_ok()
             || std::env::var("GITLAB_CI").is_ok()
@@ -276,11 +276,11 @@ pub fn run_trust(list: bool, global: bool) -> Result<()> {
         let label = format!("{}", p.display());
         (p, label)
     } else {
-        let p = std::path::PathBuf::from(".rtk/filters.toml");
+        let p = std::path::PathBuf::from(".ctxcrl/filters.toml");
         if !p.exists() {
-            anyhow::bail!("No .rtk/filters.toml found in current directory");
+            anyhow::bail!("No .ctxcrl/filters.toml found in current directory");
         }
-        (p, ".rtk/filters.toml".to_string())
+        (p, ".ctxcrl/filters.toml".to_string())
     };
 
     // Read ONCE to prevent TOCTOU: display + hash from same buffer

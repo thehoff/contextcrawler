@@ -61,3 +61,8 @@ bench/results-*.md
 # bench harness output (tests/harness_claude_code.rs) — see #29
 bench/claude-code-*.json
 bench/claude-code-*.md
+
+# local tool metadata / scratch (not part of the project)
+.serena/
+.playwright-mcp/
+.agy-intent-diff.patch

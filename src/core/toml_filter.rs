@@ -2,7 +2,7 @@
 ///
 /// Provides a declarative pipeline of 8 stages that can be configured
 /// via TOML files. Lookup priority (first match wins):
-///   1. `.rtk/filters.toml`              — project-local, committable with the repo
+///   1. `.ctxcrl/filters.toml`              — project-local, committable with the repo
 ///   2. `~/.config/rtk/filters.toml`     — user-global, applies to all projects
 ///   3. Built-in TOML                     — `src/filters/*.toml`, concatenated by build.rs and embedded at compile time
 ///   4. Passthrough                       — no match, handled by caller
@@ -205,11 +205,11 @@ impl TomlFilterRegistry {
     fn load() -> Self {
         let mut filters = Vec::new();
 
-        // Priority 1: project-local .rtk/filters.toml (trust-gated).
+        // Priority 1: project-local .ctxcrl/filters.toml (trust-gated).
         // TOCTOU-safe: read once, hash the in-memory buffer, parse the same
         // buffer if trust passes. Avoids the swap-between-hash-and-parse
         // window the two-open form left.
-        let project_filter_path = std::path::Path::new(".rtk/filters.toml");
+        let project_filter_path = std::path::Path::new(".ctxcrl/filters.toml");
         if project_filter_path.exists() {
             if let Ok(bytes) = std::fs::read(project_filter_path) {
                 let trust_status =
@@ -222,7 +222,7 @@ impl TomlFilterRegistry {
                         let content = String::from_utf8_lossy(&bytes);
                         match Self::parse_and_compile(&content, "project") {
                             Ok(f) => filters.extend(f),
-                            Err(e) => eprintln!("[contextcrawler] warning: .rtk/filters.toml: {}", e),
+                            Err(e) => eprintln!("[contextcrawler] warning: .ctxcrl/filters.toml: {}", e),
                         }
                     }
                     crate::hooks::trust::TrustStatus::Untrusted => {
@@ -231,13 +231,13 @@ impl TomlFilterRegistry {
                         // schema_version + comments would never apply any rule
                         // even if trusted. Skip the scary warning entirely.
                         if !Self::has_no_active_rules(&bytes) {
-                            eprintln!("[contextcrawler] WARNING: untrusted project filters (.rtk/filters.toml)");
+                            eprintln!("[contextcrawler] WARNING: untrusted project filters (.ctxcrl/filters.toml)");
                             eprintln!("[contextcrawler] Filters NOT applied. Run `contextcrawler trust` to review and enable.");
                         }
                     }
                     crate::hooks::trust::TrustStatus::ContentChanged { .. } => {
                         if !Self::has_no_active_rules(&bytes) {
-                            eprintln!("[contextcrawler] WARNING: .rtk/filters.toml changed since trusted.");
+                            eprintln!("[contextcrawler] WARNING: .ctxcrl/filters.toml changed since trusted.");
                             eprintln!("[contextcrawler] Filters NOT applied. Run `contextcrawler trust` to re-review.");
                         }
                     }
@@ -650,7 +650,7 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
     );
 
     // Trust-gated: only verify project-local filters if trusted (SA-2025-RTK-002)
-    let project_path = std::path::Path::new(".rtk/filters.toml");
+    let project_path = std::path::Path::new(".ctxcrl/filters.toml");
     if project_path.exists() {
         let trust_status = crate::hooks::trust::check_trust(project_path)
             .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
@@ -763,7 +763,7 @@ fn collect_test_outcomes(
 /// Find a matching filter from the global registry. Initialises the registry
 /// lazily on first call. Returns `None` if no filter matches.
 pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
-    if std::env::var("RTK_TOML_DEBUG").is_ok() {
+    if crate::core::env_compat::env_present("CTXCRL_TOML_DEBUG") {
         eprintln!(
             "[contextcrawler:toml] looking up filter for: {:?} ({} filters loaded)",
             command,
@@ -771,7 +771,7 @@ pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
         );
     }
     let result = find_filter_in(command, &REGISTRY.filters);
-    if std::env::var("RTK_TOML_DEBUG").is_ok() {
+    if crate::core::env_compat::env_present("CTXCRL_TOML_DEBUG") {
         match result {
             Some(f) => eprintln!("[contextcrawler:toml] matched filter: '{}'", f.name),
             None => eprintln!("[contextcrawler:toml] no filter matched — passthrough"),

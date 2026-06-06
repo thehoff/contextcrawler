@@ -3,6 +3,8 @@
 pub mod config;
 pub mod constants;
 pub mod display_helpers;
+pub mod env_compat;
+pub mod path_migrate;
 pub mod filter;
 pub mod runner;
 pub mod output_summary;

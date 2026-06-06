@@ -305,9 +305,9 @@ fn print_rewrite(cmd: &str) {
 
 // ── Audit logging ─────────────────────────────────────────────
 
-/// Best-effort audit log when RTK_HOOK_AUDIT=1.
+/// Best-effort audit log when CTXCRL_HOOK_AUDIT=1 (legacy RTK_HOOK_AUDIT=1).
 fn audit_log(action: &str, original: &str, rewritten: &str) {
-    if std::env::var("RTK_HOOK_AUDIT").as_deref() != Ok("1") {
+    if !crate::core::env_compat::env_flag("CTXCRL_HOOK_AUDIT") {
         return;
     }
     let _ = audit_log_inner(action, original, rewritten);
@@ -323,7 +323,10 @@ fn sanitize_log_field(s: &str) -> String {
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
     let home = dirs::home_dir()?;
-    let dir = home.join(".local").join("share").join("rtk");
+    let dir = home
+        .join(".local")
+        .join("share")
+        .join(crate::core::constants::RTK_DATA_DIR);
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("hook-audit.log");
     let mut file = std::fs::OpenOptions::new()

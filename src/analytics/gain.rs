@@ -284,7 +284,7 @@ pub fn run(
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
                     let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
-                    let display = display_cmd(&rec.rtk_cmd);
+                    let display = display_cmd(&rec.ctxcrl_cmd);
                     // G7/#100: char-safe truncation — byte slicing panics
                     // when a multibyte char straddles the boundary.
                     let cmd_short = truncate(display, 25);
@@ -968,7 +968,7 @@ mod sigpipe_regression {
                     id INTEGER PRIMARY KEY,
                     timestamp TEXT NOT NULL,
                     original_cmd TEXT NOT NULL,
-                    rtk_cmd TEXT NOT NULL,
+                    ctxcrl_cmd TEXT NOT NULL,
                     project_path TEXT NOT NULL DEFAULT '',
                     input_tokens INTEGER NOT NULL,
                     output_tokens INTEGER NOT NULL,
@@ -983,7 +983,7 @@ mod sigpipe_regression {
             for i in 0..5 {
                 conn.execute(
                     "INSERT INTO commands
-                        (timestamp, original_cmd, rtk_cmd, project_path,
+                        (timestamp, original_cmd, ctxcrl_cmd, project_path,
                          input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
                      VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, 12)",
                     rusqlite::params![

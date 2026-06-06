@@ -25,7 +25,7 @@ pub struct TrackedCommand {
     pub timestamp: DateTime<Utc>,
     pub original_cmd: String,
     #[allow(dead_code)]
-    pub rtk_cmd: String,
+    pub ctxcrl_cmd: String,
     /// Encoded project-path slug derived from the tracked row's
     /// `project_path` column via `ClaudeProvider::encode_project_path`.
     /// `None` when the row has no project_path (legacy data) or when the
@@ -38,8 +38,8 @@ impl TrackedCommand {
     /// command through contextcrawler, clap rejected it, and contextcrawler
     /// fell back to running it raw. Still counts as "runtime tracked".
     pub fn is_fallback(&self) -> bool {
-        self.rtk_cmd.starts_with("contextcrawler fallback:")
-            || self.rtk_cmd.starts_with("rtk fallback:")
+        self.ctxcrl_cmd.starts_with("contextcrawler fallback:")
+            || self.ctxcrl_cmd.starts_with("ctxcrl fallback:")
     }
 }
 
@@ -57,7 +57,7 @@ pub struct ReconcileContext {
 /// Resolve the tracking DB path using the same precedence rules as
 /// `crate::core::tracking` (env override → config file → platform default).
 pub fn tracking_db_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("RTK_DB_PATH") {
+    if let Some(custom) = crate::core::env_compat::env_var("CTXCRL_DB_PATH") {
         return PathBuf::from(custom);
     }
     if let Ok(config) = crate::core::config::Config::load() {
@@ -141,7 +141,7 @@ fn try_load(
     let mut rows = match (lo, hi) {
         (Some(lo), Some(hi)) => {
             let mut stmt = conn.prepare(
-                "SELECT timestamp, original_cmd, rtk_cmd, project_path FROM commands
+                "SELECT timestamp, original_cmd, ctxcrl_cmd, project_path FROM commands
                  WHERE timestamp BETWEEN ?1 AND ?2",
             )?;
             let collected =
@@ -150,7 +150,7 @@ fn try_load(
         }
         _ => {
             let mut stmt = conn
-                .prepare("SELECT timestamp, original_cmd, rtk_cmd, project_path FROM commands")?;
+                .prepare("SELECT timestamp, original_cmd, ctxcrl_cmd, project_path FROM commands")?;
             let collected = collect_rows(stmt.query([])?)?;
             collected
         }
@@ -183,7 +183,7 @@ fn collect_rows(mut rows: rusqlite::Rows<'_>) -> Result<Vec<TrackedCommand>> {
         out.push(TrackedCommand {
             timestamp,
             original_cmd: original,
-            rtk_cmd: rtk,
+            ctxcrl_cmd: rtk,
             project_slug,
         });
     }
@@ -342,7 +342,7 @@ mod tests {
                 id INTEGER PRIMARY KEY,
                 timestamp TEXT NOT NULL,
                 original_cmd TEXT NOT NULL,
-                rtk_cmd TEXT NOT NULL,
+                ctxcrl_cmd TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 saved_tokens INTEGER NOT NULL DEFAULT 0,
@@ -355,7 +355,7 @@ mod tests {
         .unwrap();
         for (ts, orig, wrapped) in rows {
             conn.execute(
-                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
+                "INSERT INTO commands (timestamp, original_cmd, ctxcrl_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
                  VALUES (?1, ?2, ?3, 0, 0, 0, 0.0)",
                 rusqlite::params![ts, orig, wrapped],
             )
@@ -535,7 +535,7 @@ mod tests {
                 id INTEGER PRIMARY KEY,
                 timestamp TEXT NOT NULL,
                 original_cmd TEXT NOT NULL,
-                rtk_cmd TEXT NOT NULL,
+                ctxcrl_cmd TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 saved_tokens INTEGER NOT NULL DEFAULT 0,
@@ -548,7 +548,7 @@ mod tests {
         .unwrap();
         for (ts, orig, wrapped, project_path) in rows {
             conn.execute(
-                "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, project_path)
+                "INSERT INTO commands (timestamp, original_cmd, ctxcrl_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, project_path)
                  VALUES (?1, ?2, ?3, 0, 0, 0, 0.0, ?4)",
                 rusqlite::params![ts, orig, wrapped, project_path],
             )

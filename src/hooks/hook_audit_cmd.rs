@@ -14,11 +14,13 @@ const MAX_LOG_LINES: usize = 200_000;
 
 /// The directory the audit log is expected to live under.
 fn audit_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("RTK_AUDIT_DIR") {
+    if let Some(dir) = crate::core::env_compat::env_var("CTXCRL_AUDIT_DIR") {
         PathBuf::from(dir)
     } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home).join(".local/share/rtk")
+        PathBuf::from(home)
+            .join(".local/share")
+            .join(crate::core::constants::RTK_DATA_DIR)
     }
 }
 

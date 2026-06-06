@@ -11,8 +11,16 @@ use std::sync::OnceLock;
 
 static CACHED_SALT: OnceLock<String> = OnceLock::new();
 
-const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
-const TELEMETRY_TOKEN: Option<&str> = option_env!("RTK_TELEMETRY_TOKEN");
+// Build-time telemetry config. Canonical `CTXCRL_*` build env wins; the legacy
+// `RTK_*` build env is still honoured for back-compat (resolved at compile time).
+const TELEMETRY_URL: Option<&str> = match option_env!("CTXCRL_TELEMETRY_URL") {
+    Some(v) => Some(v),
+    None => option_env!("RTK_TELEMETRY_URL"),
+};
+const TELEMETRY_TOKEN: Option<&str> = match option_env!("CTXCRL_TELEMETRY_TOKEN") {
+    Some(v) => Some(v),
+    None => option_env!("RTK_TELEMETRY_TOKEN"),
+};
 const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 
 /// Send a telemetry ping if enabled and not already sent today.
@@ -36,7 +44,7 @@ pub fn maybe_ping() {
     }
 
     // Check opt-out: env var
-    if std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1" {
+    if crate::core::env_compat::env_flag("CTXCRL_TELEMETRY_DISABLED") {
         return;
     }
 
@@ -220,7 +228,7 @@ fn random_salt() -> String {
 pub fn salt_file_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("rtk")
+        .join(RTK_DATA_DIR)
         .join(".device_salt")
 }
 
@@ -394,9 +402,9 @@ fn detect_hook_type() -> String {
 fn count_custom_toml_filters() -> usize {
     let mut count = 0;
 
-    // Project-local: .rtk/filters/*.toml
+    // Project-local: .ctxcrl/filters/*.toml
     if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters")) {
+        if let Ok(entries) = std::fs::read_dir(cwd.join(".ctxcrl/filters")) {
             count += entries
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
@@ -512,14 +520,18 @@ mod tests {
     #[test]
     fn test_salt_file_path_is_in_rtk_dir() {
         let path = salt_file_path();
-        assert!(path.to_string_lossy().contains("rtk"));
+        assert!(path
+            .to_string_lossy()
+            .contains(crate::core::constants::RTK_DATA_DIR));
         assert!(path.to_string_lossy().contains(".device_salt"));
     }
 
     #[test]
     fn test_marker_path_exists() {
         let path = telemetry_marker_path();
-        assert!(path.to_string_lossy().contains("rtk"));
+        assert!(path
+            .to_string_lossy()
+            .contains(crate::core::constants::RTK_DATA_DIR));
     }
 
     #[test]

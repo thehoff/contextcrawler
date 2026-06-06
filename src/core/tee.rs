@@ -77,7 +77,7 @@ fn confine_tee_dir_to_home(dir: PathBuf) -> Option<PathBuf> {
 /// default location is trusted as-is.
 fn get_tee_dir(config: &Config) -> Option<PathBuf> {
     // Env var override
-    if let Ok(dir) = std::env::var("RTK_TEE_DIR") {
+    if let Some(dir) = crate::core::env_compat::env_var("CTXCRL_TEE_DIR") {
         return confine_tee_dir_to_home(PathBuf::from(dir));
     }
 
@@ -266,7 +266,7 @@ fn write_tee_content(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()
 /// Returns file path on success, None if skipped/failed.
 pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf> {
     // Check RTK_TEE=0 env override (disable)
-    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
+    if crate::core::env_compat::env_var("CTXCRL_TEE").as_deref() == Some("0") {
         return None;
     }
 
@@ -314,7 +314,7 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
 /// the LLM has access to full untruncated output via the hint path.
 pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
     // Check RTK_TEE=0 env override (disable)
-    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
+    if crate::core::env_compat::env_var("CTXCRL_TEE").as_deref() == Some("0") {
         return None;
     }
 

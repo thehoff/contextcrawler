@@ -85,7 +85,7 @@ fn check_baseline_trust(path: &Path) -> BaselineTrust {
 }
 
 /// Filename for the stored hash (dotfile alongside hook)
-const HASH_FILENAME: &str = ".rtk-hook.sha256";
+const HASH_FILENAME: &str = ".ctxcrl-hook.sha256";
 
 /// Result of hook integrity verification
 #[derive(Debug, PartialEq)]
@@ -614,13 +614,13 @@ pub fn runtime_check() -> Result<()> {
         IntegrityStatus::NoBaseline => {
             // Fail CLOSED. A hook file exists but its baseline hash is
             // missing, so we cannot tell a legitimate hook from a tampered
-            // one. Deleting `.rtk-hook.sha256` is a plausible way for an
+            // one. Deleting `.ctxcrl-hook.sha256` is a plausible way for an
             // attacker to disable this very check, so we refuse to run
             // rather than continue blind.
             anyhow::bail!(
                 "contextcrawler: hook integrity baseline missing.\n  \
                  A hook exists at ~/.claude/hooks/rtk-rewrite.sh but its baseline \
-                 hash (.rtk-hook.sha256) is gone.\n  \
+                 hash (.ctxcrl-hook.sha256) is gone.\n  \
                  ContextCrawler cannot verify the hook has not been tampered with, \
                  so it will not run.\n  \
                  To re-establish the baseline:  contextcrawler init -g --auto-patch"
@@ -810,7 +810,7 @@ mod tests {
     fn test_verify_orphaned_hash() {
         let temp = TempDir::new().unwrap();
         let hook = temp.path().join("rtk-rewrite.sh");
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
         // Create hash but no hook
         fs::write(
@@ -831,7 +831,7 @@ mod tests {
 
         store_hash(&hook).unwrap();
 
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
         assert!(hash_file.exists());
 
         let content = fs::read_to_string(&hash_file).unwrap();
@@ -874,7 +874,7 @@ mod tests {
 
         store_hash(&hook).unwrap();
 
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
         let perms = fs::metadata(&hash_file).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o444, "Hash file should be read-only");
     }
@@ -886,7 +886,7 @@ mod tests {
         fs::write(&hook, "test").unwrap();
 
         store_hash(&hook).unwrap();
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
         assert!(hash_file.exists());
 
         let removed = remove_hash(&hook).unwrap();
@@ -907,7 +907,7 @@ mod tests {
     fn test_invalid_hash_file_rejected() {
         let temp = TempDir::new().unwrap();
         let hook = temp.path().join("rtk-rewrite.sh");
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
         fs::write(&hook, "test").unwrap();
         fs::write(&hash_file, "not-a-valid-hash  rtk-rewrite.sh\n").unwrap();
@@ -920,7 +920,7 @@ mod tests {
     fn test_hash_only_no_filename_rejected() {
         let temp = TempDir::new().unwrap();
         let hook = temp.path().join("rtk-rewrite.sh");
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
         fs::write(&hook, "test").unwrap();
         // Hash with no two-space separator and filename
@@ -941,7 +941,7 @@ mod tests {
     fn test_wrong_separator_rejected() {
         let temp = TempDir::new().unwrap();
         let hook = temp.path().join("rtk-rewrite.sh");
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
         fs::write(&hook, "test").unwrap();
         // Single space instead of two-space separator
@@ -982,7 +982,7 @@ mod tests {
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
         store_hash(&hook).unwrap();
 
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
         // Make the baseline group/world-writable.
         fs::set_permissions(&hash_file, fs::Permissions::from_mode(0o666)).unwrap();
 
@@ -1009,7 +1009,7 @@ mod tests {
         let real = temp.path().join("real-hash");
         let hash = compute_hash(&hook).unwrap();
         fs::write(&real, format!("{}  rtk-rewrite.sh\n", hash)).unwrap();
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
         std::os::unix::fs::symlink(&real, &hash_file).unwrap();
 
         assert_eq!(check_baseline_trust(&hash_file), BaselineTrust::Symlink);
@@ -1027,7 +1027,7 @@ mod tests {
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
         store_hash(&hook).unwrap();
 
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
         assert_eq!(check_baseline_trust(&hash_file), BaselineTrust::Ok);
         assert_eq!(verify_hook_at(&hook).unwrap(), IntegrityStatus::Verified);
     }
@@ -1212,7 +1212,7 @@ mod tests {
 
         store_hash(&hook).unwrap();
 
-        let hash_file = temp.path().join(".rtk-hook.sha256");
+        let hash_file = temp.path().join(".ctxcrl-hook.sha256");
         let content = fs::read_to_string(&hash_file).unwrap();
 
         // Should be parseable by sha256sum -c

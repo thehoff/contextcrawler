@@ -11,10 +11,10 @@ use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 #[derive(Debug, PartialEq)]
 pub enum Classification {
     Supported {
-        rtk_equivalent: &'static str,
+        ctxcrl_equivalent: &'static str,
         category: &'static str,
         estimated_savings_pct: f64,
-        status: super::report::RtkStatus,
+        status: super::report::CtxcrlStatus,
     },
     Unsupported {
         base_command: String,
@@ -194,7 +194,7 @@ pub fn classify_command(cmd: &str) -> Classification {
                     .iter()
                     .find(|(s, _)| *s == subcmd)
                     .map(|(_, st)| *st)
-                    .unwrap_or(super::report::RtkStatus::Existing);
+                    .unwrap_or(super::report::CtxcrlStatus::Existing);
 
                 // Check if this subcommand has custom savings
                 let savings = rule
@@ -206,14 +206,14 @@ pub fn classify_command(cmd: &str) -> Classification {
 
                 (savings, status)
             } else {
-                (rule.savings_pct, super::report::RtkStatus::Existing)
+                (rule.savings_pct, super::report::CtxcrlStatus::Existing)
             }
         } else {
-            (rule.savings_pct, super::report::RtkStatus::Existing)
+            (rule.savings_pct, super::report::CtxcrlStatus::Existing)
         };
 
         Classification::Supported {
-            rtk_equivalent: rule.rtk_cmd,
+            ctxcrl_equivalent: rule.ctxcrl_cmd,
             category: rule.category,
             estimated_savings_pct: savings,
             status,
@@ -449,7 +449,8 @@ fn strip_absolute_path(cmd: &str) -> String {
 }
 
 /// True only when the env-prefix contains an assignment whose key is EXACTLY
-/// `RTK_DISABLED`. A naive `prefix.contains("RTK_DISABLED=")` is unsafe: a
+/// the canonical `CTXCRL_DISABLED` or the legacy `RTK_DISABLED` (deprecated,
+/// still honoured). A naive `prefix.contains("RTK_DISABLED=")` is unsafe: a
 /// crafted prefix like `FOO=RTK_DISABLED=1 git status` parses as a single
 /// assignment `FOO` = `RTK_DISABLED=1`, so the substring is present even
 /// though `RTK_DISABLED` was never genuinely set. Parse into individual
@@ -457,7 +458,7 @@ fn strip_absolute_path(cmd: &str) -> String {
 pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
     env_prefix_assignments(prefix_part)
         .iter()
-        .any(|(key, _)| *key == "RTK_DISABLED")
+        .any(|(key, _)| *key == "CTXCRL_DISABLED" || *key == "RTK_DISABLED")
 }
 
 /// Split an env-prefix chunk into individual `(KEY, VALUE)` assignments.
@@ -1101,13 +1102,13 @@ fn rewrite_segment_inner(
     // is_excluded must see the same fully-normalised form as classify (#83
     // follow-up) so user-configured exclude_commands rules apply to
     // `/usr/bin/env git ...` and `sudo /usr/bin/env git ...`.
-    let rtk_equivalent = match classify_command(cmd_part) {
-        Classification::Supported { rtk_equivalent, .. } => {
+    let ctxcrl_equivalent = match classify_command(cmd_part) {
+        Classification::Supported { ctxcrl_equivalent, .. } => {
             let normalised_for_exclude = normalise_command(cmd_part);
             if is_excluded(normalised_for_exclude.trim(), excluded) {
                 return None;
             }
-            rtk_equivalent
+            ctxcrl_equivalent
         }
         _ => return None,
     };
@@ -1119,8 +1120,8 @@ fn rewrite_segment_inner(
     let cmd_part_norm = ENV_PREFIX.replace(&cmd_part_norm, "").to_string();
     let cmd_part_norm = cmd_part_norm.trim();
 
-    // Find the matching rule (rtk_cmd values are unique across all rules)
-    let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
+    // Find the matching rule (ctxcrl_cmd values are unique across all rules)
+    let rule = RULES.iter().find(|r| r.ctxcrl_cmd == ctxcrl_equivalent)?;
 
     if let Some(parts) = parse_golangci_run_parts(cmd_part_norm) {
         let rewritten = if parts.global_segment.is_empty() {
@@ -1136,7 +1137,7 @@ fn rewrite_segment_inner(
 
     // #196: gh with --json/--jq/--template produces structured output that
     // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
-    if rule.rtk_cmd == "contextcrawler gh" {
+    if rule.ctxcrl_cmd == "contextcrawler gh" {
         let args_lower = cmd_part_norm.to_lowercase();
         if args_lower.contains("--json")
             || args_lower.contains("--jq")
@@ -1150,9 +1151,9 @@ fn rewrite_segment_inner(
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_part_norm, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+                format!("{}{}", rule.ctxcrl_cmd, redirect_suffix)
             } else {
-                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
+                format!("{} {}{}", rule.ctxcrl_cmd, rest, redirect_suffix)
             };
             return Some(rewritten);
         }
@@ -1234,7 +1235,7 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::report::RtkStatus;
+    use super::super::report::CtxcrlStatus;
     use super::*;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
@@ -1246,10 +1247,10 @@ mod tests {
         assert_eq!(
             classify_command("git status"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1260,10 +1261,10 @@ mod tests {
         assert_eq!(
             classify_command("/usr/bin/env git status"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1274,10 +1275,10 @@ mod tests {
         assert_eq!(
             classify_command("env git status"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1324,10 +1325,10 @@ mod tests {
         assert_eq!(
             classify_command("yadm status"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1337,10 +1338,10 @@ mod tests {
         assert_eq!(
             classify_command("yadm diff"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1358,10 +1359,10 @@ mod tests {
         assert_eq!(
             classify_command("git diff --cached"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1371,10 +1372,10 @@ mod tests {
         assert_eq!(
             classify_command("cargo test filter::"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler cargo",
+                ctxcrl_equivalent: "contextcrawler cargo",
                 category: "Cargo",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1384,10 +1385,10 @@ mod tests {
         assert_eq!(
             classify_command("npx tsc --noEmit"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler tsc",
+                ctxcrl_equivalent: "contextcrawler tsc",
                 category: "Build",
                 estimated_savings_pct: 83.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1397,10 +1398,10 @@ mod tests {
         assert_eq!(
             classify_command("cat src/main.rs"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler read",
+                ctxcrl_equivalent: "contextcrawler read",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1479,10 +1480,10 @@ mod tests {
         assert_eq!(
             classify_command("GIT_SSH_COMMAND=ssh git push"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1492,10 +1493,10 @@ mod tests {
         assert_eq!(
             classify_command("sudo docker ps"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler docker",
+                ctxcrl_equivalent: "contextcrawler docker",
                 category: "Infra",
                 estimated_savings_pct: 85.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1505,10 +1506,10 @@ mod tests {
         assert_eq!(
             classify_command("cargo check"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler cargo",
+                ctxcrl_equivalent: "contextcrawler cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1518,10 +1519,10 @@ mod tests {
         assert_eq!(
             classify_command("cargo check --all-targets"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler cargo",
+                ctxcrl_equivalent: "contextcrawler cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1531,10 +1532,10 @@ mod tests {
         assert_eq!(
             classify_command("cargo fmt"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler cargo",
+                ctxcrl_equivalent: "contextcrawler cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Passthrough,
+                status: CtxcrlStatus::Passthrough,
             }
         );
     }
@@ -1544,10 +1545,10 @@ mod tests {
         assert_eq!(
             classify_command("cargo clippy --all-targets"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler cargo",
+                ctxcrl_equivalent: "contextcrawler cargo",
                 category: "Cargo",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1606,10 +1607,10 @@ mod tests {
         assert_eq!(
             classify_command("git checkout -b foo develop"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 30.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1663,10 +1664,10 @@ mod tests {
         assert_eq!(
             classify_command("find . -name foo"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler find",
+                ctxcrl_equivalent: "contextcrawler find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1722,10 +1723,10 @@ mod tests {
         assert_eq!(
             classify_command("mypy src/"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler mypy",
+                ctxcrl_equivalent: "contextcrawler mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1735,10 +1736,10 @@ mod tests {
         assert_eq!(
             classify_command("python3 -m mypy --strict"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler mypy",
+                ctxcrl_equivalent: "contextcrawler mypy",
                 category: "Build",
                 estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -1794,7 +1795,7 @@ mod tests {
             matches!(
                 result,
                 Classification::Supported {
-                    rtk_equivalent: "contextcrawler git",
+                    ctxcrl_equivalent: "contextcrawler git",
                     ..
                 }
             ),
@@ -1820,10 +1821,10 @@ mod tests {
         assert_eq!(
             classify_command("cargo +nightly test"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler cargo",
+                ctxcrl_equivalent: "contextcrawler cargo",
                 category: "Cargo",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -2244,10 +2245,10 @@ mod tests {
         assert_eq!(
             classify_command(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -2512,7 +2513,7 @@ mod tests {
         assert!(matches!(
             classify_command("gh release list"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler gh",
+                ctxcrl_equivalent: "contextcrawler gh",
                 ..
             }
         ));
@@ -2523,7 +2524,7 @@ mod tests {
         assert!(matches!(
             classify_command("glab mr list"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler glab",
+                ctxcrl_equivalent: "contextcrawler glab",
                 ..
             }
         ));
@@ -2534,7 +2535,7 @@ mod tests {
         assert!(matches!(
             classify_command("glab ci list"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler glab",
+                ctxcrl_equivalent: "contextcrawler glab",
                 ..
             }
         ));
@@ -2545,7 +2546,7 @@ mod tests {
         assert!(matches!(
             classify_command("glab release list"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler glab",
+                ctxcrl_equivalent: "contextcrawler glab",
                 ..
             }
         ));
@@ -2572,7 +2573,7 @@ mod tests {
         assert!(matches!(
             classify_command("cargo install rtk"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler cargo",
+                ctxcrl_equivalent: "contextcrawler cargo",
                 ..
             }
         ));
@@ -2583,7 +2584,7 @@ mod tests {
         assert!(matches!(
             classify_command("docker run --rm ubuntu bash"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler docker",
+                ctxcrl_equivalent: "contextcrawler docker",
                 ..
             }
         ));
@@ -2594,7 +2595,7 @@ mod tests {
         assert!(matches!(
             classify_command("docker exec -it mycontainer bash"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler docker",
+                ctxcrl_equivalent: "contextcrawler docker",
                 ..
             }
         ));
@@ -2605,7 +2606,7 @@ mod tests {
         assert!(matches!(
             classify_command("docker build -t myimage ."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler docker",
+                ctxcrl_equivalent: "contextcrawler docker",
                 ..
             }
         ));
@@ -2616,7 +2617,7 @@ mod tests {
         assert!(matches!(
             classify_command("kubectl describe pod mypod"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler kubectl",
+                ctxcrl_equivalent: "contextcrawler kubectl",
                 ..
             }
         ));
@@ -2627,7 +2628,7 @@ mod tests {
         assert!(matches!(
             classify_command("kubectl apply -f deploy.yaml"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler kubectl",
+                ctxcrl_equivalent: "contextcrawler kubectl",
                 ..
             }
         ));
@@ -2638,7 +2639,7 @@ mod tests {
         assert!(matches!(
             classify_command("tree src/"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler tree",
+                ctxcrl_equivalent: "contextcrawler tree",
                 ..
             }
         ));
@@ -2649,7 +2650,7 @@ mod tests {
         assert!(matches!(
             classify_command("diff file1.txt file2.txt"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler diff",
+                ctxcrl_equivalent: "contextcrawler diff",
                 ..
             }
         ));
@@ -2708,10 +2709,10 @@ mod tests {
         assert!(matches!(
             classify_command("swift test"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler swift",
+                ctxcrl_equivalent: "contextcrawler swift",
                 category: "Build",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         ));
     }
@@ -2781,7 +2782,7 @@ mod tests {
         assert!(matches!(
             classify_command("aws s3 ls"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler aws",
+                ctxcrl_equivalent: "contextcrawler aws",
                 ..
             }
         ));
@@ -2792,7 +2793,7 @@ mod tests {
         assert!(matches!(
             classify_command("aws ec2 describe-instances"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler aws",
+                ctxcrl_equivalent: "contextcrawler aws",
                 ..
             }
         ));
@@ -2803,7 +2804,7 @@ mod tests {
         assert!(matches!(
             classify_command("psql -U postgres"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler psql",
+                ctxcrl_equivalent: "contextcrawler psql",
                 ..
             }
         ));
@@ -2814,7 +2815,7 @@ mod tests {
         assert!(matches!(
             classify_command("psql postgres://localhost/mydb"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler psql",
+                ctxcrl_equivalent: "contextcrawler psql",
                 ..
             }
         ));
@@ -2851,7 +2852,7 @@ mod tests {
         assert!(matches!(
             classify_command("ruff check ."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler ruff",
+                ctxcrl_equivalent: "contextcrawler ruff",
                 ..
             }
         ));
@@ -2862,7 +2863,7 @@ mod tests {
         assert!(matches!(
             classify_command("ruff format src/"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler ruff",
+                ctxcrl_equivalent: "contextcrawler ruff",
                 ..
             }
         ));
@@ -2873,7 +2874,7 @@ mod tests {
         assert!(matches!(
             classify_command("pytest tests/"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler pytest",
+                ctxcrl_equivalent: "contextcrawler pytest",
                 ..
             }
         ));
@@ -2884,7 +2885,7 @@ mod tests {
         assert!(matches!(
             classify_command("python -m pytest tests/"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler pytest",
+                ctxcrl_equivalent: "contextcrawler pytest",
                 ..
             }
         ));
@@ -2895,7 +2896,7 @@ mod tests {
         assert!(matches!(
             classify_command("pip list"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler pip",
+                ctxcrl_equivalent: "contextcrawler pip",
                 ..
             }
         ));
@@ -2906,7 +2907,7 @@ mod tests {
         assert!(matches!(
             classify_command("uv pip list"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler pip",
+                ctxcrl_equivalent: "contextcrawler pip",
                 ..
             }
         ));
@@ -2975,7 +2976,7 @@ mod tests {
         assert!(matches!(
             classify_command("go test ./..."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler go",
+                ctxcrl_equivalent: "contextcrawler go",
                 ..
             }
         ));
@@ -2986,7 +2987,7 @@ mod tests {
         assert!(matches!(
             classify_command("go build ./..."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler go",
+                ctxcrl_equivalent: "contextcrawler go",
                 ..
             }
         ));
@@ -2997,7 +2998,7 @@ mod tests {
         assert!(matches!(
             classify_command("go vet ./..."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler go",
+                ctxcrl_equivalent: "contextcrawler go",
                 ..
             }
         ));
@@ -3008,7 +3009,7 @@ mod tests {
         assert!(matches!(
             classify_command("golangci-lint run"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler golangci-lint run",
+                ctxcrl_equivalent: "contextcrawler golangci-lint run",
                 ..
             }
         ));
@@ -3019,7 +3020,7 @@ mod tests {
         assert!(matches!(
             classify_command("golangci-lint -v run ./..."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler golangci-lint run",
+                ctxcrl_equivalent: "contextcrawler golangci-lint run",
                 ..
             }
         ));
@@ -3030,7 +3031,7 @@ mod tests {
         assert!(matches!(
             classify_command("golangci-lint --color never run ./..."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler golangci-lint run",
+                ctxcrl_equivalent: "contextcrawler golangci-lint run",
                 ..
             }
         ));
@@ -3041,7 +3042,7 @@ mod tests {
         assert!(matches!(
             classify_command("golangci-lint --color=never run ./..."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler golangci-lint run",
+                ctxcrl_equivalent: "contextcrawler golangci-lint run",
                 ..
             }
         ));
@@ -3052,7 +3053,7 @@ mod tests {
         assert!(matches!(
             classify_command("golangci-lint --config=foo.yml run ./..."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler golangci-lint run",
+                ctxcrl_equivalent: "contextcrawler golangci-lint run",
                 ..
             }
         ));
@@ -3063,7 +3064,7 @@ mod tests {
         assert!(!matches!(
             classify_command("golangci-lint"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler golangci-lint run",
+                ctxcrl_equivalent: "contextcrawler golangci-lint run",
                 ..
             }
         ));
@@ -3074,7 +3075,7 @@ mod tests {
         assert!(!matches!(
             classify_command("golangci-lint version"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler golangci-lint run",
+                ctxcrl_equivalent: "contextcrawler golangci-lint run",
                 ..
             }
         ));
@@ -3225,7 +3226,7 @@ mod tests {
                 matches!(
                     classify_command(command),
                     Classification::Supported {
-                        rtk_equivalent: "contextcrawler lint",
+                        ctxcrl_equivalent: "contextcrawler lint",
                         ..
                     }
                 ),
@@ -3329,7 +3330,7 @@ mod tests {
                 matches!(
                     classify_command(command),
                     Classification::Supported {
-                        rtk_equivalent: "contextcrawler jest",
+                        ctxcrl_equivalent: "contextcrawler jest",
                         ..
                     }
                 ),
@@ -3422,7 +3423,7 @@ mod tests {
                 matches!(
                     classify_command(command),
                     Classification::Supported {
-                        rtk_equivalent: "contextcrawler vitest",
+                        ctxcrl_equivalent: "contextcrawler vitest",
                         ..
                     }
                 ),
@@ -3500,7 +3501,7 @@ mod tests {
                 matches!(
                     classify_command(format!("{command} migrate dev").as_str()),
                     Classification::Supported {
-                        rtk_equivalent: "contextcrawler prisma",
+                        ctxcrl_equivalent: "contextcrawler prisma",
                         ..
                     }
                 ),
@@ -3630,7 +3631,7 @@ mod tests {
         assert!(matches!(
             classify_command("./gradlew assembleDebug"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler gradlew",
+                ctxcrl_equivalent: "contextcrawler gradlew",
                 ..
             }
         ));
@@ -3641,7 +3642,7 @@ mod tests {
         assert!(matches!(
             classify_command("gradlew build"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler gradlew",
+                ctxcrl_equivalent: "contextcrawler gradlew",
                 ..
             }
         ));
@@ -3652,7 +3653,7 @@ mod tests {
         assert!(matches!(
             classify_command("gradlew.bat clean"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler gradlew",
+                ctxcrl_equivalent: "contextcrawler gradlew",
                 ..
             }
         ));
@@ -3663,7 +3664,7 @@ mod tests {
         assert!(matches!(
             classify_command("gradle build"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler gradlew",
+                ctxcrl_equivalent: "contextcrawler gradlew",
                 ..
             }
         ));
@@ -3706,10 +3707,10 @@ mod tests {
         assert_eq!(
             classify_command("./gradlew test"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler gradlew",
+                ctxcrl_equivalent: "contextcrawler gradlew",
                 category: "Build",
                 estimated_savings_pct: 90.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -3815,18 +3816,18 @@ mod tests {
             assert!(
                 !rule.pattern.is_empty(),
                 "Rule '{}' has empty pattern",
-                rule.rtk_cmd
+                rule.ctxcrl_cmd
             );
-            assert!(!rule.rtk_cmd.is_empty(), "Rule with empty rtk_cmd found");
+            assert!(!rule.ctxcrl_cmd.is_empty(), "Rule with empty ctxcrl_cmd found");
             assert!(
-                rule.rtk_cmd.starts_with("contextcrawler "),
-                "rtk_cmd '{}' must start with 'contextcrawler ' (#62)",
-                rule.rtk_cmd
+                rule.ctxcrl_cmd.starts_with("contextcrawler "),
+                "ctxcrl_cmd '{}' must start with 'contextcrawler ' (#62)",
+                rule.ctxcrl_cmd
             );
             assert!(
                 !rule.rewrite_prefixes.is_empty(),
                 "Rule '{}' has no rewrite_prefixes",
-                rule.rtk_cmd
+                rule.ctxcrl_cmd
             );
         }
     }
@@ -3931,7 +3932,7 @@ mod tests {
             assert!(
                 Regex::new(rule.pattern).is_ok(),
                 "RULES[{i}] ({}) has invalid pattern '{}'",
-                rule.rtk_cmd,
+                rule.ctxcrl_cmd,
                 rule.pattern
             );
         }
@@ -4029,6 +4030,28 @@ mod tests {
         );
     }
 
+    // --- Branding migration: BOTH the canonical CTXCRL_DISABLED and the legacy
+    // RTK_DISABLED prefixes must disable rewriting (back-compat shim). ---
+
+    #[test]
+    fn test_both_disable_prefixes_bypass() {
+        // Canonical name (new).
+        assert!(cmd_has_rtk_disabled_prefix("CTXCRL_DISABLED=1 git status"));
+        assert_eq!(
+            rewrite_command_no_prefixes("CTXCRL_DISABLED=1 git status", &[]),
+            None
+        );
+        // Legacy name (deprecated, still honoured).
+        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert_eq!(
+            rewrite_command_no_prefixes("RTK_DISABLED=1 git status", &[]),
+            None
+        );
+        // Crafted substring of the canonical key must NOT bypass.
+        assert!(!cmd_has_rtk_disabled_prefix("FOO=CTXCRL_DISABLED=1 git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("CTXCRL_DISABLED_NOT=1 git status"));
+    }
+
     // --- G7/#100: only TRUE absolute paths are normalised to a bare binary ---
 
     #[test]
@@ -4076,10 +4099,10 @@ mod tests {
         assert_eq!(
             classify_command("/usr/bin/grep -rni pattern"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler grep",
+                ctxcrl_equivalent: "contextcrawler grep",
                 category: "Files",
                 estimated_savings_pct: 75.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4089,10 +4112,10 @@ mod tests {
         assert_eq!(
             classify_command("/bin/ls -la"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler ls",
+                ctxcrl_equivalent: "contextcrawler ls",
                 category: "Files",
                 estimated_savings_pct: 65.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4102,10 +4125,10 @@ mod tests {
         assert_eq!(
             classify_command("/usr/local/bin/git status"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4116,10 +4139,10 @@ mod tests {
         assert_eq!(
             classify_command("/usr/bin/find ."),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler find",
+                ctxcrl_equivalent: "contextcrawler find",
                 category: "Files",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4139,10 +4162,10 @@ mod tests {
         assert_eq!(
             classify_command("git -C /tmp status"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4152,10 +4175,10 @@ mod tests {
         assert_eq!(
             classify_command("git --no-pager log -5"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4165,10 +4188,10 @@ mod tests {
         assert_eq!(
             classify_command("git --git-dir /tmp/.git status"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4231,10 +4254,10 @@ mod tests {
         assert_eq!(
             classify_command("wc -l src/main.rs"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler wc",
+                ctxcrl_equivalent: "contextcrawler wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4244,10 +4267,10 @@ mod tests {
         assert_eq!(
             classify_command("wc src/*.rs"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler wc",
+                ctxcrl_equivalent: "contextcrawler wc",
                 category: "Files",
                 estimated_savings_pct: 60.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }
@@ -4273,10 +4296,10 @@ mod tests {
         assert_eq!(
             classify_command("git log $(git rev-parse HEAD~1)"),
             Classification::Supported {
-                rtk_equivalent: "contextcrawler git",
+                ctxcrl_equivalent: "contextcrawler git",
                 category: "Git",
                 estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
+                status: CtxcrlStatus::Existing,
             }
         );
     }

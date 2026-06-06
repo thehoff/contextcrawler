@@ -212,7 +212,7 @@ schema_version = 1
 
 /// Template for user-global filters (~/.config/rtk/filters.toml).
 const FILTERS_GLOBAL_TEMPLATE: &str = r#"# User-global ContextCrawler filters — apply to all your projects.
-# Project-local .rtk/filters.toml takes precedence over these.
+# Project-local .ctxcrl/filters.toml takes precedence over these.
 # Trust gate: run `contextcrawler trust --global` after editing.
 # Docs: https://github.com/thehoff/contextcrawler#custom-filters
 schema_version = 1
@@ -1470,7 +1470,7 @@ fn run_default_mode(
 }
 
 /// Migrate old hook script to new binary command.
-/// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.rtk-hook.sha256` if present,
+/// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.ctxcrl-hook.sha256` if present,
 /// and removes the stale settings.json entry so the new `rtk hook claude` entry
 /// can be registered.
 fn migrate_old_hook_script(ctx: InitContext) {
@@ -1507,7 +1507,7 @@ fn migrate_old_hook_script(ctx: InitContext) {
         let hash_file = home
             .join(CLAUDE_DIR)
             .join(HOOKS_SUBDIR)
-            .join(".rtk-hook.sha256");
+            .join(".ctxcrl-hook.sha256");
         if hash_file.exists() {
             if dry_run {
                 println!(
@@ -1612,22 +1612,22 @@ fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use_array.len() < original_len
 }
 
-/// Generate .rtk/filters.toml template in the current directory if not present.
+/// Generate .ctxcrl/filters.toml template in the current directory if not present.
 fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
-    let rtk_dir = std::path::Path::new(".rtk");
+    let rtk_dir = std::path::Path::new(".ctxcrl");
     let path = rtk_dir.join("filters.toml");
 
     if path.exists() {
         if verbose > 0 {
-            eprintln!(".rtk/filters.toml already exists, skipping template");
+            eprintln!(".ctxcrl/filters.toml already exists, skipping template");
         }
         return Ok(());
     }
 
     if dry_run {
         println!(
-            "[dry-run] would create .rtk/filters.toml template: {}",
+            "[dry-run] would create .ctxcrl/filters.toml template: {}",
             path.display()
         );
         return Ok(());
@@ -1785,7 +1785,7 @@ fn run_claude_md_mode(global: bool, install_opencode: bool, ctx: InitContext) ->
         ctx,
     )?;
 
-    if matches!(action, RtkBlockUpsert::Unchanged) {
+    if matches!(action, CtxcrlBlockUpsert::Unchanged) {
         return Ok(());
     }
 
@@ -2624,7 +2624,7 @@ fn run_codex_mode_with_paths(
 // --- upsert_rtk_block: idempotent RTK block management ---
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum RtkBlockUpsert {
+enum CtxcrlBlockUpsert {
     /// No existing block found — appended new block
     Added,
     /// Existing block found with different content — replaced
@@ -2639,7 +2639,7 @@ enum RtkBlockUpsert {
 ///
 /// Returns `(new_content, action)` describing what happened.
 /// The caller decides whether to write `new_content` based on `action`.
-fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
+fn upsert_rtk_block(content: &str, block: &str) -> (String, CtxcrlBlockUpsert) {
     let start_marker = RTK_BLOCK_START;
     let end_marker = RTK_BLOCK_END;
 
@@ -2651,7 +2651,7 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
             let desired_block = block.trim();
 
             if current_block == desired_block {
-                return (content.to_string(), RtkBlockUpsert::Unchanged);
+                return (content.to_string(), CtxcrlBlockUpsert::Unchanged);
             }
 
             // Replace stale block with desired block
@@ -2665,21 +2665,21 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
                 (false, false) => format!("{before}\n\n{desired_block}\n\n{after}"),
             };
 
-            return (result, RtkBlockUpsert::Updated);
+            return (result, CtxcrlBlockUpsert::Updated);
         }
 
         // Opening marker without closing marker — malformed
-        return (content.to_string(), RtkBlockUpsert::Malformed);
+        return (content.to_string(), CtxcrlBlockUpsert::Malformed);
     }
 
     // No existing block — append
     let trimmed = content.trim();
     if trimmed.is_empty() {
-        (block.to_string(), RtkBlockUpsert::Added)
+        (block.to_string(), CtxcrlBlockUpsert::Added)
     } else {
         (
             format!("{trimmed}\n\n{}", block.trim()),
-            RtkBlockUpsert::Added,
+            CtxcrlBlockUpsert::Added,
         )
     }
 }
@@ -2692,7 +2692,7 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
 /// opening marker without a matching closing marker (bails with a diagnostic
 /// and the exact `recovery_cmd` to re-run after manual cleanup).
 ///
-/// Returns the [`RtkBlockUpsert`] action so callers can branch on whether
+/// Returns the [`CtxcrlBlockUpsert`] action so callers can branch on whether
 /// anything was actually changed.
 ///
 /// `label` is shown in user-facing messages (e.g. `"Copilot instructions"`).
@@ -2702,7 +2702,7 @@ fn write_rtk_block(
     label: &str,
     recovery_cmd: &str,
     ctx: InitContext,
-) -> Result<RtkBlockUpsert> {
+) -> Result<CtxcrlBlockUpsert> {
     let InitContext { dry_run, .. } = ctx;
 
     let existing = if path.exists() {
@@ -2714,7 +2714,7 @@ fn write_rtk_block(
     let (new_content, action) = upsert_rtk_block(&existing, block);
 
     match action {
-        RtkBlockUpsert::Added => {
+        CtxcrlBlockUpsert::Added => {
             if dry_run {
                 println!("[dry-run] would add {} to {}", label, path.display());
             } else {
@@ -2723,7 +2723,7 @@ fn write_rtk_block(
                 println!("[ok] Added {} to {}", label, path.display());
             }
         }
-        RtkBlockUpsert::Updated => {
+        CtxcrlBlockUpsert::Updated => {
             if dry_run {
                 println!("[dry-run] would update {} in {}", label, path.display());
             } else {
@@ -2732,12 +2732,12 @@ fn write_rtk_block(
                 println!("[ok] Updated {} in {}", label, path.display());
             }
         }
-        RtkBlockUpsert::Unchanged => {
+        CtxcrlBlockUpsert::Unchanged => {
             if !dry_run {
                 println!("[ok] {} already up to date in {}", label, path.display());
             }
         }
-        RtkBlockUpsert::Malformed => {
+        CtxcrlBlockUpsert::Malformed => {
             eprintln!(
                 "[warn] Found '{}' without closing marker in {}",
                 RTK_BLOCK_START,
@@ -3132,8 +3132,8 @@ fn validate_env_root(root: PathBuf, env_name: &str) -> Result<PathBuf> {
 }
 
 fn resolve_claude_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RTK_CLAUDE_DIR") {
-        return validate_env_root(PathBuf::from(dir), "RTK_CLAUDE_DIR");
+    if let Some(dir) = crate::core::env_compat::env_var("CTXCRL_CLAUDE_DIR") {
+        return validate_env_root(PathBuf::from(dir), "CTXCRL_CLAUDE_DIR");
     }
     resolve_home_subdir(CLAUDE_DIR)
 }
@@ -4908,7 +4908,7 @@ mod tests {
         );
         // Round-trip: upsert into empty, then strip, returns to empty.
         let (with_block, action) = upsert_rtk_block("", &block);
-        assert_eq!(action, RtkBlockUpsert::Added);
+        assert_eq!(action, CtxcrlBlockUpsert::Added);
         let (stripped, removed) = remove_rtk_block(&with_block);
         assert!(removed, "block must be strippable");
         assert!(
@@ -5259,7 +5259,7 @@ mod tests {
     fn test_upsert_rtk_block_appends_when_missing() {
         let input = "# Team instructions";
         let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
-        assert_eq!(action, RtkBlockUpsert::Added);
+        assert_eq!(action, CtxcrlBlockUpsert::Added);
         assert!(content.contains("# Team instructions"));
         assert!(content.contains(RTK_BLOCK_START));
     }
@@ -5272,7 +5272,7 @@ mod tests {
         );
 
         let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
-        assert_eq!(action, RtkBlockUpsert::Updated);
+        assert_eq!(action, CtxcrlBlockUpsert::Updated);
         assert!(!content.contains("OLD RTK CONTENT"));
         assert!(content.contains("contextcrawler cargo test")); // from current RTK_INSTRUCTIONS
         assert!(content.contains("# Team instructions"));
@@ -5286,7 +5286,7 @@ mod tests {
             RTK_INSTRUCTIONS
         );
         let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
-        assert_eq!(action, RtkBlockUpsert::Unchanged);
+        assert_eq!(action, CtxcrlBlockUpsert::Unchanged);
         assert_eq!(content, input);
     }
 
@@ -5294,7 +5294,7 @@ mod tests {
     fn test_upsert_rtk_block_detects_malformed_block() {
         let input = format!("{} v2 -->\npartial", RTK_BLOCK_START);
         let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
-        assert_eq!(action, RtkBlockUpsert::Malformed);
+        assert_eq!(action, CtxcrlBlockUpsert::Malformed);
         assert_eq!(content, input);
     }
 

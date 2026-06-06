@@ -36,7 +36,7 @@ pub struct PeriodEconomics {
     pub cc_cache_read_tokens: Option<u64>,
     // rtk metrics
     pub rtk_commands: Option<usize>,
-    pub rtk_saved_tokens: Option<usize>,
+    pub ctxcrl_saved_tokens: Option<usize>,
     pub rtk_savings_pct: Option<f64>,
     // Primary metric (weighted input CPT)
     pub weighted_input_cpt: Option<f64>, // Derived input CPT using API ratios
@@ -60,7 +60,7 @@ impl PeriodEconomics {
             cc_cache_create_tokens: None,
             cc_cache_read_tokens: None,
             rtk_commands: None,
-            rtk_saved_tokens: None,
+            ctxcrl_saved_tokens: None,
             rtk_savings_pct: None,
             weighted_input_cpt: None,
             savings_weighted: None,
@@ -88,19 +88,19 @@ impl PeriodEconomics {
 
     fn set_rtk_from_day(&mut self, stats: &DayStats) {
         self.rtk_commands = Some(stats.commands);
-        self.rtk_saved_tokens = Some(stats.saved_tokens);
+        self.ctxcrl_saved_tokens = Some(stats.saved_tokens);
         self.rtk_savings_pct = Some(stats.savings_pct);
     }
 
     fn set_rtk_from_week(&mut self, stats: &WeekStats) {
         self.rtk_commands = Some(stats.commands);
-        self.rtk_saved_tokens = Some(stats.saved_tokens);
+        self.ctxcrl_saved_tokens = Some(stats.saved_tokens);
         self.rtk_savings_pct = Some(stats.savings_pct);
     }
 
     fn set_rtk_from_month(&mut self, stats: &MonthStats) {
         self.rtk_commands = Some(stats.commands);
-        self.rtk_saved_tokens = Some(stats.saved_tokens);
+        self.ctxcrl_saved_tokens = Some(stats.saved_tokens);
         self.rtk_savings_pct = Some(if stats.input_tokens + stats.output_tokens > 0 {
             stats.saved_tokens as f64
                 / (stats.saved_tokens + stats.input_tokens + stats.output_tokens) as f64
@@ -112,7 +112,7 @@ impl PeriodEconomics {
 
     fn compute_weighted_metrics(&mut self) {
         // Weighted input CPT derivation using API price ratios
-        if let (Some(cost), Some(saved)) = (self.cc_cost, self.rtk_saved_tokens) {
+        if let (Some(cost), Some(saved)) = (self.cc_cost, self.ctxcrl_saved_tokens) {
             if let (Some(input), Some(output), Some(cache_create), Some(cache_read)) = (
                 self.cc_input_tokens,
                 self.cc_output_tokens,
@@ -137,7 +137,7 @@ impl PeriodEconomics {
     }
 
     fn compute_dual_metrics(&mut self) {
-        if let (Some(cost), Some(saved)) = (self.cc_cost, self.rtk_saved_tokens) {
+        if let (Some(cost), Some(saved)) = (self.cc_cost, self.ctxcrl_saved_tokens) {
             // Blended CPT (cost / total_tokens including cache)
             if let Some(total) = self.cc_total_tokens {
                 if total > 0 {
@@ -167,7 +167,7 @@ struct Totals {
     cc_cache_create_tokens: u64,
     cc_cache_read_tokens: u64,
     rtk_commands: usize,
-    rtk_saved_tokens: usize,
+    ctxcrl_saved_tokens: usize,
     /// Volume-weighted savings pct. `None` when there is no ccusage baseline
     /// to compare against — see `compute_totals` for the gating rationale.
     rtk_avg_savings_pct: Option<f64>,
@@ -321,7 +321,7 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
         cc_cache_create_tokens: 0,
         cc_cache_read_tokens: 0,
         rtk_commands: 0,
-        rtk_saved_tokens: 0,
+        ctxcrl_saved_tokens: 0,
         rtk_avg_savings_pct: None,
         weighted_input_cpt: None,
         savings_weighted: None,
@@ -356,8 +356,8 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
         if let Some(cmds) = p.rtk_commands {
             totals.rtk_commands += cmds;
         }
-        if let Some(saved) = p.rtk_saved_tokens {
-            totals.rtk_saved_tokens += saved;
+        if let Some(saved) = p.ctxcrl_saved_tokens {
+            totals.ctxcrl_saved_tokens += saved;
         }
     }
 
@@ -374,10 +374,10 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
     // as `None` ("no baseline" — serialises to JSON null, renders as "—")
     // otherwise. The `savings_denom > 0` divide-by-zero guard stays.
     let cc_baseline = totals.cc_input_tokens as usize + totals.cc_output_tokens as usize;
-    let savings_denom = totals.rtk_saved_tokens + cc_baseline;
+    let savings_denom = totals.ctxcrl_saved_tokens + cc_baseline;
     if cc_baseline > 0 && savings_denom > 0 {
         totals.rtk_avg_savings_pct =
-            Some(totals.rtk_saved_tokens as f64 / savings_denom as f64 * 100.0);
+            Some(totals.ctxcrl_saved_tokens as f64 / savings_denom as f64 * 100.0);
     }
 
     // Compute global weighted metrics
@@ -389,17 +389,17 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
     if weighted_units > 0.0 {
         let input_cpt = totals.cc_cost / weighted_units;
         totals.weighted_input_cpt = Some(input_cpt);
-        totals.savings_weighted = Some(totals.rtk_saved_tokens as f64 * input_cpt);
+        totals.savings_weighted = Some(totals.ctxcrl_saved_tokens as f64 * input_cpt);
     }
 
     // Compute global dual metrics (legacy)
     if totals.cc_total_tokens > 0 {
         totals.blended_cpt = Some(totals.cc_cost / totals.cc_total_tokens as f64);
-        totals.savings_blended = Some(totals.rtk_saved_tokens as f64 * totals.blended_cpt.unwrap());
+        totals.savings_blended = Some(totals.ctxcrl_saved_tokens as f64 * totals.blended_cpt.unwrap());
     }
     if totals.cc_active_tokens > 0 {
         totals.active_cpt = Some(totals.cc_cost / totals.cc_active_tokens as f64);
-        totals.savings_active = Some(totals.rtk_saved_tokens as f64 * totals.active_cpt.unwrap());
+        totals.savings_active = Some(totals.ctxcrl_saved_tokens as f64 * totals.active_cpt.unwrap());
     }
 
     totals
@@ -479,7 +479,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
     println!("  ContextCrawler commands:      {}", totals.rtk_commands);
     println!(
         "  Tokens saved:                 {}",
-        format_tokens(totals.rtk_saved_tokens)
+        format_tokens(totals.ctxcrl_saved_tokens)
     );
     println!();
 
@@ -608,7 +608,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
         for p in periods {
             let spent = p.cc_cost.map(format_usd).unwrap_or_else(|| "—".to_string());
             let saved = p
-                .rtk_saved_tokens
+                .ctxcrl_saved_tokens
                 .map(format_tokens)
                 .unwrap_or_else(|| "—".to_string());
             let weighted = p
@@ -647,7 +647,7 @@ fn print_period_table(periods: &[PeriodEconomics], verbose: u8) {
         for p in periods {
             let spent = p.cc_cost.map(format_usd).unwrap_or_else(|| "—".to_string());
             let saved = p
-                .rtk_saved_tokens
+                .ctxcrl_saved_tokens
                 .map(format_tokens)
                 .unwrap_or_else(|| "—".to_string());
             let weighted = p
@@ -799,7 +799,7 @@ fn print_csv_row(p: &PeriodEconomics) {
         .unwrap_or_default();
     let total_tokens = p.cc_total_tokens.map(|t| t.to_string()).unwrap_or_default();
     let saved_tokens = p
-        .rtk_saved_tokens
+        .ctxcrl_saved_tokens
         .map(|t| t.to_string())
         .unwrap_or_default();
     let weighted_savings = p
@@ -865,7 +865,7 @@ mod tests {
             cc_cost: Some(100.0),
             cc_total_tokens: Some(1_000_000),
             cc_active_tokens: Some(10_000),
-            rtk_saved_tokens: Some(5_000),
+            ctxcrl_saved_tokens: Some(5_000),
             ..PeriodEconomics::new("2026-01")
         };
 
@@ -888,7 +888,7 @@ mod tests {
             cc_cost: Some(100.0),
             cc_total_tokens: Some(0),
             cc_active_tokens: Some(0),
-            rtk_saved_tokens: Some(5_000),
+            ctxcrl_saved_tokens: Some(5_000),
             ..PeriodEconomics::new("2026-01")
         };
 
@@ -904,7 +904,7 @@ mod tests {
     fn test_compute_dual_metrics_no_ccusage_data() {
         let mut p = PeriodEconomics {
             label: "2026-01".to_string(),
-            rtk_saved_tokens: Some(5_000),
+            ctxcrl_saved_tokens: Some(5_000),
             ..PeriodEconomics::new("2026-01")
         };
 
@@ -1024,7 +1024,7 @@ mod tests {
         p.cc_output_tokens = Some(500);
         p.cc_cache_create_tokens = Some(200);
         p.cc_cache_read_tokens = Some(5000);
-        p.rtk_saved_tokens = Some(10_000);
+        p.ctxcrl_saved_tokens = Some(10_000);
 
         p.compute_weighted_metrics();
 
@@ -1049,7 +1049,7 @@ mod tests {
         p.cc_output_tokens = Some(0);
         p.cc_cache_create_tokens = Some(0);
         p.cc_cache_read_tokens = Some(0);
-        p.rtk_saved_tokens = Some(5000);
+        p.ctxcrl_saved_tokens = Some(5000);
 
         p.compute_weighted_metrics();
 
@@ -1065,7 +1065,7 @@ mod tests {
         p.cc_output_tokens = Some(1000);
         p.cc_cache_create_tokens = Some(0);
         p.cc_cache_read_tokens = Some(0);
-        p.rtk_saved_tokens = Some(3000);
+        p.ctxcrl_saved_tokens = Some(3000);
 
         p.compute_weighted_metrics();
 
@@ -1117,7 +1117,7 @@ mod tests {
                 cc_cache_create_tokens: Some(100),
                 cc_cache_read_tokens: Some(984_900),
                 rtk_commands: Some(5),
-                rtk_saved_tokens: Some(2000),
+                ctxcrl_saved_tokens: Some(2000),
                 rtk_savings_pct: Some(50.0),
                 weighted_input_cpt: None,
                 savings_weighted: None,
@@ -1136,7 +1136,7 @@ mod tests {
                 cc_cache_create_tokens: Some(200),
                 cc_cache_read_tokens: Some(1_979_800),
                 rtk_commands: Some(10),
-                rtk_saved_tokens: Some(3000),
+                ctxcrl_saved_tokens: Some(3000),
                 rtk_savings_pct: Some(60.0),
                 weighted_input_cpt: None,
                 savings_weighted: None,
@@ -1154,7 +1154,7 @@ mod tests {
         assert_eq!(totals.cc_input_tokens, 15_000);
         assert_eq!(totals.cc_output_tokens, 15_000);
         assert_eq!(totals.rtk_commands, 15);
-        assert_eq!(totals.rtk_saved_tokens, 5000);
+        assert_eq!(totals.ctxcrl_saved_tokens, 5000);
         // G7/#111: volume-weighted, not an unweighted mean of (50%, 60%).
         // saved=5000, input=15000, output=15000 → 5000/35000 = 14.2857%
         let pct = totals
@@ -1190,7 +1190,7 @@ mod tests {
                 label: "2026-01".to_string(),
                 cc_input_tokens: Some(50),
                 cc_output_tokens: Some(50),
-                rtk_saved_tokens: Some(900),
+                ctxcrl_saved_tokens: Some(900),
                 rtk_savings_pct: Some(90.0),
                 ..PeriodEconomics::new("2026-01")
             },
@@ -1198,7 +1198,7 @@ mod tests {
                 label: "2026-02".to_string(),
                 cc_input_tokens: Some(4500),
                 cc_output_tokens: Some(4500),
-                rtk_saved_tokens: Some(1000),
+                ctxcrl_saved_tokens: Some(1000),
                 rtk_savings_pct: Some(10.0),
                 ..PeriodEconomics::new("2026-02")
             },
@@ -1230,19 +1230,19 @@ mod tests {
             PeriodEconomics {
                 label: "2026-01".to_string(),
                 rtk_commands: Some(5),
-                rtk_saved_tokens: Some(8000),
+                ctxcrl_saved_tokens: Some(8000),
                 ..PeriodEconomics::new("2026-01")
             },
             PeriodEconomics {
                 label: "2026-02".to_string(),
                 rtk_commands: Some(3),
-                rtk_saved_tokens: Some(2000),
+                ctxcrl_saved_tokens: Some(2000),
                 ..PeriodEconomics::new("2026-02")
             },
         ];
 
         let totals = compute_totals(&periods);
-        assert_eq!(totals.rtk_saved_tokens, 10_000);
+        assert_eq!(totals.ctxcrl_saved_tokens, 10_000);
         assert_eq!(totals.cc_input_tokens, 0);
         assert_eq!(totals.cc_output_tokens, 0);
         // No ccusage baseline → no meaningful pct. Must be None, never 100%.

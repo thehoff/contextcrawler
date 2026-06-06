@@ -1343,7 +1343,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let toml_match = if std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1") {
+    let toml_match = if core::env_compat::env_flag("CTXCRL_NO_TOML") {
         None
     } else {
         core::toml_filter::find_matching_filter(&lookup_cmd)
@@ -2283,6 +2283,10 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+
+    // Move any legacy `rtk` config/data/project dirs to the canonical `ctxcrl`
+    // names before anything reads them. Cheap + idempotent (guarded by a Once).
+    core::path_migrate::migrate_legacy_dirs_once();
 
     let code = match run_cli() {
         Ok(code) => code,

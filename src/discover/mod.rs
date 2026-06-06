@@ -21,7 +21,7 @@ use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
-    rtk_equivalent: &'static str,
+    ctxcrl_equivalent: &'static str,
     category: &'static str,
     count: usize,
     /// Total estimated tokens *saved* (post-filter). Used for the "Est. Savings" column.
@@ -188,16 +188,16 @@ pub fn run(
                         let cmd = name[..colon_pos].to_string();
                         let status_str = &name[colon_pos + 1..];
                         let status = match status_str {
-                            "Passthrough" => report::RtkStatus::Passthrough,
-                            "NotSupported" => report::RtkStatus::NotSupported,
-                            _ => report::RtkStatus::Existing,
+                            "Passthrough" => report::CtxcrlStatus::Passthrough,
+                            "NotSupported" => report::CtxcrlStatus::NotSupported,
+                            _ => report::CtxcrlStatus::Existing,
                         };
                         (cmd, status)
                     } else {
-                        (name, report::RtkStatus::Existing)
+                        (name, report::CtxcrlStatus::Existing)
                     }
                 })
-                .unwrap_or_else(|| (String::new(), report::RtkStatus::Existing));
+                .unwrap_or_else(|| (String::new(), report::CtxcrlStatus::Existing));
 
             // Derive the effective savings rate from accumulated totals rather than
             // using the first-seen sub-command's rate. This gives a weighted average
@@ -211,7 +211,7 @@ pub fn run(
             SupportedEntry {
                 command: command_with_status,
                 count: bucket.count,
-                rtk_equivalent: bucket.rtk_equivalent,
+                ctxcrl_equivalent: bucket.ctxcrl_equivalent,
                 category: bucket.category,
                 estimated_savings_tokens: bucket.total_output_tokens,
                 estimated_savings_pct: effective_savings_pct,
@@ -385,14 +385,14 @@ fn count_extracted_commands(
 
             match classify_command(part) {
                 Classification::Supported {
-                    rtk_equivalent,
+                    ctxcrl_equivalent,
                     category,
                     estimated_savings_pct,
                     status,
                 } => {
-                    let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
+                    let bucket = supported_map.entry(ctxcrl_equivalent).or_insert_with(|| {
                         SupportedBucket {
-                            rtk_equivalent,
+                            ctxcrl_equivalent,
                             category,
                             count: 0,
                             total_output_tokens: 0,

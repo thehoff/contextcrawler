@@ -1626,7 +1626,7 @@ Restore failed with 1 error(s) in 1.0s
     #[test]
     fn test_parse_build_sets_project_count_floor() {
         let input = r#"
-RtkDotnetSmoke -> /tmp/RtkDotnetSmoke.dll
+CtxcrlDotnetSmoke -> /tmp/CtxcrlDotnetSmoke.dll
 
 Build succeeded.
     0 Warning(s)
@@ -1660,18 +1660,18 @@ Time Elapsed 00:00:00.12
         assert_eq!(summary.failed_tests.len(), 1);
         assert!(summary.failed_tests[0]
             .name
-            .contains("RtkDotnetSmoke.UnitTest1.Test1"));
+            .contains("CtxcrlDotnetSmoke.UnitTest1.Test1"));
     }
 
     #[test]
     fn test_extract_binary_like_issues_recovers_code_message_and_path() {
         let noisy =
-            "\x0bInvalid expression term ';'\x18\x06CS1525\x18%/tmp/RtkDotnetSmoke/Broken.cs\x09";
+            "\x0bInvalid expression term ';'\x18\x06CS1525\x18%/tmp/CtxcrlDotnetSmoke/Broken.cs\x09";
         let issues = extract_binary_like_issues(noisy);
 
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, "CS1525");
-        assert_eq!(issues[0].file, "/tmp/RtkDotnetSmoke/Broken.cs");
+        assert_eq!(issues[0].file, "/tmp/CtxcrlDotnetSmoke/Broken.cs");
         assert!(issues[0].message.contains("Invalid expression term"));
     }
 
