@@ -1,9 +1,9 @@
 # Working with the security gate
 
 Practical guide for when the contextcrawler security gate (Tirith pairing)
-blocks a command. For what the gate is, how it is wired, and its
-environment knobs, see the "Security gate" section of the top-level
-`README.md`.
+blocks a command. For how the gate is wired into the hook flow, see
+[Architecture](../guide/architecture.md); the environment knobs are
+documented inline below (see "Turning the gate off").
 
 ## How the gate decides
 

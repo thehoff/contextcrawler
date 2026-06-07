@@ -11,6 +11,36 @@ This page describes how ContextCrawler is structured as of 0.4.0, for
 contributors and for anyone embedding the library. It is synthesised from the
 source; the code in `src/` is the source of truth.
 
+## Project lineage
+
+ContextCrawler is a downstream fork. Each piece keeps its origin, and the
+single binary is assembled from upstream rtk plus ported contextzip modules,
+with Tirith invoked subprocess-only (no AGPL link):
+
+```mermaid
+flowchart TB
+    RTK["rtk-ai/rtk<br/>(Apache-2.0 / MIT)<br/>v0.39.0 core<br/>+ 60+ command filters"]
+    CZIP["jee599/contextzip<br/>(MIT)<br/>session compactor<br/>error_cmd, web_cmd"]
+    TIRITH["sheeki03/tirith<br/>(AGPL-3.0)<br/>shell-command<br/>security gate"]
+
+    FORK["contextcrawler fork branch:<br/>contextzip-downstream<br/>sentinel-blocked patches"]
+    PATCHES["Downstream modules:<br/>supply_chain_gate<br/>tirith_gate<br/>security_cmd<br/>error_cmd · curl/wget HTML"]
+    BIN["<code>contextcrawler</code><br/>single Rust binary + library"]
+    USERS["You / Claude / Cursor /<br/>Copilot / Gemini / OpenCode"]
+
+    RTK -- "git rebase" --> FORK
+    CZIP -- "ported MIT source<br/>(SPDX headers)" --> PATCHES
+    FORK --> BIN
+    PATCHES --> BIN
+    TIRITH -. "subprocess only<br/>(no AGPL link)" .-> BIN
+    BIN --> USERS
+
+    classDef upstream fill:#1a1a2e,stroke:#888,color:#ddd
+    classDef ours fill:#2a0a2e,stroke:#e83e8c,color:#fff
+    class RTK,CZIP,TIRITH upstream
+    class FORK,PATCHES,BIN ours
+```
+
 ## The lib + bin split
 
 ContextCrawler is one crate that builds both a library and a binary from a
