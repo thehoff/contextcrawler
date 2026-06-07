@@ -28,21 +28,22 @@ Copilot, Gemini, …) that does two things:
 2. **Gates** risky shell commands and supply-chain installs before any
    auto-approval reaches the agent.
 
-One binary, one name: **`contextcrawler`**.
+One binary, one name: **`contextcrawler`**. Since 0.4.0 the same crate is
+also a small Rust **library** (see [Use as a library](#use-as-a-library)).
 
 ## Built from
 
 | Component | What it brings | License |
 |---|---|---|
 | [rtk-ai/rtk](https://github.com/rtk-ai/rtk) | The core CLI proxy framework: 60+ command filters (git, cargo, npm, kubectl, docker, …), the permission-verdict system (`allow` / `ask` / `deny` / `default`), and the agent-hook entrypoints used by every supported integration. Tracked via rebase against tagged releases. | Apache-2.0 / MIT |
-| [jee599/contextzip](https://github.com/jee599/contextzip) | The session-JSONL compactor for Claude Code, the multi-language stacktrace compressor (Node / Python / Rust / Go / Java), and the HTML web-content extractor. Ported forward to current contextcrawler with per-file SPDX headers preserving attribution. | MIT |
+| [jee599/contextzip](https://github.com/jee599/contextzip) | Originally the session-JSONL compactor, the multi-language stacktrace compressor (Node / Python / Rust / Go / Java), and the HTML web-content extractor. Carried over with per-file SPDX headers preserving attribution. In current contextcrawler the HTML extractor feeds the `curl` / `wget` filters and the stacktrace trimming is built into the test runners. | MIT |
 | [Tirith](https://tirith.sh) ([sheeki03/tirith](https://github.com/sheeki03/tirith)) | A shell-syntax security inspector. ContextCrawler invokes it via subprocess as an optional defense-in-depth gate on the auto-allow path — block-level findings downgrade the verdict to *Ask*. | AGPL-3.0 (subprocess-only) |
 
 Plus one capability **built in-tree**:
 
 | Component | What it brings | Where |
 |---|---|---|
-| Supply-chain gate | Pre-install age-of-release + OSV CVE lookup for `npm` / `pnpm` / `yarn` and `pip` / `uv` / `poetry` / `pipx` installs. Honors pinned versions; caches lookups for 24 h. Opt-in via `~/.config/contextcrawler/supply-chain.toml`. | `src/hooks/supply_chain_gate.rs` |
+| Supply-chain gate | Pre-install age-of-release + OSV CVE lookup for `npm` / `pnpm` / `yarn` and `pip` / `uv` / `poetry` / `pipx` installs. Honours pinned versions; caches lookups for 24 h. Opt-in via `~/.config/contextcrawler/supply-chain.toml`. | `src/hooks/supply_chain_gate.rs` |
 
 ## Goal
 
@@ -50,8 +51,9 @@ Make AI coding agents both **cheaper** and **safer** without changing how
 you work:
 
 - **Cheaper** — compress noisy command output before it eats your LLM
-  context window. Inherits upstream rtk's 60+ command filters, adds session-log
-  compaction, HTML extraction, multi-language stacktrace compression.
+  context window. Inherits upstream rtk's 60+ command filters, with HTML
+  chrome stripping folded into the `curl` / `wget` filters and per-language
+  stacktrace trimming built into the test runners.
 - **Safer** — when an agent proposes a shell command, run it past two
   optional gates before auto-approving: shell-syntax inspection (Tirith)
   and pre-install supply-chain checks (package age + OSV CVE lookup).
@@ -60,20 +62,22 @@ you work:
 ## Capabilities
 
 Grouped by which upstream the capability comes from. Everything is one
-binary; the split is for navigation, not packaging.
+binary; the split is for navigation, not packaging. See
+[`docs/guide/commands.md`](docs/guide/commands.md) for the full command
+reference.
 
 ### 1. Context & cache (from upstream rtk + contextzip)
 
 | Command | Purpose | Source |
 |---|---|---|
 | `contextcrawler <git / cargo / npm / …>` | Drop-in for everyday rtk-style filtering — 60+ command filters inherited from upstream. | rtk |
-| `contextcrawler web <url>` | Fetch a URL and strip HTML chrome (nav, ads, scripts). ~86% byte savings on typical landing pages. | contextzip |
-| `contextcrawler sessions compact <id>` | Compact a Claude Code session-JSONL log. Dedupes repeated file-reads, recompresses past Bash outputs. Sidecar-based; never touches the original. | contextzip |
-| `contextcrawler sessions apply <id>` / `expand <id>` | Promote a sidecar to live, or roll it back. | contextzip |
-| Stacktrace compressor | Detects framework frames in Node / Python / Rust / Go / Java tracebacks and drops them. Wired into the runner pipeline — automatic. | contextzip |
-| `contextcrawler gain` | Token-savings stats. Preserves your existing `contextzip` SQLite DB. | rtk |
+| `contextcrawler pipe -f <filter>` | Read stdin, apply a named (or auto-detected) filter, print the compacted result. Unix-pipe mode for output you captured yourself. | downstream |
+| `contextcrawler curl <url>` / `wget <url>` | Fetch over HTTP. HTML responses are stripped of nav / ads / scripts; JSON is auto-detected and schema-summarised. | rtk + contextzip |
+| Stacktrace trimming | Framework frames in Node / Python / Rust / Go / Java tracebacks are dropped inside the test runners (`cargo test`, `pytest`, `gradlew`, …) — automatic, no separate command. | contextzip |
+| `contextcrawler gain` | Token-savings stats from the local SQLite history DB. | rtk |
+| `contextcrawler discover` | Scan Claude Code (or Codex) history for commands that could have been filtered but were not. | downstream |
 | `contextcrawler init -g` | Register the agent hook with Claude Code (and other agents via `--agent`). | rtk |
-| `contextcrawler hook claude` / `cursor` / `copilot` / `gemini` | Built-in agent-hook entrypoints. Configured by `contextcrawler init -g`. | rtk |
+| `contextcrawler hook claude` / `cursor` / `gemini` / `copilot` | Built-in agent-hook entrypoints. Configured by `contextcrawler init -g`. | rtk |
 
 ### 2. Security gate (Tirith pairing)
 
@@ -83,9 +87,8 @@ linked AGPL code.
 
 | Command | Purpose | Source |
 |---|---|---|
-| `contextcrawler security` | Tirith integration dashboard — audit stats, gate mode, shell-hook status, top detection rules. | downstream |
-| `contextcrawler security log` | Merged gate-activity log: Tirith downgrades + supply-chain events, sorted by time. `--limit N`, `--json`. | downstream |
-| `contextcrawler security log --histogram` | Bucketed counts of gate activity by `(source, category)` with proportional bars. Three-line situational awareness. | downstream |
+| `contextcrawler security` | Tirith gate dashboard — install status, gate mode, the downgrade-log location, and the most recent downgrade events. Add `--all` for the full log, `--json` for machine-readable output. | downstream |
+| `contextcrawler security --scrub-logs` | Scrub credentials from existing audit logs in place (writes a `.bak-<ts>` backup). Pair with `--dry-run` to preview. | downstream |
 | Tirith pre-execution gate | Routes auto-allow rewrites through `tirith check` first. Block-level findings downgrade to *Ask* so the user reviews the original command. | downstream + Tirith |
 
 **Env knobs:**
@@ -109,86 +112,121 @@ Detects `npm`/`pnpm`/`yarn` and `pip`/`uv`/`poetry`/`pipx` install
 commands; blocks auto-allow when the resolved version is younger than a
 configurable cooldown or carries OSV-known CVEs.
 
-| Command | Purpose |
+| Item | Purpose |
 |---|---|
-| `contextcrawler supply-chain check '<cmd>'` | Inspect an install command. Reports age, CVEs, verdict. Useful for shell-side spot-checks before sharing a snippet with an agent. |
-| Supply-chain pre-install gate | Runs automatically on auto-allow when an install is detected. Block reasons (age below cooldown, known CVE) downgrade to *Ask*. Honors pinned versions; cached for 24 h at `~/.cache/contextcrawler/supply-chain/`. |
+| Supply-chain pre-install gate | Runs automatically on auto-allow when an install is detected. Block reasons (age below cooldown, known CVE) downgrade to *Ask*. Honours pinned versions; cached for 24 h at `~/.cache/contextcrawler/supply-chain/`. |
 | Config: `[npm].cooldown_days`, `[pypi].cooldown_days` | Minimum days since publish before auto-allow (default `3`). |
 | Config: `[npm].block_severity`, `[pypi].block_severity` | Minimum OSV severity that blocks (default `HIGH`). |
 | Config: `[overrides].always_allow`, `[overrides].always_deny` | Per-package globs (`@types/*` etc.) to bypass either side of the gate. |
 
-## Sample output
+## Use as a library
 
-The histogram subcommand is the quickest way to see what the gates are
-doing in your environment:
+Since 0.4.0 the crate publishes a small curated Rust API so a downstream
+tool can apply ContextCrawler's filters to text it already has (for
+example the stdout of a command it ran itself) without spawning the
+`contextcrawler` CLI.
 
-```text
-$ contextcrawler security log --histogram
+> [!WARNING]
+> **The public API is experimental and NOT yet semver-guaranteed.** It may
+> change between 0.x releases. There are no pre-built crates — depend on it
+> from source and pin an exact tag. See [`docs/guide/library.md`](docs/guide/library.md)
+> and the rustdoc (`cargo doc --open`) for the full surface.
 
-ContextCrawler Gate Activity — Histogram
-════════════════════════════════════════════════════════════
-  Sources:
-    ~/Library/Application Support/contextcrawler/downgrades.jsonl
-    ~/Library/Application Support/contextcrawler/supply_chain.jsonl
-  Total events: 43
+Add it as a git dependency, pinned to a tag:
 
-  supply-chain  skip                              20  ████████████████████████
-  supply-chain  block                             11  █████████████
-  supply-chain  allow                              7  ████████
-  tirith        tirith_block                       3  ████
-  supply-chain  unavailable                        1  █
-  tirith        tirith_required_unavailable        1  █
-
-  Auto-allow decisions are not logged — only gate downgrades and
-  supply-chain verdicts. Use `contextcrawler gain` for total command volume.
+```toml
+[dependencies]
+contextcrawler = { git = "https://github.com/thehoff/contextcrawler", tag = "v0.4.0" }
 ```
 
-The Tirith dashboard, when Tirith is installed:
+Curated entry points (re-exported from the crate root):
+
+| Function | Signature | What it does |
+|---|---|---|
+| `filter_output` | `fn filter_output(filter_name: &str, raw: &str) -> String` | Apply a named filter. Unknown name → `raw` returned unchanged. |
+| `auto_filter_output` | `fn auto_filter_output(raw: &str) -> String` | Sniff `raw` and apply the matching filter; no match → `raw` unchanged. |
+| `available_filters` | `fn available_filters() -> Vec<&'static str>` | The filter names `filter_output` accepts. |
+| `summarize_command_output` | `fn summarize_command_output(output: &str, options: CommandOutputSummaryOptions<'_>) -> String` | Deterministic, heuristic summary of arbitrary command output. |
+| `no_bloat` | `fn no_bloat<'a>(baseline: &'a str, filtered: &'a str) -> &'a str` | Return whichever of `baseline` / `filtered` costs fewer tokens, so a wrapper never costs more than it saves. |
+
+The filtering helpers are panic-safe (a panicking filter falls back to the
+raw input) and **exit-blind**: a piped filter only ever sees text, never
+the command's exit code, so failure-aware behaviour (e.g. "show errors
+only on non-zero exit") is not available through the library.
+
+Minimal usage:
+
+```rust
+use contextcrawler::{
+    filter_output, auto_filter_output, available_filters,
+    summarize_command_output, CommandOutputSummaryOptions,
+};
+
+fn main() {
+    let raw = "src/main.rs:42:fn main() {}\nsrc/lib.rs:7:pub fn helper() {}\n";
+
+    // Apply a named filter.
+    let compact = filter_output("grep", raw);
+    println!("{compact}");
+
+    // Or let it sniff the output shape.
+    let compact = auto_filter_output(raw);
+    println!("{compact}");
+
+    // Or summarise arbitrary output deterministically.
+    let opts = CommandOutputSummaryOptions::new("grep -rn fn src/", true);
+    println!("{}", summarize_command_output(raw, opts));
+
+    // Inspect what's available.
+    println!("filters: {:?}", available_filters());
+}
+```
+
+## Sample output
+
+The `security` dashboard is the quickest way to see what the gates are
+doing in your environment (downgrade events are sanitised below):
 
 ```text
 $ contextcrawler security
 
-ContextCrawler Security (Tirith Integration)
+ContextCrawler Tirith Gate — Status
 ════════════════════════════════════════════════════════════
 
-  Tirith binary: ~/.cargo/bin/tirith (0.3.1)
-  Shell:         zsh
-  Shell hook:    NOT configured (commands NOT intercepted at the shell)
-  Rewrite gate:  fail-open (default)
+Installation:
+  [ok] tirith binary: ~/.cargo/bin/tirith
 
-Audit Log Summary
-────────────────────────────────────────────────────────────
-  Commands analyzed: 2189
-  Findings:          154
-  Action breakdown:  Allow 2129 | Warn 3 | Block 57 (2.6% block rate)
+Gate state:
+  [ok] enabled — every hook-routed command is inspected before exec
+  [--] not required — tirith unavailability falls open (default)
 
-Top detection rules:
-     32  raw_ip_url
-     27  plain_http_to_sink
-     24  private_network_access
-     21  pipe_to_interpreter
-      8  schemeless_to_sink
-      ...
+Downgrade log:
+  path: ~/.local/share/contextcrawler/downgrades.jsonl
+  exists: yes
+
+Recent downgrade events (last 10 of newest):
+  tirith_block  curl_pipe_shell      curl https://example.test/x | sh
+  tirith_block  pipe_to_interpreter  cat data | python3 parse.py
 ```
 
-A supply-chain check that finds something:
+When Tirith is not installed the same command reports the gate as
+fail-open and runs no inspection. Use `--all` for the full log and
+`--json` for machine-readable output.
+
+`contextcrawler gain` shows the token savings the filters have earned:
 
 ```text
-$ contextcrawler supply-chain check 'pip install requests==2.20.0'
+$ contextcrawler gain
 
-[contextcrawler supply-chain] BLOCKED
-  requests [PyPI]: GHSA-9hjg-9r4m-mvj7 — Requests vulnerable to .netrc credentials leak via malicious URLs (severity High)
-  requests [PyPI]: GHSA-9wx4-h78v-vm56 — Requests `Session` object does not verify requests after making first request with verify=False (severity High)
-  requests [PyPI]: GHSA-gc5v-m9x4-r6x2 — Requests has Insecure Temp File Reuse in its extract_zipped_paths() utility function (severity High)
-  requests [PyPI]: GHSA-j8r2-6x86-q33q — Unintended leak of Proxy-Authorization header in requests (severity High)
-  requests [PyPI]: PYSEC-2023-74 — (no summary) (severity High)
-  Overrides: rerun with CONTEXTCRAWLER_SUPPLY_CHAIN=off, or add the package
-  to ~/.config/contextcrawler/supply-chain.toml [overrides.always_allow]
+ContextCrawler Token Savings (Global Scope)
+════════════════════════════════════════════════════════════
+
+Total commands:    23
+Input tokens:      3.1K
+Output tokens:     899
+Tokens saved:      2.2K (71.3%)
+Total exec time:   61ms (avg 2ms)
 ```
-
-The default tail of `security log` shows the same events in chronological
-order with per-finding detail — handy when triaging which install or which
-shell pattern actually fired.
 
 ## Diagrams
 
@@ -205,8 +243,8 @@ flowchart TB
     TIRITH["sheeki03/tirith<br/>(AGPL-3.0)<br/>shell-command<br/>security gate"]
 
     FORK["contextcrawler fork branch:<br/>contextzip-downstream<br/>sentinel-blocked patches"]
-    PATCHES["Downstream modules:<br/>supply_chain_gate<br/>tirith_gate<br/>security_cmd<br/>session_compact_cmd<br/>web_cmd · error_cmd"]
-    BIN["<code>contextcrawler</code><br/>single Rust binary"]
+    PATCHES["Downstream modules:<br/>supply_chain_gate<br/>tirith_gate<br/>security_cmd<br/>error_cmd · curl/wget HTML"]
+    BIN["<code>contextcrawler</code><br/>single Rust binary + library"]
     USERS["You / Claude / Cursor /<br/>Copilot / Gemini / OpenCode"]
 
     RTK -- "git rebase" --> FORK
@@ -259,8 +297,10 @@ flowchart TB
 
 ## Install
 
-Requires a Rust toolchain (`rustup`, stable channel). There are no
-pre-built binaries — single-maintainer fork, build it yourself.
+Requires a Rust toolchain (`rustup`, stable channel, 1.80+). **There are
+no pre-built binaries** — single-maintainer fork, you build it from
+source. Installation is always through Cargo, never by copying a binary
+around.
 
 > [!IMPORTANT]
 > **If you previously ran upstream `rtk` or `jee599/contextzip`**, your
@@ -283,38 +323,41 @@ pre-built binaries — single-maintainer fork, build it yourself.
 > ```
 >
 > After installing `contextcrawler` (below), `contextcrawler init -g`
-> re-creates everything cleanly for whichever agents you use.
+> re-creates everything cleanly for whichever agents you use. Legacy
+> `RTK_*` env vars are still honoured via a shim, so an existing
+> `RTK_DISABLED=1` keeps working.
 
-**One-liner with `cargo install` (latest release):**
-
-```sh
-cargo install --git https://github.com/thehoff/contextcrawler --tag v0.1.6 --locked
-```
-
-This drops `contextcrawler` into `~/.cargo/bin/`. Make sure that's on
-your `PATH`. Bump the `--tag` value when newer releases ship — see the
-[releases page](https://github.com/thehoff/contextcrawler/releases).
-
-**Or clone and build (recommended if you want to read the diff first):**
+**From a clone (recommended — read the diff first):**
 
 ```sh
 git clone https://github.com/thehoff/contextcrawler.git
 cd contextcrawler
-git checkout v0.1.6                # pin to the latest tagged release
-scripts/build-release.sh --install # strips build paths + copies to ~/.local/bin
+git checkout v0.4.0          # pin to the latest tagged release
+cargo install --path .       # builds + installs to ~/.cargo/bin/
 ```
 
-The `build-release.sh` helper sets `--remap-path-prefix` so the binary
-does not embed your `$HOME` / `$CARGO_HOME` / workspace path in panic
-backtrace metadata. Plain `cargo build --release` works too but will
-leak those paths.
+This drops `contextcrawler` into `~/.cargo/bin/`. Make sure that's on
+your `PATH`.
+
+**Or straight from git:**
+
+```sh
+cargo install --git https://github.com/thehoff/contextcrawler --tag v0.4.0 --locked
+```
+
+Bump the `--tag` value when newer releases ship — see the
+[releases page](https://github.com/thehoff/contextcrawler/releases).
 
 **Bleeding edge** (unreleased fixes on `develop`, expect churn):
 
 ```sh
 cargo install --git https://github.com/thehoff/contextcrawler --branch develop --locked
-# or, in a clone, omit the `git checkout v0.1.0` step above
 ```
+
+`scripts/build-release.sh` is available for a path-remapped build (it sets
+`--remap-path-prefix` so the binary doesn't embed your `$HOME` /
+`$CARGO_HOME` / workspace path in backtrace metadata). Prefer
+`cargo install --path .` for a normal install.
 
 **Wire up the agent hook(s):**
 
@@ -334,12 +377,21 @@ contextcrawler init -g --agent windsurf      # Windsurf (Cascade)
 contextcrawler init -g --agent cline         # Cline / Roo Code (VS Code)
 contextcrawler init -g --agent kilocode      # Kilo Code
 contextcrawler init -g --agent antigravity   # Google Antigravity
+contextcrawler init -g --agent hermes        # Hermes CLI
+contextcrawler init -g --agent pidev         # Pi coding agent
 ```
+
+For Claude Code the hook entry that `init -g` writes to
+`~/.claude/settings.json` is `contextcrawler hook claude`. See
+[Installation](docs/guide/getting-started/installation.md) and
+[Supported agents](docs/guide/getting-started/supported-agents.md) for the
+per-agent detail.
 
 `contextcrawler init --show` prints what's currently registered.
 `contextcrawler init -g --uninstall` reverses the last install for the
 selected agent. See `contextcrawler init --help` for the full surface
-(`--hook-only`, `--auto-patch`, `--no-patch`, `--claude-md` legacy).
+(`--hook-only`, `--auto-patch`, `--no-patch`, `--claude-md` legacy,
+`--dry-run`).
 
 **Optional defense-in-depth gate:**
 
@@ -371,6 +423,21 @@ allow_editable  = true
 EOF
 ```
 
+## Configuration & data locations
+
+| What | Path (Linux; macOS uses the platform equivalent) |
+|---|---|
+| Core config | `~/.config/ctxcrl/config.toml`, `~/.config/ctxcrl/filters.toml` |
+| Savings history (SQLite) | `~/.local/share/ctxcrl/history.db` |
+| Supply-chain config | `~/.config/contextcrawler/supply-chain.toml` |
+| Tirith downgrade log | `~/.local/share/contextcrawler/downgrades.jsonl` |
+
+Environment variables use the `CTXCRL_*` prefix (`CTXCRL_DISABLED=1`,
+`CTXCRL_TEE_DIR`, `CTXCRL_TELEMETRY_DISABLED=1`, …). The legacy `RTK_*`
+names are still honoured for backwards compatibility. See
+[Configuration](docs/guide/getting-started/configuration.md) for the full
+list.
+
 ## License
 
 The downstream parts of this repository are MIT.
@@ -398,4 +465,6 @@ The downstream parts of this repository are MIT.
 
 ## Status
 
-v0.1.0 — first community release. See [`CHANGELOG.md`](CHANGELOG.md).
+v0.4.0 — the library pivot: the binary is now a thin shim over the
+`contextcrawler` library crate, which also exposes the experimental
+filter/summary API above. See [`CHANGELOG.md`](CHANGELOG.md).

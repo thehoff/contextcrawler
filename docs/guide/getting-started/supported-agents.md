@@ -13,15 +13,15 @@ contextcrawler supports all major AI coding agents across 3 integration tiers. M
 
 Each agent integration intercepts CLI commands before execution and rewrites them to their contextcrawler equivalent. The agent runs `contextcrawler cargo test` instead of `cargo test`, sees filtered output, and uses up to 90% fewer tokens — without any change to your workflow.
 
-All rewrite logic lives in the contextcrawler binary (`contextcrawler rewrite`). Agent hooks are thin delegates that parse the agent-specific JSON format and call `contextcrawler rewrite` for the actual decision.
+All rewrite logic lives in the contextcrawler binary. The live agent hooks (`contextcrawler hook claude` / `cursor` / `gemini` / `copilot`) parse the agent-specific JSON payload from stdin and share one rewrite engine for the decision. (`contextcrawler rewrite <cmd>` exposes the same engine on the command line and is the legacy entrypoint that rules-file integrations and the Hermes/OpenCode plugins call.)
 
 ```
 Agent runs "cargo test"
   -> Hook intercepts (PreToolUse / plugin event)
-  -> Calls contextcrawler rewrite "cargo test"
-  -> Returns "contextcrawler cargo test"
-  -> Agent executes filtered command
-  -> LLM sees 90% fewer tokens
+  -> contextcrawler hook <agent> reads the JSON payload
+  -> Decides: rewrite to "contextcrawler cargo test"
+  -> Agent executes the filtered command
+  -> LLM sees up to 90% fewer tokens
 ```
 
 ## Supported agents
@@ -40,7 +40,8 @@ Agent runs "cargo test"
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
-| Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
+| Pi (pidev) | Rules file (prompt-level) | N/A |
+| Mistral Vibe | Planned, tracked upstream ([rtk#800](https://github.com/rtk-ai/rtk/issues/800)) | Not yet a contextcrawler target |
 
 ## Installation by agent
 
@@ -59,7 +60,7 @@ contextcrawler init --show    # shows hook status
 ### Cursor
 
 ```bash
-contextcrawler init --global --cursor
+contextcrawler init --global --agent cursor
 ```
 
 Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
@@ -97,7 +98,7 @@ The plugin fails open. If `contextcrawler` is missing at load time, the hook is 
 ### Cline / Roo Code
 
 ```bash
-contextcrawler init --cline    # creates .clinerules in current project
+contextcrawler init --agent cline    # creates .clinerules in current project
 ```
 
 Cline reads `.clinerules` as custom instructions. contextcrawler adds guidance telling Cline to prefer `contextcrawler <cmd>` over raw commands.
@@ -105,7 +106,7 @@ Cline reads `.clinerules` as custom instructions. contextcrawler adds guidance t
 ### Windsurf
 
 ```bash
-contextcrawler init --windsurf    # creates .windsurfrules in current project
+contextcrawler init --agent windsurf    # creates .windsurfrules in current project
 ```
 
 ### Codex CLI
@@ -130,6 +131,14 @@ contextcrawler init --agent antigravity    # creates .agents/rules/antigravity-c
 
 Antigravity reads `.agents/rules/` as custom instructions. contextcrawler adds guidance telling Antigravity to prefer `contextcrawler <cmd>` over raw commands.
 
+### Pi (pidev)
+
+```bash
+contextcrawler init --agent pidev
+```
+
+Installs prompt-level guidance for the Pi coding agent (earendil-works), telling it to prefer `contextcrawler <cmd>` over raw commands.
+
 ### Mistral Vibe (planned)
 
 Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
@@ -142,7 +151,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `contextcrawler <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity, Pi) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
 
 ## Windows support
 

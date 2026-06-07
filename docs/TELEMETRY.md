@@ -1,11 +1,20 @@
 # Telemetry
 
-contextcrawler collects anonymous, aggregate usage metrics once per day to help improve the product. Telemetry is **disabled by default** and requires explicit consent during `contextcrawler init` or `contextcrawler telemetry enable`.
+> **Status: network telemetry is disabled by project decision.** In this
+> downstream, `maybe_ping()` returns immediately and never opens a network
+> socket, regardless of build-time URL, config, or consent state (see
+> `src/core/telemetry.rs`). Local SQLite tracking (`history.db`) is
+> unaffected and stays fully functional; it is what powers
+> `contextcrawler gain`. The rest of this document describes the telemetry
+> design that is kept intentionally dead, so it is accurate should the
+> kill-switch ever be lifted.
+
+contextcrawler is *designed* to collect anonymous, aggregate usage metrics once per day to help improve the product. Telemetry is **disabled by default** and, when not killed outright, requires explicit consent during `contextcrawler init` or `contextcrawler telemetry enable`.
 
 ## Data Collector
 
-**Entity**: `contextcrawler AI Labs`
-**Contact**: contact@rtk-ai.app
+**Entity**: `contextcrawler`
+**Contact**: file an issue at https://github.com/thehoff/contextcrawler/issues
 
 ## Why we collect telemetry
 
@@ -144,7 +153,7 @@ Under the EU General Data Protection Regulation, you have the right to:
 
 - **Access** your data: `contextcrawler telemetry status` shows your device hash; the telemetry payload is fully documented above.
 - **Rectification**: since data is anonymous and aggregate, rectification is not applicable.
-- **Erasure** (Art. 17): run `contextcrawler telemetry forget` to delete local data and send an erasure request to the server. Alternatively, email contact@rtk-ai.app with your device hash.
+- **Erasure** (Art. 17): run `contextcrawler telemetry forget` to delete local data and send an erasure request to the server. Alternatively, open an issue at https://github.com/thehoff/contextcrawler/issues with your device hash.
 - **Restriction of processing**: `contextcrawler telemetry disable` stops all data collection immediately.
 - **Portability**: the local SQLite database at `~/.local/share/ctxcrl/tracking.db` contains all locally stored data.
 - **Objection**: `contextcrawler telemetry disable` or `export CTXCRL_TELEMETRY_DISABLED=1`.
@@ -152,8 +161,8 @@ Under the EU General Data Protection Regulation, you have the right to:
 ## Erasure Procedure
 
 1. Run `contextcrawler telemetry forget` — this disables telemetry, deletes your device salt, ping marker, and local tracking database (`history.db`), then sends an erasure request to the server.
-2. If the server is unreachable, the CLI prints your full device hash and fallback instructions to email contact@rtk-ai.app for manual erasure.
-3. You can also email contact@rtk-ai.app directly to request manual erasure.
+2. If the server is unreachable, the CLI prints your full device hash and fallback instructions to open a repository issue for manual erasure.
+3. You can also open an issue at https://github.com/thehoff/contextcrawler/issues directly to request manual erasure.
 
 ## Data Handling
 

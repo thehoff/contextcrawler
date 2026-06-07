@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: Customize contextcrawler behavior via config.toml, environment variables, and per-project filters
+description: Customise contextcrawler behaviour via config.toml, environment variables, and per-project filters
 sidebar:
   order: 4
 ---
@@ -12,7 +12,7 @@ sidebar:
 | Platform | Path |
 |----------|------|
 | Linux | `~/.config/ctxcrl/config.toml` |
-| macOS | `~/Library/Application Support/contextcrawler/config.toml` |
+| macOS | `~/Library/Application Support/ctxcrl/config.toml` |
 
 ```bash
 contextcrawler config            # show current configuration
@@ -129,4 +129,4 @@ enabled = false
 
 ## Per-project filters
 
-Create `.ctxcrl/filters.toml` in your project root to add custom filters or override built-ins. See [`src/filters/README.md`](https://github.com/rtk-ai/rtk/blob/master/src/filters/README.md) for the full TOML DSL reference.
+Create `.ctxcrl/filters.toml` in your project root to add custom filters or override built-ins. See [`src/filters/README.md`](https://github.com/thehoff/contextcrawler/blob/develop/src/filters/README.md) for the full TOML DSL reference.

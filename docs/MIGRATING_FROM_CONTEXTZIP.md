@@ -114,8 +114,10 @@ Bump the tag for newer releases — see
 contextcrawler init -g
 ```
 
-This drops `~/.claude/RTK.md` and an `@RTK.md` reference into your
-`~/.claude/CLAUDE.md`. To wire the Claude Code PreToolUse hook, add this to
+This drops `~/.claude/CONTEXTCRAWLER.md` and an `@CONTEXTCRAWLER.md`
+reference into your `~/.claude/CLAUDE.md` (an old `RTK.md` from a previous
+rtk install is cleaned up automatically). To wire the Claude Code
+PreToolUse hook, add this to
 `~/.claude/settings.json`:
 
 ```json

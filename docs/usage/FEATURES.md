@@ -1054,7 +1054,7 @@ Les sous-commandes non reconnues sont transmises directement ou detectees comme 
 
 contextcrawler enregistre chaque execution de commande dans une base SQLite :
 
-- **Emplacement :** `~/.local/share/ctxcrl/tracking.db` (Linux), `~/Library/Application Support/contextcrawler/tracking.db` (macOS)
+- **Emplacement :** `~/.local/share/ctxcrl/history.db` (Linux), `~/Library/Application Support/ctxcrl/history.db` (macOS)
 - **Retention :** 90 jours automatique
 - **Metriques :** tokens entree/sortie, pourcentage d'economies, temps d'execution, projet
 
@@ -1306,7 +1306,7 @@ contextcrawler config --create       # Creer le fichier avec les valeurs par def
 [tracking]
 enabled = true              # Activer/desactiver le suivi
 history_days = 90           # Jours de retention (nettoyage automatique)
-database_path = "/custom/path/tracking.db"  # Chemin personnalise (optionnel)
+database_path = "/custom/path/history.db"  # Chemin personnalise (optionnel)
 
 [display]
 colors = true               # Sortie coloree

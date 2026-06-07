@@ -15,11 +15,13 @@ Comprehensive documentation for contextcrawler's token savings tracking system.
 ## Overview
 
 contextcrawler's tracking system records every command execution to provide analytics on token savings. The system:
-- Stores command history in SQLite (~/.local/share/ctxcrl/tracking.db)
-- Tracks input/output tokens, savings percentage, and execution time
+- Stores command history in SQLite (`~/.local/share/ctxcrl/history.db` on Linux)
+- Tracks input/output tokens, savings percentage, execution time, project path, and output inflation
 - Automatically cleans up records older than 90 days
 - Provides aggregation APIs (daily/weekly/monthly)
 - Exports to JSON/CSV for external integrations
+
+The database filename is `history.db` (constant `HISTORY_DB` in `src/core/constants.rs`), inside the `ctxcrl` data directory (constant `RTK_DATA_DIR`). Some inline Rust doc comments in `src/core/tracking.rs` still say `tracking.db`; the constant is the source of truth and resolves to `history.db`.
 
 ## Architecture
 
@@ -32,11 +34,11 @@ TimedExecution::start()
   ↓
 [command runs]
   ↓
-TimedExecution::track(original_cmd, rtk_cmd, input, output)
+TimedExecution::track(original_cmd, ctxcrl_cmd, input, output)
   ↓
-Tracker::record(original_cmd, rtk_cmd, input_tokens, output_tokens, exec_time_ms)
+Tracker::record(original_cmd, ctxcrl_cmd, input_tokens, output_tokens, exec_time_ms)
   ↓
-SQLite database (~/.local/share/ctxcrl/tracking.db)
+SQLite database (~/.local/share/ctxcrl/history.db)
   ↓
 Aggregation APIs (get_summary, get_all_days, etc.)
   ↓
@@ -45,13 +47,47 @@ CLI output (contextcrawler gain) or JSON/CSV export
 
 ### Storage Location
 
-- **Linux**: `~/.local/share/ctxcrl/tracking.db`
-- **macOS**: `~/Library/Application Support/contextcrawler/tracking.db`
-- **Windows**: `%APPDATA%\contextcrawler\tracking.db`
+The path is `dirs::data_local_dir()` joined with `ctxcrl/history.db`:
+
+- **Linux**: `~/.local/share/ctxcrl/history.db`
+- **macOS**: `~/Library/Application Support/ctxcrl/history.db`
+- **Windows**: `%APPDATA%\ctxcrl\history.db`
+
+**Override**: set `CTXCRL_DB_PATH` to point tracking writes at a specific file (used by tests that exercise tracking against a tmpfile). When that variable is set, the test-context short-circuit is disabled and writes go to the named path.
 
 ### Data Retention
 
 Records older than **90 days** are automatically deleted on each write operation to prevent unbounded database growth.
+
+## What the CLI reads from this data
+
+The tracking database is the data source for two analytics commands.
+
+### `contextcrawler gain`
+
+Reads the `commands` table and aggregates it. Defaults to a total summary; flags
+select the view:
+
+- `--daily` / `--weekly` / `--monthly` / `--all`: time-bucketed breakdowns.
+- `--history` (`-H`): recent rows with per-command savings.
+- `--project` (`-p`): scope every figure to the current working directory
+  (via the `project_path` column).
+- `--graph` (`-g`): ASCII graph of daily savings.
+- `--quota --tier <pro|5x|20x>`: estimate savings against a subscription tier.
+- `--failures` (`-F`): read the `parse_failures` table instead.
+- `--weak-filters` (`-W`): rank tools by leaked tokens (output inflation plus
+  low savings), sliced from the latest `release_boundaries` row unless
+  `--all-time` is given.
+- `--format <text|json|csv>`: export.
+- `--reset [--yes]`: wipe all tracked data.
+
+### `contextcrawler discover`
+
+Does **not** read this database. It scans Claude Code session history (and, with
+`--codex`, Codex CLI job logs) to find commands that ran *without* contextcrawler
+and estimates the savings that were missed, using the `estimated_savings_pct`
+figures from the rule set. Use `gain` for what you saved and `discover` for what
+you could still save.
 
 ## Public API
 
@@ -74,7 +110,7 @@ impl Tracker {
     pub fn record(
         &self,
         original_cmd: &str,      // Standard command (e.g., "ls -la")
-        rtk_cmd: &str,            // contextcrawler command (e.g., "contextcrawler ls")
+        ctxcrl_cmd: &str,         // contextcrawler command (e.g., "contextcrawler ls")
         input_tokens: usize,      // Estimated input tokens
         output_tokens: usize,     // Actual output tokens
         exec_time_ms: u64,        // Execution time in milliseconds
@@ -106,7 +142,8 @@ pub struct GainSummary {
     pub total_commands: usize,              // Total commands recorded
     pub total_input: usize,                 // Total input tokens
     pub total_output: usize,                // Total output tokens
-    pub total_saved: usize,                 // Total tokens saved
+    pub total_saved: usize,                 // Total tokens saved (floored at 0)
+    pub total_inflation: usize,             // Tokens by which filters INFLATED output beyond input (#196)
     pub avg_savings_pct: f64,               // Average savings percentage
     pub total_time_ms: u64,                 // Total execution time (ms)
     pub avg_time_ms: u64,                   // Average execution time (ms)
@@ -176,8 +213,8 @@ Individual command record from history.
 
 ```rust
 pub struct CommandRecord {
-    pub timestamp: DateTime<Utc>, // UTC timestamp
-    pub rtk_cmd: String,           // contextcrawler command used
+    pub timestamp: DateTime<Utc>,  // UTC timestamp
+    pub ctxcrl_cmd: String,        // contextcrawler command used
     pub saved_tokens: usize,       // Tokens saved
     pub savings_pct: f64,          // Savings percentage
 }
@@ -197,10 +234,10 @@ impl TimedExecution {
     pub fn start() -> Self;
 
     /// Track command with elapsed time
-    pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str);
+    pub fn track(&self, original_cmd: &str, ctxcrl_cmd: &str, input: &str, output: &str);
 
     /// Track passthrough commands (timing-only, no token counting)
-    pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str);
+    pub fn track_passthrough(&self, original_cmd: &str, ctxcrl_cmd: &str);
 }
 ```
 
@@ -215,7 +252,7 @@ pub fn args_display(args: &[OsString]) -> String;
 
 /// Legacy tracking function (deprecated, use TimedExecution)
 #[deprecated(note = "Use TimedExecution instead")]
-pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str);
+pub fn track(original_cmd: &str, ctxcrl_cmd: &str, input: &str, output: &str);
 ```
 
 ## Usage Examples
@@ -265,7 +302,7 @@ fn main() -> anyhow::Result<()> {
     let recent = tracker.get_recent(10)?;
     for cmd in recent {
         println!("{}: {} saved {:.1}%",
-            cmd.timestamp, cmd.rtk_cmd, cmd.savings_pct);
+            cmd.timestamp, cmd.ctxcrl_cmd, cmd.savings_pct);
     }
 
     Ok(())
@@ -405,7 +442,7 @@ import json
 import subprocess
 from datetime import datetime
 
-def get_rtk_metrics():
+def get_ctxcrl_metrics():
     """Fetch contextcrawler metrics as JSON."""
     result = subprocess.run(
         ["contextcrawler", "gain", "--all", "--format", "json"],
@@ -434,7 +471,7 @@ def export_to_datadog(metrics):
         )
 
 if __name__ == "__main__":
-    metrics = get_rtk_metrics()
+    metrics = get_ctxcrl_metrics()
     export_to_datadog(metrics)
     print(f"Exported {len(metrics.get('daily', []))} days to Datadog")
 ```
@@ -483,23 +520,89 @@ fn main() -> Result<()> {
 
 ## Database Schema
 
+The database holds three tables: `commands` (the savings ledger),
+`parse_failures` (commands contextcrawler could not handle and fell back to raw
+execution), and `release_boundaries` (one row per binary version upgrade, used
+by `gain --weak-filters` to slice from the latest release).
+
 ### Table: `commands`
+
+The base table is created with the columns below; `exec_time_ms`,
+`project_path`, and `inflation_tokens` are added by idempotent `ALTER TABLE`
+migrations on `Tracker::new()`, so an established database has all of them.
 
 ```sql
 CREATE TABLE commands (
     id INTEGER PRIMARY KEY,
     timestamp TEXT NOT NULL,           -- RFC3339 UTC timestamp
-    original_cmd TEXT NOT NULL,        -- Original command (e.g., "ls -la")
-    rtk_cmd TEXT NOT NULL,             -- contextcrawler command (e.g., "contextcrawler ls")
+    original_cmd TEXT NOT NULL,        -- Original command (e.g., "ls -la"), secret-scrubbed
+    ctxcrl_cmd TEXT NOT NULL,          -- contextcrawler command (e.g., "contextcrawler ls")
     input_tokens INTEGER NOT NULL,     -- Estimated input tokens
     output_tokens INTEGER NOT NULL,    -- Actual output tokens
-    saved_tokens INTEGER NOT NULL,     -- input_tokens - output_tokens
+    saved_tokens INTEGER NOT NULL,     -- max(input - output, 0); floored at zero
     savings_pct REAL NOT NULL,         -- (saved/input) * 100
-    exec_time_ms INTEGER DEFAULT 0     -- Execution time in milliseconds
+    exec_time_ms INTEGER DEFAULT 0,    -- Execution time in milliseconds (migration)
+    project_path TEXT DEFAULT '',      -- Canonical cwd at execution (migration)
+    inflation_tokens INTEGER DEFAULT 0 -- max(output - input, 0); #196 (migration)
 );
 
 CREATE INDEX idx_timestamp ON commands(timestamp);
+CREATE INDEX idx_project_path_timestamp ON commands(project_path, timestamp);
 ```
+
+Both `original_cmd` and `ctxcrl_cmd` are passed through `scrub_secrets()` at the
+INSERT boundary, so passwords, bearer tokens, AWS keys, GitHub/Slack tokens and
+URL-embedded credentials are redacted before they hit disk (they would
+otherwise survive 90 days and resurface via `gain --history`).
+
+### Inflation accounting (#196)
+
+`saved_tokens` uses a saturating subtraction, so a filter that emits **more**
+tokens than it consumed records as `0` saved, not a negative number, and the
+regression vanishes from the headline stats. `inflation_tokens` records the
+overflow (`max(output - input, 0)`) honestly so it stays measurable without
+making `saved_tokens` signed (which would break the unsigned `SUM`
+aggregations). To see output-inflation that the floored `savings_pct` hides:
+
+```sql
+SELECT ctxcrl_cmd, SUM(inflation_tokens) AS inflated
+FROM commands GROUP BY ctxcrl_cmd
+HAVING inflated > 0 ORDER BY inflated DESC;
+```
+
+`contextcrawler gain --weak-filters` surfaces the same signal ranked by tool.
+
+### Table: `parse_failures`
+
+```sql
+CREATE TABLE parse_failures (
+    id INTEGER PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    raw_command TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    fallback_succeeded INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_pf_timestamp ON parse_failures(timestamp);
+```
+
+Rows here are commands contextcrawler could not parse, so they ran raw and saved
+nothing. View them with `contextcrawler gain --failures`.
+
+### Table: `release_boundaries`
+
+```sql
+CREATE TABLE release_boundaries (
+    id INTEGER PRIMARY KEY,
+    version TEXT NOT NULL,
+    installed_at TEXT NOT NULL
+);
+```
+
+One row is written (atomically, via `INSERT ... SELECT ... WHERE`) the first
+time a new binary version runs. `gain --weak-filters` slices from the latest
+boundary so newly released filter behaviour is not masked by months of
+pre-upgrade leakage; pass `--all-time` to include older rows.
 
 ### Automatic Cleanup
 
@@ -530,8 +633,9 @@ let _ = conn.execute(
 
 ## Performance Considerations
 
-- **SQLite WAL mode**: Not enabled (may add in future for concurrent writes)
-- **Index on timestamp**: Enables fast date-range queries
+- **SQLite WAL mode**: Enabled (`PRAGMA journal_mode=WAL`) with a 5s busy timeout for concurrent writes
+- **auto_vacuum**: Incremental, with a one-time full `VACUUM` migration to convert legacy databases
+- **Index on timestamp**: Enables fast date-range queries (plus a `(project_path, timestamp)` index for project-scoped queries)
 - **Automatic cleanup**: Prevents database from growing unbounded
 - **Token estimation**: ~4 chars = 1 token (simple, fast approximation)
 - **Aggregation queries**: Use SQL GROUP BY for efficient aggregation
@@ -540,7 +644,7 @@ let _ = conn.execute(
 
 - **Local storage only**: Tracking database never leaves the machine
 - **Telemetry requires consent**: contextcrawler can send a daily anonymous usage ping (version, OS, command counts, token savings). Disabled by default, requires explicit consent via `contextcrawler init` or `contextcrawler telemetry enable`. Manage with `contextcrawler telemetry status/disable/forget`. Override: `CTXCRL_TELEMETRY_DISABLED=1`
-- **User control**: Users can delete `~/.local/share/ctxcrl/tracking.db` anytime
+- **User control**: Users can delete `~/.local/share/ctxcrl/history.db` anytime
 - **90-day retention**: Old data automatically purged
 
 ## Troubleshooting
@@ -549,15 +653,15 @@ let _ = conn.execute(
 
 If you see "database is locked" errors:
 - Ensure only one contextcrawler process writes at a time
-- Check file permissions on `~/.local/share/ctxcrl/tracking.db`
-- Delete and recreate: `rm ~/.local/share/ctxcrl/tracking.db && contextcrawler gain`
+- Check file permissions on `~/.local/share/ctxcrl/history.db`
+- Delete and recreate: `rm ~/.local/share/ctxcrl/history.db && contextcrawler gain`
 
 ### Missing exec_time_ms column
 
 Older databases may not have the `exec_time_ms` column. contextcrawler automatically migrates on first use, but you can force it:
 
 ```bash
-sqlite3 ~/.local/share/ctxcrl/tracking.db \
+sqlite3 ~/.local/share/ctxcrl/history.db \
   "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0"
 ```
 
@@ -571,13 +675,13 @@ Planned improvements (contributions welcome):
 
 - [ ] Export to Prometheus/OpenMetrics format
 - [ ] Support for custom retention periods (not just 90 days)
-- [ ] SQLite WAL mode for concurrent writes
-- [ ] Per-project tracking (multiple databases)
 - [ ] Integration with Claude API for precise token counts
 - [ ] Web dashboard (localhost) for visualizing trends
 
+(WAL mode and project-scoped tracking, listed here in earlier revisions, are now
+implemented; see Performance Considerations and the `project_path` column.)
+
 ## See Also
 
-- [README.md](../README.md) - Main project documentation
-- [COMMAND_AUDIT.md](../claudedocs/COMMAND_AUDIT.md) - List of all contextcrawler commands
+- [Command & Filter Reference](../guide/commands.md) - every command contextcrawler handles and its savings
 - [Rust docs](https://docs.rs/) - Run `cargo doc --open` for API docs

@@ -124,7 +124,7 @@ Phase 6: TRACK
 ──────────────
 tracking::track(
     original_cmd: "git log --oneline -5",
-    rtk_cmd: "contextcrawler git log --oneline -5",
+    ctxcrl_cmd: "contextcrawler git log --oneline -5",
     input: &raw_output,    // 500 chars
     output: &filtered      // 20 chars
 )
@@ -653,7 +653,7 @@ Flow:
    INSERT INTO commands (
        timestamp,      -- RFC3339 format
        original_cmd,   -- "git log --oneline -5"
-       rtk_cmd,        -- "contextcrawler git log --oneline -5"
+       ctxcrl_cmd,        -- "contextcrawler git log --oneline -5"
        input_tokens,   -- 125
        output_tokens,  -- 5
        saved_tokens,   -- 120
@@ -674,7 +674,7 @@ Flow:
    │ id              INTEGER PRIMARY KEY     │
    │ timestamp       TEXT NOT NULL           │
    │ original_cmd    TEXT NOT NULL           │
-   │ rtk_cmd         TEXT NOT NULL           │
+   │ ctxcrl_cmd         TEXT NOT NULL           │
    │ input_tokens    INTEGER NOT NULL        │
    │ output_tokens   INTEGER NOT NULL        │
    │ saved_tokens    INTEGER NOT NULL        │

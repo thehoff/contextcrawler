@@ -30,7 +30,7 @@ User / LLM Agent
                           |
                           v
 +--------------------------------------------------+
-|  contextcrawler CLI (main.rs)                               |
+|  contextcrawler CLI (bin main.rs -> lib cli::run)          |
 |                                                  |
 |  +-------------+    +-----------------+          |
 |  | Clap Parser | -> | Command Routing |          |
@@ -59,6 +59,12 @@ User / LLM Agent
 - Graceful degradation: filter failure falls back to raw output
 - Exit code propagation: contextcrawler never swallows non-zero exits
 - Transparent proxy: unknown commands pass through unchanged
+
+**Crate layout (lib + bin).** contextcrawler builds as a library crate
+(`src/lib.rs`) with a thin binary shim (`src/main.rs`, ~5 lines) that
+just calls `contextcrawler::cli::run()`. The whole CLI surface (the
+`Commands` enum and the routing `match`) lives in `src/cli.rs` and is
+consumable as a library by downstream code, not just the binary.
 
 ---
 
@@ -177,7 +183,7 @@ rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
   |  c. Guard: CTXCRL_DISABLED=1 in prefix → None
   |  d. Guard: gh with --json/--jq/--template → None
   |  e. Apply rule's rewrite_prefixes: "cargo fmt" → "contextcrawler cargo fmt"
-  |  f. Reassemble: env_prefix + rtk_cmd + args + redirect_suffix
+  |  f. Reassemble: env_prefix + ctxcrl_cmd + args + redirect_suffix
   |
   v
 classify_command(cmd)                              [src/discover/registry.rs]
@@ -189,7 +195,7 @@ classify_command(cmd)                              [src/discover/registry.rs]
   |  6. Guard: cat/head/tail with redirect (>, >>) → Unsupported (write, not read)
   |  7. Match against REGEX_SET (60+ compiled patterns from rules.rs)
   |  8. Extract subcommand → lookup custom savings/status overrides
-  |  9. Return Classification::Supported { rtk_equivalent, category, savings, status }
+  |  9. Return Classification::Supported { ctxcrl_equivalent, category, savings, status }
   |
   v
 Result: "contextcrawler cargo fmt --all && contextcrawler cargo test 2>&1 | tail -20"
@@ -211,10 +217,12 @@ Key design decisions:
 
 ### 3.3 CLI Parsing and Routing
 
-Once the rewritten command reaches contextcrawler:
+Once the rewritten command reaches contextcrawler, everything below runs
+inside `cli::run()` in `src/cli.rs` (the binary in `src/main.rs` just
+calls it):
 
-1. **Telemetry**: `telemetry::maybe_ping()` fires a non-blocking daily usage ping
-2. **Clap parsing**: `Cli::try_parse()` matches against the `Commands` enum
+1. **Telemetry**: `telemetry::maybe_ping()` is invoked, but network telemetry is disabled by project decision, so it returns immediately and opens no socket
+2. **Clap parsing**: `Cli::try_parse()` matches against the `Commands` enum (defined in `src/cli.rs`)
 3. **Hook check**: `hook_check::maybe_warn()` warns if the installed hook is outdated (rate-limited to 1/day)
 4. **Integrity check**: `integrity::runtime_check()` verifies the hook's SHA-256 hash for operational commands
 5. **Routing**: A `match cli.command` dispatches to the specialized filter module
@@ -295,11 +303,13 @@ Start here, then drill down into each README for file-level details.
 
 | Directory | What it does | What you'll find in its README |
 |-----------|-------------|-------------------------------|
-| `main.rs` | CLI entry point, `Commands` enum, routing match | _(no README — read the file directly)_ |
+| `main.rs` | Thin binary shim (~5 lines); calls `contextcrawler::cli::run()` | _(no README — read the file directly)_ |
+| `lib.rs` | Library crate root; re-exports the public modules | _(no README — read the file directly)_ |
+| `cli.rs` | CLI entry point, `Commands` enum, routing match (`cli::run`) | _(no README — read the file directly)_ |
 | [`core/`](../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
 | [`hooks/`](../src/hooks/README.md) | Hook system | Installation flow (`contextcrawler init`), integrity verification, rewrite command, trust model |
 | [`analytics/`](../src/analytics/README.md) | Token savings analytics | `contextcrawler gain` dashboard, Claude Code economics, ccusage parsing |
-| [`cmds/`](../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
+| [`cmds/`](../src/cmds/README.md) | **Command filters (10 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
 | [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
 | [`learn/`](../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
 | [`parser/`](../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
@@ -427,6 +437,9 @@ tests/
 
 ## 9. Future Improvements
 
-- **Extract cli.rs**: Move `Commands` enum, 13 sub-enums (`GitCommands`, `CargoCommands`, etc.), and `AgentTarget` from main.rs to a dedicated cli.rs module. This would reduce main.rs from ~2600 to ~1500 lines.
-- **Split routing**: Extract the `match cli.command { ... }` block into a separate routing module.
+- ~~**Extract cli.rs**~~: Done in the lib pivot. The `Commands` enum,
+  sub-enums (`GitCommands`, `CargoCommands`, etc.), `AgentTarget`, and
+  `cli::run()` now live in `src/cli.rs`; `src/main.rs` is a ~5-line shim
+  over the `contextcrawler` library crate.
+- **Split routing**: Extract the `match cli.command { ... }` block from `cli.rs` into a separate routing module.
 - **Streaming filters**: For long-running commands, filter output line-by-line as it arrives instead of buffering.

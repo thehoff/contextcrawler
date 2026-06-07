@@ -54,7 +54,7 @@ Once the hook is installed, nothing changes in how you work. Your AI assistant r
 
 For example, when Claude Code runs `cargo test`, the hook rewrites it to `contextcrawler cargo test` before it executes. The LLM receives filtered output with only the failures — not 500 lines of passing tests. You never see or type `contextcrawler`.
 
-contextcrawler covers all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What contextcrawler Optimizes](../resources/what-rtk-covers.md) for the full list.
+contextcrawler covers all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What contextcrawler optimises](../resources/what-rtk-covers.md) for the full list.
 
 ## Step 3: Check your savings
 
@@ -65,15 +65,18 @@ contextcrawler gain
 ```
 
 ```
-Total commands : 12
-Input tokens   : 45,230
-Output tokens  : 4,890
-Saved          : 40,340  (89.2%)
+ContextCrawler Token Savings (Global Scope)
+════════════════════════════════════════════════════════════
+
+Total commands:    12
+Input tokens:      45.2K
+Output tokens:     4.9K
+Tokens saved:      40.3K (89.2%)
 ```
 
 ## Step 4: Unsupported commands
 
-Commands contextcrawler doesn't recognize run through passthrough — output is unchanged, usage is tracked:
+Commands contextcrawler doesn't recognise run through passthrough — output is unchanged, usage is tracked:
 
 ```bash
 contextcrawler proxy make install
@@ -81,6 +84,8 @@ contextcrawler proxy make install
 
 ## Next steps
 
-- [What contextcrawler Optimizes](../resources/what-rtk-covers.md) — all supported commands and savings by ecosystem
+- [What contextcrawler optimises](../resources/what-rtk-covers.md) — all supported commands and savings by ecosystem
+- [Command reference](../commands.md) — every filter and meta command
+- [Use as a library](../library.md) — the experimental Rust API
 - [Supported agents](./supported-agents.md) — Claude Code, Cursor, Copilot, and more
-- [Configuration](./configuration.md) — customize contextcrawler behavior
+- [Configuration](./configuration.md) — customise contextcrawler behaviour
