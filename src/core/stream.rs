@@ -2317,8 +2317,6 @@ pub(crate) mod tests {
         // marker IS present in the returned `filtered` and that the
         // truncation marker is also visible — neither end-of-stream marker
         // may be lost when both conditions fire together.
-        use std::sync::atomic::Ordering::SeqCst;
-
         let bytes_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let writes_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));

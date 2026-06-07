@@ -383,7 +383,13 @@ fn filter_connected(output: &str) -> String {
     let filtered = filter_test(&joined);
 
     if filtered.trim().is_empty() {
-        return "ok ✓ (connected tests passed)".to_string();
+        // Only claim success when the build actually reported it — mirrors
+        // filter_test / filter_lint. A failed run that produced no recognised
+        // PASSED/FAILED lines must surface its raw output, not "tests passed".
+        if output.contains("BUILD SUCCESSFUL") {
+            return "ok ✓ (connected tests passed)".to_string();
+        }
+        return output.trim().to_string();
     }
     filtered
 }
@@ -924,6 +930,49 @@ Tests run: 3, Failures: 1, Errors: 0, Skipped: 0"#;
         assert!(
             out.contains("No connected devices"),
             "Must show actionable error"
+        );
+    }
+
+    // Regression (lying-success): a run whose output is entirely instrumentation
+    // noise (all stripped → empty filtered) with NO BUILD SUCCESSFUL marker must
+    // NOT claim "connected tests passed" — it must surface the raw output.
+    // Previously this branch unconditionally returned the success string.
+    #[test]
+    fn test_connected_no_success_marker_not_passed() {
+        let input = "Starting 1 tests on Pixel\n\
+INSTRUMENTATION_STATUS: numtests=1\n\
+INSTRUMENTATION_STATUS_CODE: 1\n\
+INSTRUMENTATION_CODE: -1";
+        let out = filter_connected(input);
+        assert!(
+            !out.contains("connected tests passed"),
+            "Run without BUILD SUCCESSFUL must not claim success. Got: {}",
+            out
+        );
+        assert!(
+            out.contains("INSTRUMENTATION_CODE"),
+            "Raw output must surface when success can't be confirmed. Got: {}",
+            out
+        );
+    }
+
+    // Success path preserved: a genuine passing run prints BUILD SUCCESSFUL,
+    // which is kept (not mangled into a failure dump).
+    #[test]
+    fn test_connected_build_successful_preserved() {
+        let input = "Starting 1 tests on Pixel\n\
+INSTRUMENTATION_STATUS: numtests=1\n\
+BUILD SUCCESSFUL in 8s";
+        let out = filter_connected(input);
+        assert!(
+            out.contains("BUILD SUCCESSFUL"),
+            "Passing run must surface success. Got: {}",
+            out
+        );
+        assert!(
+            !out.contains("INSTRUMENTATION_STATUS"),
+            "Instrumentation noise must still be stripped. Got: {}",
+            out
         );
     }
 

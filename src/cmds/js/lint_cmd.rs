@@ -200,12 +200,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             if !result.stdout.trim().is_empty() {
                 ruff_cmd::filter_ruff_check_json(&result.stdout)
             } else {
-                "Ruff: No issues found".to_string()
+                // Empty stdout is NOT always "no issues": ruff also prints
+                // nothing to stdout when it fails to start (bad config, internal
+                // error) and writes to stderr with a non-zero exit. Key off the
+                // exit code so a failed run surfaces the real error.
+                ruff_empty_output(result.exit_code, &raw)
             }
         }
         "pylint" => filter_pylint_json(&result.stdout),
         "mypy" => mypy_cmd::filter_mypy_output(&raw, result.exit_code),
-        _ => filter_generic_lint(&raw),
+        _ => filter_generic_lint(&raw, result.exit_code),
     };
 
     if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code) {
@@ -435,8 +439,19 @@ fn filter_pylint_json(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Decide what to render for ruff when it produced no stdout. Empty stdout on a
+/// zero exit means "no issues"; on a non-zero exit it means ruff failed to run
+/// (bad config / internal error → stderr), which must be surfaced, not hidden.
+fn ruff_empty_output(exit_code: i32, raw: &str) -> String {
+    if exit_code != 0 {
+        crate::core::display_helpers::format_tool_failure("Ruff", raw, exit_code)
+    } else {
+        "Ruff: No issues found".to_string()
+    }
+}
+
 /// Filter generic linter output (fallback for non-ESLint linters)
-fn filter_generic_lint(output: &str) -> String {
+fn filter_generic_lint(output: &str, exit_code: i32) -> String {
     let mut warnings = 0;
     let mut errors = 0;
     let mut issues: Vec<String> = Vec::new();
@@ -454,6 +469,12 @@ fn filter_generic_lint(output: &str) -> String {
     }
 
     if errors == 0 && warnings == 0 {
+        // A non-zero exit with no recognised error/warning lines is a failure
+        // the heuristic simply didn't match (e.g. a linter boot error). Surface
+        // the raw output rather than claiming a clean "No issues found".
+        if exit_code != 0 {
+            return crate::core::display_helpers::format_tool_failure("Lint", output, exit_code);
+        }
         return "Lint: No issues found".to_string();
     }
 
@@ -679,6 +700,56 @@ mod tests {
         let effective = &full_args[skip..];
         let (linter, _) = detect_linter(effective);
         assert_eq!(linter, "biome");
+    }
+
+    // Regression (lying-success): generic lint on a FAILED run with no
+    // recognised error/warning line must NOT claim "No issues found".
+    #[test]
+    fn test_filter_generic_lint_failure_not_no_issues() {
+        // A linter boot failure: no line contains "error"/"warning".
+        let raw = "Cannot find module 'eslint-config-foo'\nrequire stack: ...";
+        let result = filter_generic_lint(raw, 1);
+        assert!(
+            !result.contains("No issues found"),
+            "Failed lint must not report 'No issues found'. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("Cannot find module") || result.contains("failed"),
+            "Real error must surface. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_generic_lint_clean_exit_zero() {
+        // Exit 0 with no issues keeps the success message (unchanged behaviour).
+        let result = filter_generic_lint("all good\n", 0);
+        assert_eq!(result, "Lint: No issues found");
+    }
+
+    // Regression (lying-success): ruff with empty stdout on a non-zero exit
+    // (failed to start) must surface the error, not "No issues found".
+    #[test]
+    fn test_ruff_empty_output_failure_surfaces_error() {
+        let raw = "\nruff failed\n  Cause: TOML parse error in ruff.toml";
+        let result = ruff_empty_output(2, raw);
+        assert!(
+            !result.contains("No issues found"),
+            "Failed ruff must not report 'No issues found'. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("ruff failed") || result.contains("TOML parse error"),
+            "Real error must surface. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_ruff_empty_output_clean_exit_zero() {
+        // Exit 0 with empty output keeps the success message (unchanged behaviour).
+        assert_eq!(ruff_empty_output(0, "\n"), "Ruff: No issues found");
     }
 
     #[test]

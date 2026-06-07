@@ -11,6 +11,7 @@ enum ParseState {
     Header,
     TestProgress,
     Failures,
+    Errors,
     Summary,
 }
 
@@ -51,7 +52,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: pytest --tb=short -q {}", args.join(" "));
     }
 
-    runner::run_filtered(
+    // Exit-aware: a crashed pytest (collection/import error with no parseable
+    // summary) must surface the real error instead of "No tests collected".
+    runner::run_filtered_with_exit(
         cmd,
         "pytest",
         &args.join(" "),
@@ -60,7 +63,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-pub(crate) fn filter_pytest_output(output: &str) -> String {
+pub(crate) fn filter_pytest_output(output: &str, exit_code: i32) -> String {
     // Strip ANSI escapes up-front: pytest emits coloured output when it
     // detects a TTY (or when forced), and colour codes wrapping the
     // `=== ... ===` section markers / `FAILED`/`passed` summary tokens
@@ -92,7 +95,22 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             state = ParseState::Header;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
+            // Flush any in-progress error block before switching sections.
+            if !current_failure.is_empty() {
+                failures.push(current_failure.join("\n"));
+                current_failure.clear();
+            }
             state = ParseState::Failures;
+            continue;
+        } else if trimmed.starts_with("===") && trimmed.contains("ERRORS") {
+            // pytest emits a dedicated `=== ERRORS ===` section for
+            // collection/import/fixture errors. Without collecting it, the
+            // tracebacks were silently dropped. Flush any in-progress block first.
+            if !current_failure.is_empty() {
+                failures.push(current_failure.join("\n"));
+                current_failure.clear();
+            }
+            state = ParseState::Errors;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
             state = ParseState::Summary;
@@ -105,18 +123,21 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         } else if trimmed.starts_with("===")
             && (trimmed.contains("passed")
                 || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
+                || trimmed.contains("skipped")
+                || trimmed.contains("error"))
         {
             summary_line = trimmed.to_string();
             continue;
         // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
+        // " error" is included so a pure-error quiet summary ("3 errors in 1.23s") is captured.
         } else if summary_line.is_empty()
             && !trimmed.starts_with("===")
             && !trimmed.starts_with("FAILED")
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
+                || trimmed.contains(" skipped")
+                || trimmed.contains(" error"))
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -139,10 +160,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                     test_files.push(trimmed.to_string());
                 }
             }
-            ParseState::Failures => {
-                // Collect failure details
+            ParseState::Failures | ParseState::Errors => {
+                // Collect failure/error details (both sections share block layout)
                 if trimmed.starts_with("___") {
-                    // New failure section
+                    // New failure/error section
                     if !current_failure.is_empty() {
                         failures.push(current_failure.join("\n"));
                         current_failure.clear();
@@ -153,7 +174,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 }
             }
             ParseState::Summary => {
-                // FAILED test lines
+                // FAILED / ERROR test lines
                 if trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR") {
                     failures.push(trimmed.to_string());
                 }
@@ -166,24 +187,40 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
         failures.push(current_failure.join("\n"));
     }
 
+    // A crashed pytest (e.g. a top-level collection/import error that aborts
+    // before any summary line is printed) would otherwise be misreported as
+    // "No tests collected" while discarding the traceback. On a non-zero exit
+    // with nothing parseable, surface the raw output instead.
+    if exit_code != 0 && summary_line.is_empty() && failures.is_empty() {
+        return crate::core::display_helpers::format_tool_failure("pytest", output, exit_code);
+    }
+
     // Build compact output
     build_pytest_summary(&summary_line, &test_files, &failures)
 }
 
 fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[String]) -> String {
     // Parse summary line
-    let (passed, failed, skipped) = parse_summary_line(summary);
+    let (passed, failed, skipped, errors) = parse_summary_line(summary);
 
-    if failed == 0 && passed > 0 {
+    // Success is gated on BOTH failed == 0 AND errors == 0. pytest reports
+    // collection/import/fixture failures as `errors` (e.g. "5 passed, 2 errors"),
+    // which must never be summarised as a clean "Pytest: N passed".
+    if failed == 0 && errors == 0 && passed > 0 {
         return format!("Pytest: {} passed", passed);
     }
 
-    if passed == 0 && failed == 0 && skipped == 0 {
+    // Pure-error runs (e.g. "3 errors", 0 tests collected) must surface the
+    // errors, not claim "No tests collected".
+    if passed == 0 && failed == 0 && skipped == 0 && errors == 0 {
         return "Pytest: No tests collected".to_string();
     }
 
     let mut result = String::new();
     result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
+    if errors > 0 {
+        result.push_str(&format!(", {} errors", errors));
+    }
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
     }
@@ -212,6 +249,17 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
                 if let Some(test_path) = parts.first() {
                     let test_name = test_path.trim_start_matches("FAILED ");
                     result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
+                }
+                if parts.len() > 1 {
+                    result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
+                }
+                continue;
+            } else if first_line.starts_with("ERROR") {
+                // Summary format: "ERROR tests/test_foo.py - ImportError: ..."
+                let parts: Vec<&str> = first_line.split(" - ").collect();
+                if let Some(test_path) = parts.first() {
+                    let test_name = test_path.trim_start_matches("ERROR ");
+                    result.push_str(&format!("{}. [ERROR] {}\n", i + 1, test_name));
                 }
                 if parts.len() > 1 {
                     result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
@@ -248,12 +296,13 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
     result.trim().to_string()
 }
 
-fn parse_summary_line(summary: &str) -> (usize, usize, usize) {
+fn parse_summary_line(summary: &str) -> (usize, usize, usize, usize) {
     let mut passed = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut errors = 0;
 
-    // Parse lines like "=== 4 passed, 1 failed in 0.50s ==="
+    // Parse lines like "=== 4 passed, 1 failed, 2 errors in 0.50s ==="
     let parts: Vec<&str> = summary.split(',').collect();
 
     for part in parts {
@@ -272,12 +321,18 @@ fn parse_summary_line(summary: &str) -> (usize, usize, usize) {
                     if let Ok(n) = words[i - 1].parse::<usize>() {
                         skipped = n;
                     }
+                // "error"/"errors" — collection/import/fixture errors. Must be
+                // counted so the success branch can be gated on errors == 0.
+                } else if word.contains("error") {
+                    if let Ok(n) = words[i - 1].parse::<usize>() {
+                        errors = n;
+                    }
                 }
             }
         }
     }
 
-    (passed, failed, skipped)
+    (passed, failed, skipped, errors)
 }
 
 #[cfg(test)]
@@ -294,7 +349,7 @@ tests/test_foo.py .....                                            [100%]
 
 === 5 passed in 0.50s ==="#;
 
-        let result = filter_pytest_output(output);
+        let result = filter_pytest_output(output, 0);
         assert!(result.contains("Pytest"));
         assert!(result.contains("5 passed"));
     }
@@ -319,7 +374,7 @@ tests/test_foo.py:10: AssertionError
 FAILED tests/test_foo.py::test_something - assert False
 === 4 passed, 1 failed in 0.50s ==="#;
 
-        let result = filter_pytest_output(output);
+        let result = filter_pytest_output(output, 1);
         assert!(result.contains("4 passed, 1 failed"));
         assert!(result.contains("test_something"));
         assert!(result.contains("assert False"));
@@ -342,7 +397,7 @@ ___ test_something ___\n\
 \x1b[31mFAILED tests/test_foo.py::test_something - assert False\x1b[0m\n\
 \x1b[31m=== 4 passed, 1 failed in 0.50s ===\x1b[0m";
 
-        let result = filter_pytest_output(output);
+        let result = filter_pytest_output(output, 1);
         assert!(
             result.contains("4 passed, 1 failed"),
             "ANSI-wrapped summary must still be detected, got: {result:?}"
@@ -377,7 +432,7 @@ FAILED tests/test_foo.py::test_two - ValueError: invalid value
 FAILED tests/test_foo.py::test_three - KeyError
 === 3 failed in 0.20s ==="#;
 
-        let result = filter_pytest_output(output);
+        let result = filter_pytest_output(output, 1);
         assert!(result.contains("3 failed"));
         assert!(result.contains("test_one"));
         assert!(result.contains("test_two"));
@@ -391,20 +446,27 @@ collected 0 items
 
 === no tests ran in 0.00s ==="#;
 
-        let result = filter_pytest_output(output);
+        // exit 0: genuinely empty/no-test run — keep the "No tests collected" message.
+        let result = filter_pytest_output(output, 0);
         assert!(result.contains("No tests collected"));
     }
 
     #[test]
     fn test_parse_summary_line() {
-        assert_eq!(parse_summary_line("=== 5 passed in 0.50s ==="), (5, 0, 0));
+        assert_eq!(parse_summary_line("=== 5 passed in 0.50s ==="), (5, 0, 0, 0));
         assert_eq!(
             parse_summary_line("=== 4 passed, 1 failed in 0.50s ==="),
-            (4, 1, 0)
+            (4, 1, 0, 0)
         );
         assert_eq!(
             parse_summary_line("=== 3 passed, 1 failed, 2 skipped in 1.0s ==="),
-            (3, 1, 2)
+            (3, 1, 2, 0)
+        );
+        // error(s) count is now parsed (was silently dropped — the lying-success bug).
+        // (passed, failed, skipped, errors)
+        assert_eq!(
+            parse_summary_line("=== 5 passed, 2 errors in 1.23s ==="),
+            (5, 0, 0, 2)
         );
     }
 
@@ -427,7 +489,7 @@ E   AssertionError: expected True
 FAILED tests/test_foo.py::test_something - AssertionError
 5 failed, 1698 passed, 2 skipped in 108.89s"#;
 
-        let result = filter_pytest_output(output);
+        let result = filter_pytest_output(output, 1);
         assert!(
             !result.contains("No tests collected"),
             "Should not report 'No tests collected' when tests ran. Got: {}",
@@ -448,10 +510,99 @@ collected 3 items
 
 === 3 skipped in 0.10s ==="#;
 
-        let result = filter_pytest_output(output);
+        let result = filter_pytest_output(output, 0);
         assert!(
             !result.contains("No tests collected"),
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
+            result
+        );
+    }
+
+    /// Regression (lying-success): `5 passed, 2 errors` must NOT be summarised
+    /// as a clean "Pytest: 5 passed", and the error tracebacks must surface.
+    #[test]
+    fn test_filter_pytest_passed_with_collection_errors() {
+        let output = r#"=== test session starts ===
+collected 5 items / 1 error
+
+tests/test_foo.py .....                                            [100%]
+
+=== ERRORS ===
+___ ERROR collecting tests/test_bad.py ___
+ImportError: cannot import name 'missing' from 'app'
+
+=== short test summary info ===
+ERROR tests/test_bad.py - ImportError: cannot import name 'missing'
+=== 5 passed, 2 errors in 1.23s ==="#;
+
+        let result = filter_pytest_output(output, 1);
+        assert!(
+            !result.contains("Pytest: 5 passed\n") && result != "Pytest: 5 passed",
+            "Must NOT report clean success when there are errors. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("2 errors"),
+            "Error count must be surfaced. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("ImportError") || result.contains("test_bad"),
+            "Real error token must surface. Got: {}",
+            result
+        );
+    }
+
+    /// Regression: pure-error run (0 tests, only collection errors) must surface
+    /// the errors, never claim "No tests collected".
+    #[test]
+    fn test_filter_pytest_pure_errors_not_no_tests() {
+        let output = r#"=== test session starts ===
+collected 0 items / 3 errors
+
+=== ERRORS ===
+___ ERROR collecting tests/test_a.py ___
+ModuleNotFoundError: No module named 'app'
+
+=== short test summary info ===
+ERROR tests/test_a.py - ModuleNotFoundError: No module named 'app'
+=== 3 errors in 0.42s ==="#;
+
+        let result = filter_pytest_output(output, 1);
+        assert!(
+            !result.contains("No tests collected"),
+            "Pure-error run must not report 'No tests collected'. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("3 errors"),
+            "Error count must be surfaced. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("ModuleNotFoundError") || result.contains("test_a"),
+            "Real error token must surface. Got: {}",
+            result
+        );
+    }
+
+    /// Regression: a crashed pytest with a non-zero exit and no parseable
+    /// summary must surface the raw error, not "No tests collected".
+    #[test]
+    fn test_filter_pytest_crash_surfaces_raw() {
+        let output = "INTERNALERROR> Traceback (most recent call last):\n\
+INTERNALERROR>   File \"conftest.py\", line 3, in <module>\n\
+INTERNALERROR> RuntimeError: boom during collection";
+
+        let result = filter_pytest_output(output, 2);
+        assert!(
+            !result.contains("No tests collected"),
+            "Crash must not report 'No tests collected'. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("INTERNALERROR") || result.contains("RuntimeError"),
+            "Real error must surface. Got: {}",
             result
         );
     }

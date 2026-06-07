@@ -1493,7 +1493,10 @@ mod tests {
         let allow = vec!["echo *".to_string()];
         // $HOME is NOT a command substitution. "HOME" must not be surfaced as a segment.
         // If it were, the allow check would fail on "HOME" since "HOME" doesn't match "echo *".
-        let v = check_command_with_rules("echo $HOME", &deny, &[], &allow);
+        // Exploratory call retained for documentation; the asserted scenario
+        // below (deny2) is the one that actually pins correctness. Bound to `_v`
+        // because this first verdict is intentionally not asserted.
+        let _v = check_command_with_rules("echo $HOME", &deny, &[], &allow);
         // $HOME → no substitution extracted → only segment is "echo $HOME"
         // "echo $HOME" matches "echo *" → Allow
         // If it incorrectly extracts "HOME" as a segment and that segment matches deny["HOME"] → Deny
@@ -1510,7 +1513,7 @@ mod tests {
 #[cfg(test)]
 mod adversarial_trace {
     use super::*;
-    use crate::discover::lexer::{extract_substitutions, shell_split, strip_quotes};
+    use crate::discover::lexer::{extract_substitutions, shell_split};
 
     // Verify shell_split behavior on contested inputs
     #[test]

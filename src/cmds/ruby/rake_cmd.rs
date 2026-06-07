@@ -71,7 +71,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         );
     }
 
-    runner::run_filtered(
+    // Exit-aware: a `rake aborted!` / LoadError produces no Minitest summary and
+    // exits non-zero — it must surface the abort, not report "no tests ran".
+    runner::run_filtered_with_exit(
         cmd,
         "rake",
         &args.join(" "),
@@ -108,7 +110,7 @@ enum ParseState {
 ///
 /// 8 runs, 7 assertions, 1 failures, 1 errors, 0 skips
 /// ```
-fn filter_minitest_output(output: &str) -> String {
+fn filter_minitest_output(output: &str, exit_code: i32) -> String {
     let clean = strip_ansi(output);
     let mut state = ParseState::Header;
     let mut failures: Vec<String> = Vec::new();
@@ -164,6 +166,14 @@ fn filter_minitest_output(output: &str) -> String {
     // Save last failure if any
     if !current_failure.is_empty() {
         failures.push(current_failure.join("\n"));
+    }
+
+    // A `rake aborted!` (LoadError, syntax error, missing task) produces no
+    // Minitest summary and exits non-zero. Without this guard it falls through
+    // to "rake test: no tests ran", masking the real abort. Surface the raw
+    // output instead. A genuine no-test run exits 0 and keeps its message.
+    if exit_code != 0 && summary_line.is_empty() {
+        return crate::core::display_helpers::format_tool_failure("rake", &clean, exit_code);
     }
 
     build_minitest_summary(&summary_line, &failures)
@@ -280,7 +290,7 @@ Finished in 0.123456s, 64.8 runs/s, 72.9 assertions/s.
 
 8 runs, 9 assertions, 0 failures, 0 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("8 runs"));
         assert!(result.contains("0 failures"));
@@ -303,7 +313,7 @@ Expected: true
 
 7 runs, 7 assertions, 1 failures, 0 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 1);
         assert!(result.contains("1 failures"));
         assert!(result.contains("test_that_fails"));
         assert!(result.contains("Expected: true"));
@@ -326,7 +336,7 @@ RuntimeError: something went wrong
 
 6 runs, 5 assertions, 0 failures, 1 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 1);
         assert!(result.contains("1 errors"));
         assert!(result.contains("test_boom"));
         assert!(result.contains("RuntimeError"));
@@ -334,7 +344,8 @@ RuntimeError: something went wrong
 
     #[test]
     fn test_filter_minitest_empty() {
-        let result = filter_minitest_output("");
+        // exit 0 + empty output → genuine no-test run, keep the message.
+        let result = filter_minitest_output("", 0);
         assert!(result.contains("no tests ran"));
     }
 
@@ -350,7 +361,7 @@ Finished in 0.100000s, 50.0 runs/s
 
 5 runs, 4 assertions, 0 failures, 0 errors, 1 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("1 skips"));
     }
@@ -373,7 +384,7 @@ Finished in 0.100000s, 50.0 runs/s
         );
 
         let input_tokens = count_tokens(&output);
-        let result = filter_minitest_output(&output);
+        let result = filter_minitest_output(&output, 0);
         let output_tokens = count_tokens(&result);
 
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -429,7 +440,7 @@ NoMethodError: undefined method `blah'
 
 6 runs, 5 assertions, 2 failures, 1 errors, 0 skips"#;
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 1);
         assert!(result.contains("2 failures"));
         assert!(result.contains("1 errors"));
         assert!(result.contains("test_alpha"));
@@ -444,7 +455,7 @@ NoMethodError: undefined method `blah'
             Finished in 5.79938s\n\
             57 tests, 378 assertions, 0 failures, 0 errors, 0 skips";
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("57 runs"));
         assert!(result.contains("0 failures"));
@@ -458,9 +469,31 @@ NoMethodError: undefined method `blah'
             Finished in 0.1s, 40.0 runs/s\n\n\
             4 runs, 4 assertions, 0 failures, 0 errors, 0 skips";
 
-        let result = filter_minitest_output(output);
+        let result = filter_minitest_output(output, 0);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("4 runs"));
+    }
+
+    // Regression (lying-success): a `rake aborted!` / LoadError exits non-zero
+    // with no Minitest summary. It must surface the abort, not "no tests ran".
+    #[test]
+    fn test_filter_minitest_aborted_surfaces_error() {
+        let output = "rake aborted!\n\
+LoadError: cannot load such file -- some_missing_gem\n\
+/app/config/boot.rb:4:in `require'\n\
+Tasks: TOP => test\n\
+(See full trace by running task with --trace)";
+        let result = filter_minitest_output(output, 1);
+        assert!(
+            !result.contains("no tests ran"),
+            "Aborted run must not report 'no tests ran'. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("rake aborted!") || result.contains("LoadError"),
+            "Real abort must surface. Got: {}",
+            result
+        );
     }
 
     // ── select_runner tests ─────────────────────────────

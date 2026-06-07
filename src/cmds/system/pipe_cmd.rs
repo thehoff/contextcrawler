@@ -6,7 +6,7 @@ use crate::core::stream::RAW_CAP;
 pub(crate) fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
-        "pytest" => Some(crate::cmds::python::pytest_cmd::filter_pytest_output),
+        "pytest" => Some(pytest_wrapper),
         "go-test" => Some(go_test_wrapper),
         "go-build" => Some(crate::cmds::go::go_cmd::filter_go_build),
         "tsc" => Some(crate::cmds::js::tsc_cmd::filter_tsc_output),
@@ -26,6 +26,13 @@ pub(crate) fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
 
 fn go_test_wrapper(input: &str) -> String {
     crate::cmds::go::go_cmd::filter_go_test_json(input)
+}
+
+fn pytest_wrapper(input: &str) -> String {
+    // Piped path has no child exit code; pass 0. Marker-based gating
+    // (error/failure counts from the summary line) still applies — only the
+    // crash-fallback (which needs a non-zero exit) is unavailable here.
+    crate::cmds::python::pytest_cmd::filter_pytest_output(input, 0)
 }
 
 fn git_log_wrapper(input: &str) -> String {
@@ -150,7 +157,7 @@ pub(crate) fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     }
 
     if first_1k.contains("=== test session starts") {
-        return crate::cmds::python::pytest_cmd::filter_pytest_output;
+        return pytest_wrapper;
     }
 
     let first_trimmed = first_1k.trim_start();

@@ -83,6 +83,12 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
 
     let filtered = filter_pip_list(&result.stdout);
     println!("{}", filtered);
+    // On failure stdout is typically empty (so the filter only renders a JSON
+    // parse error) and the real cause is on stderr — surface it, mirroring
+    // run_passthrough, instead of silently dropping it.
+    if !result.success() && !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
 
     Ok((raw, filtered, result.exit_code))
 }
@@ -111,6 +117,10 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
 
     let filtered = filter_pip_outdated(&result.stdout);
     println!("{}", filtered);
+    // Surface stderr on failure (see run_list) instead of dropping it.
+    if !result.success() && !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
+    }
 
     Ok((raw, filtered, result.exit_code))
 }

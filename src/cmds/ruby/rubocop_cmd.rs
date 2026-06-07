@@ -5,9 +5,10 @@
 //! when the user specifies a custom format, or when injected JSON output fails
 //! to parse.
 
-use crate::core::runner;
+use crate::core::stream::exec_capture;
+use crate::core::tracking;
 use crate::core::utils::{check_forbidden_rubocop_args, ruby_exec, strip_ansi};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 // ── JSON structures matching RuboCop's --format json output ─────────────────
@@ -58,6 +59,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         return Ok(2);
     }
 
+    let timer = tracking::TimedExecution::start();
+
     // `ruby_exec` is env-hardened.
     let mut cmd = ruby_exec("rubocop");
 
@@ -79,13 +82,56 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: rubocop {}", args.join(" "));
     }
 
-    runner::run_filtered(
-        cmd,
-        "rubocop",
-        &args.join(" "),
-        move |stdout| filter_rubocop_dispatch(stdout, has_format || is_autocorrect),
-        runner::RunOptions::stdout_only().tee("rubocop"),
-    )
+    // Capture stdout and stderr *separately* (was `run_filtered` with
+    // `stdout_only`, which discarded stderr). RuboCop writes boot failures
+    // (cannot load such file / Bundler::GemNotFound) to stderr with an empty
+    // stdout; under stdout_only those errors were dead and the user just saw
+    // "RuboCop: No output". Mixing them into one stream isn't an option either —
+    // stderr warnings would corrupt the JSON parse on the happy path.
+    let result = exec_capture(&mut cmd)
+        .context("Failed to run rubocop. Is it installed?")?;
+
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
+
+    let filtered = filter_rubocop_with_streams(
+        &result.stdout,
+        &result.stderr,
+        has_format || is_autocorrect,
+        result.exit_code,
+    );
+
+    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "rubocop", result.exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
+
+    timer.track(
+        &format!("rubocop {}", args.join(" ")),
+        &format!("contextcrawler rubocop {}", args.join(" ")),
+        &raw,
+        &filtered,
+    );
+
+    Ok(result.exit_code)
+}
+
+/// Filter RuboCop output from separate stdout/stderr streams.
+///
+/// Normal runs are summarised from stdout (clean JSON or text). A failed run
+/// whose stdout is empty is a boot failure whose real cause is on stderr —
+/// route stderr through the text filter so the load-error branch surfaces it
+/// instead of reporting "RuboCop: No output".
+fn filter_rubocop_with_streams(
+    stdout: &str,
+    stderr: &str,
+    use_text_filter: bool,
+    exit_code: i32,
+) -> String {
+    if exit_code != 0 && stdout.trim().is_empty() && !stderr.trim().is_empty() {
+        return filter_rubocop_text(&strip_ansi(stderr));
+    }
+    filter_rubocop_dispatch(stdout, use_text_filter)
 }
 
 // ── JSON filtering ───────────────────────────────────────────────────────────
@@ -501,6 +547,34 @@ mod tests {
     fn test_filter_rubocop_empty_output() {
         let result = filter_rubocop_json("");
         assert_eq!(result, "RuboCop: No output");
+    }
+
+    // Regression (lying-success): a boot failure writes to stderr and leaves
+    // stdout empty. Previously stdout_only discarded stderr → "RuboCop: No
+    // output". Now stderr is routed through the text filter so the real error
+    // surfaces.
+    #[test]
+    fn test_filter_rubocop_boot_failure_surfaces_stderr() {
+        let stderr =
+            "/usr/lib/ruby/3.2.0/rubygems.rb:250: cannot load such file -- rubocop (LoadError)";
+        let result = filter_rubocop_with_streams("", stderr, false, 1);
+        assert!(
+            !result.contains("No output"),
+            "Boot failure must not report 'No output'. Got: {}",
+            result
+        );
+        assert!(
+            result.starts_with("RuboCop error:") && result.contains("cannot load such file"),
+            "Real error must surface. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_rubocop_with_streams_happy_path_uses_stdout() {
+        // exit 0 with valid JSON on stdout → normal summary, stderr ignored.
+        let result = filter_rubocop_with_streams(no_offenses_json(), "", false, 0);
+        assert_eq!(result, "ok ✓ rubocop (15 files)");
     }
 
     #[test]

@@ -134,11 +134,13 @@ fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Res
         .map(|a| is_install_subcommand(a))
         .unwrap_or(false);
 
-    runner::run_filtered(
+    // Exit-aware: filter_npm_output collapses fully-filtered output to "ok",
+    // which must never be claimed on a non-zero exit.
+    runner::run_filtered_with_exit(
         cmd,
         name,
         &args_display,
-        |output| filter_npm_output(output, is_install),
+        |output, exit_code| filter_npm_output(output, is_install, exit_code),
         runner::RunOptions::default(),
     )
 }
@@ -155,7 +157,7 @@ fn is_install_subcommand(arg: &str) -> bool {
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN.
 /// When `is_install` is set, `npm WARN` / `npm notice` / audit lines are
 /// preserved regardless of compaction so supply-chain warnings surface.
-fn filter_npm_output(output: &str, is_install: bool) -> String {
+fn filter_npm_output(output: &str, is_install: bool, exit_code: i32) -> String {
     let mut result = Vec::new();
 
     for line in output.lines() {
@@ -184,7 +186,14 @@ fn filter_npm_output(output: &str, is_install: bool) -> String {
     }
 
     if result.is_empty() {
-        "ok".to_string()
+        // "ok" is only honest on a clean exit. On a non-zero exit where every
+        // line was filtered as boilerplate/progress, surface the raw output
+        // rather than claiming success.
+        if exit_code == 0 {
+            "ok".to_string()
+        } else {
+            crate::core::display_helpers::format_tool_failure("npm", output, exit_code)
+        }
     } else {
         result.join("\n")
     }
@@ -206,7 +215,7 @@ npm notice
    Creating an optimized production build...
    ✓ Build completed
 "#;
-        let result = filter_npm_output(output, false);
+        let result = filter_npm_output(output, false, 0);
         assert!(!result.contains("npm WARN"));
         assert!(!result.contains("npm notice"));
         assert!(!result.contains("> project@"));
@@ -220,7 +229,7 @@ npm notice
         let output = "npm WARN deprecated foo@1.0.0: do not use\n\
                       npm notice New version available\n\
                       added 12 packages";
-        let result = filter_npm_output(output, true);
+        let result = filter_npm_output(output, true, 0);
         assert!(result.contains("npm WARN deprecated foo"));
         assert!(result.contains("npm notice"));
         assert!(result.contains("added 12 packages"));
@@ -266,8 +275,24 @@ npm notice
 
     #[test]
     fn test_filter_npm_output_empty() {
+        // exit 0 + nothing meaningful → "ok" (unchanged success-path behaviour).
         let output = "\n\n\n";
-        let result = filter_npm_output(output, false);
+        let result = filter_npm_output(output, false, 0);
         assert_eq!(result, "ok");
+    }
+
+    // Regression (lying-success): a non-zero exit whose output was entirely
+    // filtered to boilerplate/progress must NOT collapse to "ok".
+    #[test]
+    fn test_filter_npm_output_failure_not_ok() {
+        // Only boilerplate/progress lines — all stripped → empty result.
+        let output = "\n> project@1.0.0 build\n> next build\n\n";
+        let result = filter_npm_output(output, false, 1);
+        assert_ne!(result, "ok", "failed run must not collapse to 'ok'");
+        assert!(
+            result.contains("failed") || result.contains("next build"),
+            "Real output must surface on failure. Got: {}",
+            result
+        );
     }
 }

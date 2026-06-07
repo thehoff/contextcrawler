@@ -1072,13 +1072,6 @@ fn dedup_installs(items: &mut Vec<ParsedInstall>) {
     items.retain(|item| seen.insert(install_signature(item)));
 }
 
-/// Retained for callers/tests that still want the pairwise predicate.
-/// Equivalent to comparing the two canonical signatures.
-#[cfg_attr(not(test), allow(dead_code))]
-fn installs_equivalent(a: &ParsedInstall, b: &ParsedInstall) -> bool {
-    install_signature(a) == install_signature(b)
-}
-
 /// Recursion-bounded core of [`detect_installs`]. `depth` guards against a
 /// pathological `$(${...})` nesting (or future bug) that would otherwise
 /// recurse without bound. Each `sh -c` / `$(…)` / backtick body recurses

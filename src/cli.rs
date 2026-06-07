@@ -2362,6 +2362,7 @@ mod grep_format_flag_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -L names the grep --files-without-match flag
     fn short_L_triggers() {
         assert!(grep_format_flag_present(&args(&["-L", "pattern", "file"])));
     }
@@ -2372,6 +2373,7 @@ mod grep_format_flag_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -Z names the grep --null flag
     fn short_Z_triggers() {
         assert!(grep_format_flag_present(&args(&["-Z", "pattern"])));
     }
@@ -2502,6 +2504,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -R names the grep --dereference-recursive flag
     fn test_preprocess_grep_strips_capital_R() {
         let out = preprocess_grep_args(v(&["-Rn", "needle", "."]));
         assert_eq!(out, GrepPreprocess::Stripped(v(&["needle", ".", "-n"])));
@@ -2555,6 +2558,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // names the grep -iA3 bundled flags
     fn test_preprocess_grep_bundled_iA3_routes_passthrough_with_original() {
         // -iA3 contains a context flag bundled with -i. Route to passthrough
         // with original args so rg sees the full intent.
@@ -2607,6 +2611,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -B names the grep --before-context flag
     fn test_preprocess_grep_dash_B_alone_routes_passthrough() {
         let out = preprocess_grep_args(v(&["-B", "2", "needle", "file"]));
         assert_eq!(
@@ -2618,6 +2623,7 @@ mod grep_preprocess_tests {
     // ---- issue #97: strip -E no-op flag, route -H to passthrough ----
 
     #[test]
+    #[allow(non_snake_case)] // -E names the grep --extended-regexp flag
     fn test_preprocess_grep_strips_bare_E() {
         // -E (extended regex) is a no-op for rg → strip, clap parses cleanly.
         let out = preprocess_grep_args(v(&["-E", "needle", "a.txt"]));
@@ -2625,6 +2631,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -H names the grep --with-filename flag
     fn test_preprocess_grep_routes_bare_H_to_passthrough() {
         // Codex review of #96/#97: -H (print-filename) is NOT stripped —
         // doing so dropped filename output. It routes to passthrough so rg
@@ -2644,12 +2651,14 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -G names the grep --basic-regexp flag
     fn test_preprocess_grep_basic_regex_G_routes_passthrough() {
         let out = preprocess_grep_args(v(&["-G", "needle", "file"]));
         assert!(matches!(out, GrepPreprocess::Passthrough(_)), "got {out:?}");
     }
 
     #[test]
+    #[allow(non_snake_case)] // -rnE names bundled grep flags (incl. -E)
     fn test_preprocess_grep_strips_bundled_rnE() {
         // -rnE: r + E stripped, -n survives and reorders behind positionals.
         let out = preprocess_grep_args(v(&["-rnE", "needle", "."]));
@@ -2657,6 +2666,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -HnE names bundled grep flags (incl. -H, -E)
     fn test_preprocess_grep_bundled_HnE_routes_to_passthrough() {
         // -HnE: E stripped, but the surviving -Hn bundle carries -H so the
         // call routes to passthrough (rg honours -H natively). -n is kept.
@@ -2668,6 +2678,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -E names the grep --extended-regexp flag
     fn test_preprocess_grep_strips_E_only_bundle_fully() {
         // -E alone in a bundle leaves nothing → token dropped entirely.
         // The surviving -n reorders behind the positionals.
@@ -2676,6 +2687,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -E names the grep --extended-regexp flag
     fn test_preprocess_grep_E_with_context_strips_E_before_passthrough() {
         // -E + -A3: E stripped, context flag routes to passthrough.
         let out = preprocess_grep_args(v(&["-E", "-A3", "needle", "."]));
@@ -2716,6 +2728,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -E names the grep --extended-regexp flag
     fn test_preprocess_grep_E_then_pattern() {
         // `grep -E 'a|b' file` — E stripped (no-op for rg), positionals kept.
         let out = preprocess_grep_args(v(&["-E", "a|b", "file"]));
@@ -2734,6 +2747,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -A/-B name the grep --after/--before-context flags
     fn test_preprocess_grep_context_AB_routes_passthrough() {
         // `grep -A2 -B2 pattern file` — context flags route to passthrough
         // (rg honours them natively); never an `unexpected argument` error.
@@ -2892,6 +2906,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -E names the grep --extended-regexp flag
     fn test_pipeline_E_does_not_leave_clap_rejecting_flag() {
         let out = run_cli_grep_pipeline(v(&["-E", "needle", "a.txt"]));
         assert!(!pipeline_has_clap_rejecting_flag(&out), "got {:?}", out);
@@ -2899,6 +2914,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -H names the grep --with-filename flag
     fn test_pipeline_H_routes_to_passthrough_preserving_filename_flag() {
         // Codex review of #96/#97: `grep -H needle a.txt` routes to
         // passthrough with `-H` preserved so rg emits the filename prefix.
@@ -2909,6 +2925,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -rnE names bundled grep flags (incl. -E)
     fn test_pipeline_rnE_bundle_clean() {
         let out = run_cli_grep_pipeline(v(&["-rnE", "needle", "."]));
         assert!(!pipeline_has_clap_rejecting_flag(&out), "got {:?}", out);
@@ -2918,6 +2935,7 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    #[allow(non_snake_case)] // -HnE names bundled grep flags (incl. -H, -E)
     fn test_pipeline_HnE_bundle_routes_to_passthrough() {
         // -HnE: -E stripped, surviving -Hn bundle carries -H → passthrough.
         let out = run_cli_grep_pipeline(v(&["-HnE", "needle", "a.txt"]));

@@ -164,6 +164,91 @@ lazy_static! {
     static ref TRAILING_WHITESPACE: Regex = Regex::new(r"[ \t]+$").unwrap();
 }
 
+/// Scans a single line for C-style `/* ... */` block comments, preserving any
+/// code that lives outside the commented span.
+///
+/// Correctness rules (issue #471 — content loss in the language filter):
+/// - Code BEFORE `/*` and AFTER the matching `*/` is preserved, so an inline
+///   `let x = compute(); /* note */` keeps `let x = compute();`.
+/// - `/*` and `*/` that appear INSIDE a string literal (single or double
+///   quoted, honouring `\` escapes) are NOT treated as comment markers, so a
+///   line like `let g = "/*.txt";` never enters block-comment state.
+/// - `//` outside a string starts a line comment: the remainder is copied
+///   verbatim and block scanning stops, so `/*` after a `//` cannot latch.
+/// - While inside a block comment we deliberately do NOT track string state —
+///   apostrophes/quotes in prose (`/* don't */`) must not start a phantom
+///   string that swallows the closing `*/`. We only look for `*/`.
+///
+/// `in_block` is carried across lines for genuine multi-line block comments.
+/// Returns `(surviving_code, new_in_block_state)`.
+fn strip_c_block_comments(line: &str, mut in_block: bool) -> (String, bool) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0usize;
+    // Some(quote_char) while inside a string literal (only tracked outside
+    // block comments).
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if in_block {
+            // Inside a block comment: only `*/` matters. No string tracking
+            // (see doc comment — avoids the apostrophe-latch).
+            if c == '*' && chars.get(i + 1) == Some(&'/') {
+                in_block = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        if let Some(q) = in_string {
+            // Inside a string literal: copy verbatim, honour escapes, and only
+            // the matching quote can close it.
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Outside string and outside block comment.
+        if c == '"' || c == '\'' {
+            in_string = Some(c);
+            out.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            // Line comment: the rest of the line is a comment. Copy it verbatim
+            // so the caller's doc-comment (`///`) detection still works, and
+            // stop scanning (a `/*` after `//` must not enter block state).
+            out.extend(chars[i..].iter());
+            break;
+        }
+
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            in_block = true;
+            i += 2;
+            continue;
+        }
+
+        out.push(c);
+        i += 1;
+    }
+
+    (out, in_block)
+}
+
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
         let patterns = lang.comment_patterns();
@@ -171,46 +256,89 @@ impl FilterStrategy for MinimalFilter {
         let mut in_block_comment = false;
         let mut in_docstring = false;
 
+        // C-style `/* ... */` block comments get the quote-aware span scanner.
+        // Other "block" markers (`"""` for Python, `=begin`/`=end` for Ruby)
+        // are handled by their own dedicated paths below.
+        let c_style_block =
+            patterns.block_start == Some("/*") && patterns.block_end == Some("*/");
+
         for line in content.lines() {
             let trimmed = line.trim();
 
-            // Handle block comments
-            if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
-                if !in_docstring
-                    && trimmed.contains(start)
-                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
-                {
+            // --- Python docstrings (""" markers, kept in minimal mode) ---
+            if *lang == Language::Python {
+                if trimmed.starts_with("\"\"\"") {
+                    // Only toggle when an ODD number of delimiters appear on the
+                    // line. A one-line `"""doc"""` has two delimiters → no
+                    // toggle, so it never latches in_docstring on (the LOW bug).
+                    if trimmed.matches("\"\"\"").count() % 2 == 1 {
+                        in_docstring = !in_docstring;
+                    }
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
+                if in_docstring {
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
+            }
+
+            // --- Ruby block comments (=begin/=end, line-anchored) ---
+            if patterns.block_start == Some("=begin") {
+                if !in_block_comment && trimmed.starts_with("=begin") {
                     in_block_comment = true;
                 }
                 if in_block_comment {
-                    if trimmed.contains(end) {
+                    if trimmed.starts_with("=end") {
                         in_block_comment = false;
                     }
                     continue;
                 }
             }
 
-            // Handle Python docstrings (keep them in minimal mode)
-            if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
-                in_docstring = !in_docstring;
-                result.push_str(line);
-                result.push('\n');
-                continue;
+            // --- Doc block comments (`/** ... */`): preserve verbatim ---
+            // These carry API documentation; matching prior behaviour we keep
+            // the whole line rather than scanning it as a strippable comment.
+            if c_style_block && !in_block_comment {
+                if let Some(doc_start) = patterns.doc_block_start {
+                    if trimmed.starts_with(doc_start) {
+                        result.push_str(line);
+                        result.push('\n');
+                        continue;
+                    }
+                }
             }
 
-            if in_docstring {
-                result.push_str(line);
+            // --- C-style block comments: strip only the commented span ---
+            let effective = if c_style_block {
+                let (code, new_state) = strip_c_block_comments(line, in_block_comment);
+                in_block_comment = new_state;
+                code
+            } else {
+                line.to_string()
+            };
+            let eff_trimmed = effective.trim();
+
+            // Nothing survived the strip.
+            if eff_trimmed.is_empty() {
+                if !trimmed.is_empty() {
+                    // The line was entirely block comment — drop it.
+                    continue;
+                }
+                // Genuine blank line — normalize later.
                 result.push('\n');
                 continue;
             }
 
             // Skip single-line comments (but keep doc comments)
             if let Some(line_comment) = patterns.line {
-                if trimmed.starts_with(line_comment) {
+                if eff_trimmed.starts_with(line_comment) {
                     // Keep doc comments
                     if let Some(doc) = patterns.doc_line {
-                        if trimmed.starts_with(doc) {
-                            result.push_str(line);
+                        if eff_trimmed.starts_with(doc) {
+                            result.push_str(&effective);
                             result.push('\n');
                         }
                     }
@@ -218,13 +346,7 @@ impl FilterStrategy for MinimalFilter {
                 }
             }
 
-            // Skip empty lines at this point, we'll normalize later
-            if trimmed.is_empty() {
-                result.push('\n');
-                continue;
-            }
-
-            result.push_str(line);
+            result.push_str(&effective);
             result.push('\n');
         }
 
@@ -481,6 +603,132 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    // --- block-comment content-loss regressions (issue #471) ---
+
+    #[test]
+    fn test_inline_block_comment_preserves_code() {
+        // BUG 1: `let x = compute(); /* note */` previously dropped the whole
+        // line because it contained both /* and */. The code must survive.
+        let code = "let x = compute(); /* note */\nlet y = 2;";
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        assert!(
+            out.contains("let x = compute();"),
+            "inline /* */ must not drop the code before it; got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("/* note */"),
+            "the inline comment span itself should be stripped; got:\n{}",
+            out
+        );
+        assert!(out.contains("let y = 2;"), "following line must survive");
+    }
+
+    #[test]
+    fn test_slash_star_in_string_does_not_start_block_comment() {
+        // BUG 2 (the empirical repro): `/*` inside a string literal latched
+        // in_block_comment=true and swallowed the rest of the file.
+        let code = "\
+fn main() {
+    let glob = \"/*.txt\";
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    println!(\"{a} {b} {c}\");
+}";
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        // Every code line must survive — nothing latched.
+        for needle in [
+            "fn main()",
+            "let glob = \"/*.txt\";",
+            "let a = 1;",
+            "let b = 2;",
+            "let c = 3;",
+            "println!(\"{a} {b} {c}\");",
+        ] {
+            assert!(
+                out.contains(needle),
+                "line `{}` was lost — /* in a string literal latched block-comment state; got:\n{}",
+                needle,
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiline_block_comment_is_stripped() {
+        // Genuine multi-line /* ... */ comments must still be removed.
+        let code = "\
+let before = 1;
+/* this is
+   a real multi-line
+   block comment */
+let after = 2;";
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        assert!(out.contains("let before = 1;"));
+        assert!(out.contains("let after = 2;"));
+        assert!(
+            !out.contains("real multi-line"),
+            "multi-line block comment body must be stripped; got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_code_after_block_comment_close_survives() {
+        // Code trailing the */ on the closing line must be preserved.
+        let code = "\
+/* opening
+   middle */ let kept = 42;
+let also = 1;";
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        assert!(
+            out.contains("let kept = 42;"),
+            "code after the closing */ must survive; got:\n{}",
+            out
+        );
+        assert!(out.contains("let also = 1;"));
+    }
+
+    #[test]
+    fn test_star_slash_in_string_on_code_line_best_effort() {
+        // best-effort: a `*/` living inside a string literal on a normal code
+        // line must not corrupt the scan or lose following lines.
+        let code = "let p = \"*/\";\nlet keep = 1;";
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        assert!(out.contains("let p ="), "string containing */ preserved");
+        assert!(out.contains("let keep = 1;"), "following line survives");
+    }
+
+    #[test]
+    fn test_python_one_line_docstring_does_not_latch() {
+        // LOW bug: a one-line `"""doc"""` flipped in_docstring true and stuck,
+        // disabling comment stripping for the rest of the file.
+        let code = "\
+\"\"\"module docstring\"\"\"
+x = 1
+# this comment must still be stripped
+y = 2";
+        let out = MinimalFilter.filter(code, &Language::Python);
+        assert!(out.contains("\"\"\"module docstring\"\"\""));
+        assert!(out.contains("x = 1"));
+        assert!(out.contains("y = 2"));
+        assert!(
+            !out.contains("must still be stripped"),
+            "in_docstring latched on after a one-line docstring; got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_doc_block_comment_preserved() {
+        // Rust /** ... */ doc comments are kept verbatim (prior behaviour).
+        let code = "/** API docs */\npub fn f() {}";
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        assert!(out.contains("/** API docs */"), "doc block must be kept");
+        assert!(out.contains("pub fn f()"));
     }
 
     // --- truncation accuracy ---

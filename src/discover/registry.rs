@@ -617,7 +617,12 @@ fn collapse_line_continuations(s: &str) -> Cow<'_, str> {
         return Cow::Borrowed(s);
     }
 
-    let mut out = String::with_capacity(s.len());
+    // Accumulate raw bytes — the quote/continuation logic below is byte-safe,
+    // but the EMIT step must preserve multibyte UTF-8 exactly. Pushing
+    // `c as char` would Latin-1-reinterpret any byte >= 0x80 and corrupt
+    // non-ASCII chars in the rewritten command, so we collect bytes and decode
+    // once at the end.
+    let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut in_single = false;
@@ -630,10 +635,10 @@ fn collapse_line_continuations(s: &str) -> Cow<'_, str> {
         if !in_single && !in_double && c == b'\\' {
             if let Some(skip) = continuation_len(&bytes[i..]) {
                 // Trim trailing spaces/tabs we just pushed, then emit one space.
-                while matches!(out.as_bytes().last(), Some(b' ') | Some(b'\t')) {
+                while matches!(out.last(), Some(b' ') | Some(b'\t')) {
                     out.pop();
                 }
-                out.push(' ');
+                out.push(b' ');
                 i += skip;
                 // Skip leading horizontal whitespace after the newline.
                 while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
@@ -647,10 +652,10 @@ fn collapse_line_continuations(s: &str) -> Cow<'_, str> {
             b'"' if !in_single => in_double = !in_double,
             _ => {}
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    Cow::Owned(out)
+    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Length in bytes of a continuation sequence (`\` + `\r\n` | `\n` | `\r`)
@@ -5151,6 +5156,27 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git diff \\\nHEAD~1", &[]),
             Some("contextcrawler git diff HEAD~1".into())
+        );
+    }
+
+    #[test]
+    fn test_collapse_line_continuations_preserves_non_ascii() {
+        // MEDIUM UTF-8 fix: the emit step must preserve multibyte UTF-8 exactly.
+        // The old `out.push(c as char)` Latin-1-reinterpreted bytes >= 0x80,
+        // mangling "café" → "cafÃ©" in the rewritten command. Round-trip an
+        // unquoted continuation alongside non-ASCII text and a unicode path.
+        assert_eq!(
+            collapse_line_continuations("git commit -m café \\\n--author=x"),
+            "git commit -m café --author=x"
+        );
+        assert_eq!(
+            collapse_line_continuations("ls ./café/日本語 \\\n--all"),
+            "ls ./café/日本語 --all"
+        );
+        // Emoji (4-byte sequence) survives too.
+        assert_eq!(
+            collapse_line_continuations("echo 🚀 \\\nthere"),
+            "echo 🚀 there"
         );
     }
 }
