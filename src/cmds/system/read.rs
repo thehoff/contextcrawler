@@ -238,6 +238,18 @@ fn is_json_like_extension(ext: &str) -> bool {
     )
 }
 
+/// Prose files that carry no code structure worth preserving, so a large one
+/// is safe to head/tail-cap (with the recovery marker) exactly like an unknown
+/// extension. Deliberately narrow: free-form docs you skim (`md`/`txt`).
+/// Structured config (json/yaml/toml), `sql`, and dependency lockfiles
+/// (`Cargo.lock`/`Gemfile.lock` — inspected for exact pins) are intentionally
+/// excluded; mid-file capping would corrupt an edit or hide a pin (council
+/// finding). Telemetry motivation: untouched markdown (e.g. AGENTS.md read at
+/// 0% savings) was the single biggest input sink across real sessions.
+fn is_prose_cappable_extension(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "txt")
+}
+
 fn should_apply_unknown_extension_cap(
     ext: Option<&str>,
     lang: &Language,
@@ -247,8 +259,12 @@ fn should_apply_unknown_extension_cap(
     read_config: &config::ReadConfig,
     allow_unknown_cap: bool,
 ) -> bool {
+    // Cap applies to truly unknown extensions AND to large prose/data files
+    // that the language filter leaves untouched (markdown/txt/lock).
+    let cappable = *lang == Language::Unknown
+        || ext.is_some_and(is_prose_cappable_extension);
     if !allow_unknown_cap
-        || *lang != Language::Unknown
+        || !cappable
         || max_lines.is_some()
         || tail_lines.is_some()
         || input_tokens <= read_config.token_threshold
@@ -576,6 +592,118 @@ fn main() {{
                 )
             );
         }
+    }
+
+    #[test]
+    fn test_large_markdown_gets_capped() {
+        // Real-telemetry motivation: untouched markdown was the biggest 0%
+        // input sink. A large .md (Language::Data) must now hit the cap.
+        let mut input = String::new();
+        for i in 0..1500usize {
+            input.push_str(&format!("doc line {} with prose words here aplenty\n", i));
+        }
+        let cfg = config::ReadConfig::default();
+        let output = render_output(
+            &input,
+            Some("md"),
+            Language::Data,
+            FilterLevel::None,
+            None,
+            None,
+            &cfg,
+            true,
+            "AGENTS.md",
+            0,
+        );
+        assert!(
+            output.contains("ContextCrawler omitted middle"),
+            "large markdown must be capped with the recovery marker"
+        );
+        let saved = 100.0
+            - (tracking::estimate_tokens(&output) as f64
+                / tracking::estimate_tokens(&input) as f64
+                * 100.0);
+        assert!(saved > 60.0, "expected >60% savings on capped md, got {:.1}%", saved);
+    }
+
+    #[test]
+    fn test_small_markdown_not_capped() {
+        // Below the token threshold: leave it whole, no marker.
+        let input = "# Title\n\nA short note.\nNothing to cap here.\n";
+        let cfg = config::ReadConfig::default();
+        let output = render_output(
+            &input,
+            Some("md"),
+            Language::Data,
+            FilterLevel::None,
+            None,
+            None,
+            &cfg,
+            true,
+            "small.md",
+            0,
+        );
+        assert!(!output.contains("ContextCrawler omitted middle"));
+    }
+
+    #[test]
+    fn test_structured_data_and_sql_not_capped() {
+        // Config/data/sql are Data but NOT prose-cappable: capping mid-file
+        // would corrupt an edit, so they must pass through untouched.
+        let mut input = String::new();
+        for i in 0..1500usize {
+            input.push_str(&format!("key_{}: value with enough tokens to exceed\n", i));
+        }
+        let cfg = config::ReadConfig::default();
+        // `lock` is excluded too: lockfiles are inspected for exact pins, so
+        // mid-file capping could hide them (council finding).
+        for ext in ["yaml", "toml", "sql", "csv", "lock"] {
+            let output = render_output(
+                &input,
+                Some(ext),
+                Language::Data,
+                FilterLevel::None,
+                None,
+                None,
+                &cfg,
+                true,
+                &format!("data.{}", ext),
+                0,
+            );
+            assert!(
+                !output.contains("ContextCrawler omitted middle"),
+                ".{} must not be capped (edit-safety)",
+                ext
+            );
+            assert_eq!(output.lines().count(), input.lines().count());
+        }
+    }
+
+    #[test]
+    fn test_markdown_passthrough_allowlist_overrides_cap() {
+        // A user who allowlists .md must still get full content.
+        let mut input = String::new();
+        for i in 0..1500usize {
+            input.push_str(&format!("doc line {} with prose words here aplenty\n", i));
+        }
+        let cfg = config::ReadConfig {
+            passthrough_extensions: vec!["md".to_string()],
+            ..config::ReadConfig::default()
+        };
+        let output = render_output(
+            &input,
+            Some("md"),
+            Language::Data,
+            FilterLevel::None,
+            None,
+            None,
+            &cfg,
+            true,
+            "AGENTS.md",
+            0,
+        );
+        assert!(!output.contains("ContextCrawler omitted middle"));
+        assert_eq!(output.lines().count(), input.lines().count());
     }
 
     #[test]

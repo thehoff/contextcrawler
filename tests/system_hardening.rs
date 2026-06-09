@@ -190,3 +190,46 @@ fn grep_path_starting_with_dash_is_treated_as_path() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+/// `read --tail-lines N` with NO positional files and piped stdin must read
+/// stdin (like `cat`/`tail`) and exit 0 — not hard-error on a missing
+/// argument. Regression guard for the clap `required = true` removal.
+#[test]
+fn read_no_files_reads_piped_stdin() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let input: String = (1..=100).map(|i| format!("{}\n", i)).collect();
+
+    let mut child = Command::new(binary_path())
+        .args(["read", "--tail-lines", "20"])
+        .env("CONTEXTCRAWLER_TEST_MODE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn contextcrawler read");
+
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+
+    let out = child.wait_with_output().expect("wait for read");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "read with no files + piped stdin should exit 0; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(stdout.contains("100"), "should show last lines, got:\n{}", stdout);
+    assert!(
+        !stdout.contains("a value is required"),
+        "must not emit the clap missing-arg error, got:\n{}",
+        stdout,
+    );
+}

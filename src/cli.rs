@@ -94,8 +94,9 @@ pub(crate) enum Commands {
 
     /// Read file with intelligent filtering
     Read {
-        /// Files to read (supports multiple, like cat)
-        #[arg(required = true, num_args = 1..)]
+        /// Files to read (supports multiple, like cat). With no files given,
+        /// reads stdin — so a stray `read --tail-lines N` behaves like
+        /// `tail`/`cat` instead of hard-erroring on a missing argument.
         files: Vec<PathBuf>,
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
@@ -3185,6 +3186,23 @@ fn run_cli() -> Result<i32> {
             let mut had_error = false;
             let mut stdin_seen = false;
             let intent_ref = intent.as_deref();
+            // No files given: behave like `cat`/`tail` and read stdin when it is
+            // piped/redirected (e.g. a rewritten `tail -n N` whose path was
+            // dropped) — fails soft instead of a clap missing-arg crash. But if
+            // stdin is an interactive terminal there is nothing to read, so keep
+            // the old error rather than blocking on the TTY (council finding).
+            let files = if files.is_empty() {
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    eprintln!(
+                        "contextcrawler read: no file given and stdin is a terminal — nothing to read"
+                    );
+                    return Ok(2);
+                }
+                vec![PathBuf::from("-")]
+            } else {
+                files
+            };
             for file in &files {
                 let result = if file == Path::new("-") {
                     if stdin_seen {
