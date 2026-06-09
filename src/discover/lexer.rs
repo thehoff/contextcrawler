@@ -351,9 +351,16 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
 /// tokenises `\n`, `(` and `)` as Shellism control tokens, so this builds on
 /// the shared [`tokenize`] rather than re-tokenising.
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
-    if contains_substitution(cmd) {
-        return true;
-    }
+    contains_substitution(cmd) || has_file_write_redirect(cmd)
+}
+
+/// The redirect-only half of [`contains_unattestable_construct`]: a real
+/// file-*write* target (`>file`/`>>file`/`>&file`/`&>file`), with fd-dups
+/// (`2>&1`) and `/dev/null` exempt. A write target is a side effect with no
+/// command to attest, so the permission gate always downgrades it to Ask —
+/// unlike command substitutions, which can now be attested compositionally
+/// when their payloads are safe value-producers (#2286 follow-up).
+pub fn has_file_write_redirect(cmd: &str) -> bool {
     let tokens = tokenize(cmd);
     tokens
         .iter()
