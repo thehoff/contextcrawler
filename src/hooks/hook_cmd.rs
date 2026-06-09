@@ -658,7 +658,8 @@ fn process_claude_payload_with_gate(
                     } else {
                         "contextcrawler: command is not auto-evaluable (command \
                          substitution or file-write redirect) with no safe rewrite \
-                         — deferring to you (#2286)"
+                         — deferring to you (#2286). Trusted unattended session? \
+                         set CONTEXTCRAWLER_TRUST_UNATTESTABLE=1 to skip this prompt."
                             .to_string()
                     }
                 });
