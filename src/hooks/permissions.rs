@@ -110,10 +110,14 @@ fn substitutions_are_safe(cmd: &str) -> bool {
 /// answer. Deny rules are unaffected — this only relaxes the substitution /
 /// file-write-redirect downgrade, never a hard deny.
 fn unattestable_gate_trusted() -> bool {
-    matches!(
-        std::env::var("CONTEXTCRAWLER_TRUST_UNATTESTABLE").as_deref(),
-        Ok("1") | Ok("true")
-    )
+    trust_value_enables(std::env::var("CONTEXTCRAWLER_TRUST_UNATTESTABLE").ok().as_deref())
+}
+
+/// Pure parse of the trust env value (no env access — testable without mutating
+/// process env). Only an exact, case-sensitive `1` or `true` enables; absent,
+/// empty, `0`, `TRUE`, etc. all stay disabled (safe default).
+fn trust_value_enables(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("true"))
 }
 
 /// Internal implementation allowing tests to inject rules without file I/O.
@@ -2101,16 +2105,18 @@ mod adversarial_trace {
             PermissionVerdict::Ask
         );
 
-        // Trusted: never Ask. With a partial allow set the payload segment isn't
-        // matched so it's Default (→ host decides); with a full allow set it
-        // reaches Allow.
-        assert_ne!(
+        // Trusted, PARTIAL/no allow set: the payload segment isn't matched, so
+        // the verdict must be exactly Default (defer to host) — NOT a silent
+        // Allow. Pinning Default is the crucial security property (council).
+        assert_eq!(
             check_command_with_rules_trusted(curl_cat, &[], &[], &["curl *".to_string()], true),
-            PermissionVerdict::Ask
+            PermissionVerdict::Default,
+            "trusted + unmatched payload must defer (Default), never silently Allow"
         );
-        assert_ne!(
+        assert_eq!(
             check_command_with_rules_trusted(redirect, &[], &[], &[], true),
-            PermissionVerdict::Ask
+            PermissionVerdict::Default,
+            "trusted redirect with no allow rules must be Default, not Allow"
         );
         // Full allow set (outer + payload) → trusted reaches Allow.
         let full = vec!["curl *".to_string(), "cat *".to_string()];
@@ -2118,6 +2124,17 @@ mod adversarial_trace {
             check_command_with_rules_trusted(curl_cat, &[], &[], &full, true),
             PermissionVerdict::Allow
         );
+    }
+
+    #[test]
+    fn test_trust_value_parsing_is_strict() {
+        // Only exact "1"/"true" enable; everything else (incl. empty, "0",
+        // "TRUE", absent) stays disabled — safe default (council follow-up).
+        assert!(trust_value_enables(Some("1")));
+        assert!(trust_value_enables(Some("true")));
+        for v in [None, Some(""), Some("0"), Some("TRUE"), Some("True"), Some("yes"), Some(" 1")] {
+            assert!(!trust_value_enables(v), "{v:?} must NOT enable trust");
+        }
     }
 
     #[test]
