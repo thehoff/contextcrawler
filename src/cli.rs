@@ -1301,8 +1301,20 @@ fn cloud_fallback_hardening(tool: &str, args: &[String]) -> Option<i32> {
     }
 }
 
+/// Whether a clap parse error means "this isn't a contextcrawler command at
+/// all" — an unknown top-level subcommand (e.g. `cortextos`, `bash`, `touch`) —
+/// as opposed to a real parse failure on a command we DO own. Foreign commands
+/// are pure passthrough: recording them as parse-failures or 0-saving rows
+/// pollutes `gain`/`discover` with traffic contextcrawler was never a candidate
+/// to filter (#196 follow-up). Only `InvalidSubcommand` is treated as foreign —
+/// bad-args errors on known subcommands stay tracked as genuine failures.
+fn is_foreign_command(parse_error: &clap::Error) -> bool {
+    matches!(parse_error.kind(), ErrorKind::InvalidSubcommand)
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let foreign = is_foreign_command(&parse_error);
 
     // No args → show Clap's error (user ran just "contextcrawler" with bad syntax)
     if args.is_empty() {
@@ -1421,17 +1433,28 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
         match status {
             Ok(s) => {
-                timer.track_passthrough(
-                    &raw_command,
-                    &format!("contextcrawler fallback: {}", raw_command),
-                );
-
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                // Foreign commands (unknown subcommand → not ours) pass through
+                // silently and are NOT tracked: they're neither a savings
+                // opportunity nor a parse failure, so counting them skews the
+                // metric and floods `discover`. Real fallbacks still tracked.
+                if !foreign {
+                    timer.track_passthrough(
+                        &raw_command,
+                        &format!("contextcrawler fallback: {}", raw_command),
+                    );
+                    core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                }
 
                 Ok(core::utils::exit_code_from_status(&s, &raw_command))
             }
             Err(e) => {
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                if !foreign {
+                    core::tracking::record_parse_failure_silent(
+                        &raw_command,
+                        &error_message,
+                        false,
+                    );
+                }
                 // Command not found or other OS error — single message, no duplicate Clap error
                 eprintln!("[contextcrawler: {}]", e);
                 Ok(127)
@@ -4498,6 +4521,29 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn test_is_foreign_command_distinguishes_unknown_from_bad_args() {
+        // `Cli` has no Debug derive, so unwrap_err() won't compile — match instead.
+        let parse_err = |argv: &[&str]| match Cli::try_parse_from(argv) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a parse error for {argv:?}"),
+        };
+        // Unknown top-level subcommand (e.g. `cortextos`) → foreign → not tracked.
+        let err = parse_err(&["contextcrawler", "cortextos", "bus", "x"]);
+        assert!(
+            is_foreign_command(&err),
+            "unknown subcommand must be foreign; got {:?}",
+            err.kind()
+        );
+        // Bad flag on a command we OWN → a real parse failure, still tracked.
+        let err2 = parse_err(&["contextcrawler", "read", "--nope-not-a-flag"]);
+        assert!(
+            !is_foreign_command(&err2),
+            "bad args on a known command must NOT be foreign; got {:?}",
+            err2.kind()
+        );
+    }
 
     #[test]
     fn test_proxy_wrapped_equivalent_known_tools() {
