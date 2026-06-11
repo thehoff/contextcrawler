@@ -76,7 +76,13 @@ fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
     if uses_compact_status_path(args) {
-        cmd.args(["--porcelain", "-b", "-uall"]);
+        // No -uall: it expands fully-untracked dirs into every file, while raw
+        // `git status` collapses them (e.g. node_modules/). -uall made our output
+        // exceed raw (~29x on a 200-file untracked dir), violating compress-or-
+        // match-raw and inflating tokens — hidden by the floored savings_pct.
+        // Aligns with upstream rtk #2035. Modified/staged/renamed/conflict paths
+        // are unaffected by -uall and remain fully shown by the formatter.
+        cmd.args(["--porcelain", "-b"]);
     } else {
         cmd.args(args);
     }
@@ -2267,10 +2273,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_status_command_default_includes_uall() {
+    fn test_build_status_command_default_compact() {
         let cmd = build_status_command(&[], &[]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
@@ -2297,7 +2303,7 @@ mod tests {
         let args = vec!["--short".to_string(), "--branch".to_string()];
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 ## Specifics
 
 - **git.rs** uses `trailing_var_arg = true` + `allow_hyphen_values = true` so native git flags (`--oneline`, `--cached`, etc.) pass through correctly
-- Default `git status` uses `--porcelain -b -uall` so nested untracked files stay visible; branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
+- Default `git status` uses `--porcelain -b` (no `-uall`, aligning with upstream rtk #2035): `-uall` expanded fully-untracked dirs into every file while raw git collapses them, inflating output ~29x on large untracked dirs and breaking compress-or-match-raw. Untracked dirs now collapse exactly like raw; branch/short-only flags reuse the compact path, other explicit args still pass through unchanged
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines
 - **glab_cmd.rs** declares `-R`/`--repo` and `-g`/`--group` at the clap level; they are **appended** to the glab args (not prepended) so subcommand dispatch stays intact
