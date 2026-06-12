@@ -9,8 +9,27 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 
 lazy_static! {
+    // Non-pretty tsc: `file(line,col): error TSxxxx: message` (the `--pretty false`
+    // / CI format). Capture order: 1=file 2=line 3=col 4=severity 5=code 6=message.
     static ref TSC_ERROR: Regex =
         Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap();
+
+    // Pretty tsc (the DEFAULT in a TTY and many CI configs):
+    // `file:line:col - error TSxxxx: message`. Same capture order as TSC_ERROR so
+    // both call sites can try one then the other without re-indexing groups.
+    // Without this, pretty output matched nothing and the filter reported
+    // "TypeScript compilation completed" while hiding every error (lying success).
+    static ref TSC_ERROR_PRETTY: Regex =
+        Regex::new(r"^(.+?):(\d+):(\d+)\s+-\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap();
+}
+
+/// Match a tsc diagnostic header in either the non-pretty `file(line,col):` or
+/// the pretty `file:line:col -` form. Both regexes share capture-group order
+/// (1=file 2=line 3=col 4=severity 5=code 6=message).
+fn match_tsc_error(line: &str) -> Option<regex::Captures<'_>> {
+    TSC_ERROR
+        .captures(line)
+        .or_else(|| TSC_ERROR_PRETTY.captures(line))
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -67,7 +86,7 @@ impl BlockHandler for TscHandler {
     }
 
     fn is_block_start(&mut self, line: &str) -> bool {
-        if let Some(caps) = TSC_ERROR.captures(line) {
+        if let Some(caps) = match_tsc_error(line) {
             self.error_count += 1;
             self.files.insert(caps[1].to_string());
             *self.code_counts.entry(caps[5].to_string()).or_insert(0) += 1;
@@ -140,7 +159,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
 
     while i < lines.len() {
         let line = lines[i];
-        if let Some(caps) = TSC_ERROR.captures(line) {
+        if let Some(caps) = match_tsc_error(line) {
             let mut err = TsError {
                 file: caps[1].to_string(),
                 line: caps[2].parse().unwrap_or(0),
@@ -155,7 +174,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
                 let next = lines[i];
                 if !next.is_empty()
                     && (next.starts_with("  ") || next.starts_with('\t'))
-                    && !TSC_ERROR.is_match(next)
+                    && match_tsc_error(next).is_none()
                 {
                     err.context_lines.push(next.trim().to_string());
                     i += 1;
@@ -287,6 +306,52 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
     }
 
     #[test]
+    fn test_pretty_format_errors_recognised() {
+        // tsc's DEFAULT (pretty) format: `file:line:col - error TSxxxx`, with a
+        // code frame the filter should ignore. Regression: pretty output used to
+        // match nothing and report "TypeScript compilation completed", hiding
+        // every error (lying success). Caught by the proof harness.
+        let output = "\
+src/api/client.ts:42:7 - error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+
+42       baseUrl: process.env.API_BASE,
+         ~~~~~~~
+
+src/components/Cart.tsx:115:9 - error TS2532: Object is possibly 'undefined'.
+
+115         total += items[i].price;
+            ~~~~~~~~~~~~~~~~~~~~~~~~
+
+Found 2 errors in 2 files.
+";
+        let result = filter_tsc_output(output);
+        assert!(
+            result.contains("TypeScript: 2 errors in 2 files"),
+            "pretty errors must be counted, got:\n{result}"
+        );
+        assert!(result.contains("TS2322"));
+        assert!(result.contains("TS2532"));
+        assert!(result.contains("client.ts"));
+        assert!(result.contains("Cart.tsx"));
+        // The exact lying-success string must never appear when errors exist.
+        assert!(!result.contains("compilation completed"));
+    }
+
+    #[test]
+    fn test_pretty_and_non_pretty_mixed_count() {
+        // Defensive: both forms recognised in one stream, no double counting.
+        let output = "\
+src/a.ts:1:1 - error TS1000: pretty form.
+src/b.ts(2,2): error TS1001: non-pretty form.
+";
+        let result = filter_tsc_output(output);
+        assert!(
+            result.contains("TypeScript: 2 errors in 2 files"),
+            "{result}"
+        );
+    }
+
+    #[test]
     fn test_no_file_limit() {
         // 15 files with errors — all must appear
         let mut output = String::new();
@@ -356,7 +421,11 @@ Found 3 errors in 2 files.
             "must not claim success on failed run: {}",
             result
         );
-        assert!(result.contains("TS5083"), "must surface real error: {}", result);
+        assert!(
+            result.contains("TS5083"),
+            "must surface real error: {}",
+            result
+        );
         assert!(result.contains("failed (exit 1)"), "got: {}", result);
     }
 
