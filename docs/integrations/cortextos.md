@@ -83,6 +83,4 @@ contextcrawler gain            # token-savings analytics
 contextcrawler gain --history  # per-command history
 ```
 
-That is the whole integration. Everything below is about turning this manual
-recipe into something the cortextOS community can discover and install.
-
+That is the whole integration. 
