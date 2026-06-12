@@ -1,0 +1,53 @@
+   Compiling proc-macro2 v1.0.86
+   Compiling unicode-ident v1.0.12
+   Compiling libc v0.2.155
+   Compiling cfg-if v1.0.0
+   Compiling serde v1.0.203
+   Compiling quote v1.0.36
+   Compiling syn v2.0.68
+   Compiling serde_derive v1.0.203
+   Compiling widget-core v0.4.0 (/home/dev/widget-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.42s
+     Running unittests src/lib.rs (target/debug/deps/widget_core-9c3a1f2b7d4e5a60)
+
+running 24 tests
+test layout::tests::test_flex_basis_auto ... ok
+test layout::tests::test_flex_grow_distributes ... ok
+test layout::tests::test_margin_collapse ... ok
+test layout::tests::test_padding_box ... ok
+test render::tests::test_clip_rect ... ok
+test render::tests::test_z_order_stable ... ok
+test render::tests::test_widget_overflow ... FAILED
+test render::tests::test_dirty_region_merge ... ok
+test text::tests::test_grapheme_boundaries ... ok
+test text::tests::test_bidi_reorder ... ok
+test text::tests::test_line_wrap_cjk ... ok
+test theme::tests::test_token_resolution ... ok
+test theme::tests::test_dark_mode_override ... ok
+test events::tests::test_bubble_phase ... ok
+test events::tests::test_capture_phase ... ok
+test events::tests::test_pointer_capture ... ok
+test a11y::tests::test_role_mapping ... ok
+test a11y::tests::test_focus_order ... ok
+test state::tests::test_signal_propagation ... ok
+test state::tests::test_batched_updates ... ok
+test state::tests::test_memo_invalidation ... ok
+test geometry::tests::test_affine_compose ... ok
+test geometry::tests::test_rect_intersect ... ok
+test geometry::tests::test_point_in_poly ... ok
+
+failures:
+
+---- render::tests::test_widget_overflow stdout ----
+thread 'render::tests::test_widget_overflow' panicked at src/render/clip.rs:142:9:
+assertion `left == right` failed: overflow child must be clipped to parent bounds
+  left: Rect { x: 0, y: 0, w: 320, h: 480 }
+ right: Rect { x: 0, y: 0, w: 320, h: 240 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    render::tests::test_widget_overflow
+
+test result: FAILED. 23 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `--lib`

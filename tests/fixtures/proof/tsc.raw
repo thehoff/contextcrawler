@@ -1,0 +1,15 @@
+> payments-web@2.3.0 build
+> tsc --noEmit -p tsconfig.json
+
+src/api/client.ts(42,7): error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+src/api/client.ts(88,5): error TS2554: Expected 2 arguments, but got 1.
+src/api/client.ts(91,5): error TS2554: Expected 2 arguments, but got 1.
+src/api/client.ts(104,9): error TS18048: 'response.body' is possibly 'undefined'.
+src/components/Cart.tsx(115,9): error TS2532: Object is possibly 'undefined'.
+src/components/Cart.tsx(118,9): error TS2532: Object is possibly 'undefined'.
+src/components/Checkout.tsx(54,13): error TS2741: Property 'currency' is missing in type '{ amount: number; }' but required in type 'Money'.
+src/hooks/useCheckout.ts(33,11): error TS7006: Parameter 'evt' implicitly has an 'any' type.
+src/hooks/useCheckout.ts(47,7): error TS2367: This comparison appears to be unintentional because the types 'CheckoutState' and 'string' have no overlap.
+src/lib/money.ts(22,3): error TS2416: Property 'format' in type 'Money' is not assignable to the same property in base type 'Formattable'.
+
+Found 10 errors in 5 files.

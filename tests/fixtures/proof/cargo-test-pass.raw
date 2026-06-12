@@ -1,0 +1,34 @@
+   Compiling serde v1.0.203
+   Compiling money-core v0.2.0 (/home/dev/money-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.18s
+     Running unittests src/lib.rs (target/debug/deps/money_core-1a2b3c4d5e6f7a80)
+
+running 18 tests
+test amount::tests::test_add_same_currency ... ok
+test amount::tests::test_add_rejects_mismatch ... ok
+test amount::tests::test_subtract_floor_zero ... ok
+test amount::tests::test_multiply_scalar ... ok
+test rounding::tests::test_half_even_down ... ok
+test rounding::tests::test_half_even_up ... ok
+test rounding::tests::test_half_even_tie ... ok
+test rounding::tests::test_round_trip_cents ... ok
+test currency::tests::test_iso_lookup ... ok
+test currency::tests::test_minor_units_jpy ... ok
+test currency::tests::test_minor_units_aud ... ok
+test fx::tests::test_convert_identity ... ok
+test fx::tests::test_convert_cross_rate ... ok
+test fx::tests::test_convert_missing_pair ... ok
+test format::tests::test_format_aud ... ok
+test format::tests::test_format_jpy_no_decimals ... ok
+test format::tests::test_parse_roundtrip ... ok
+test ledger::tests::test_running_balance ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests money-core
+
+running 2 tests
+test src/lib.rs - (line 12) ... ok
+test src/amount.rs - Amount (line 44) ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s

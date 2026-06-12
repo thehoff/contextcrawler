@@ -1,0 +1,33 @@
+diff --git a/src/render/clip.rs b/src/render/clip.rs
+index 3a1f9c2..b7e4d80 100644
+--- a/src/render/clip.rs
++++ b/src/render/clip.rs
+@@ -138,9 +138,11 @@ impl ClipStack {
+     pub fn clip_child(&self, parent: Rect, child: Rect) -> Rect {
+-        // BUG: returned the child unclipped, ignoring parent bounds
+-        child
++        Rect {
++            x: child.x.max(parent.x),
++            y: child.y.max(parent.y),
++            w: child.w.min(parent.w),
++            h: child.h.min(parent.h),
++        }
+     }
+
+     pub fn push(&mut self, r: Rect) {
+@@ -201,6 +203,7 @@ impl ClipStack {
+     pub fn reset(&mut self) {
+         self.stack.clear();
++        self.dirty = true;
+     }
+ }
+diff --git a/src/render/mod.rs b/src/render/mod.rs
+index 9d2c1a4..1e8b3f5 100644
+--- a/src/render/mod.rs
++++ b/src/render/mod.rs
+@@ -12,6 +12,7 @@ mod clip;
+ mod paint;
+ mod surface;
++mod overflow;
+
+ pub use clip::ClipStack;

@@ -1,0 +1,15 @@
+{"Time":"2026-06-12T11:40:01.1Z","Action":"start","Package":"example.com/ledger"}
+{"Time":"2026-06-12T11:40:01.2Z","Action":"run","Package":"example.com/ledger","Test":"TestPostingBalances"}
+{"Time":"2026-06-12T11:40:01.2Z","Action":"output","Package":"example.com/ledger","Test":"TestPostingBalances","Output":"=== RUN   TestPostingBalances\n"}
+{"Time":"2026-06-12T11:40:01.3Z","Action":"pass","Package":"example.com/ledger","Test":"TestPostingBalances","Elapsed":0.01}
+{"Time":"2026-06-12T11:40:01.3Z","Action":"run","Package":"example.com/ledger","Test":"TestDoubleEntryInvariant"}
+{"Time":"2026-06-12T11:40:01.3Z","Action":"output","Package":"example.com/ledger","Test":"TestDoubleEntryInvariant","Output":"=== RUN   TestDoubleEntryInvariant\n"}
+{"Time":"2026-06-12T11:40:01.4Z","Action":"pass","Package":"example.com/ledger","Test":"TestDoubleEntryInvariant","Elapsed":0.02}
+{"Time":"2026-06-12T11:40:01.4Z","Action":"run","Package":"example.com/ledger","Test":"TestRefundRoundsHalfEven"}
+{"Time":"2026-06-12T11:40:01.4Z","Action":"output","Package":"example.com/ledger","Test":"TestRefundRoundsHalfEven","Output":"=== RUN   TestRefundRoundsHalfEven\n"}
+{"Time":"2026-06-12T11:40:01.5Z","Action":"output","Package":"example.com/ledger","Test":"TestRefundRoundsHalfEven","Output":"    refund_test.go:61: refund of 0.333 of 1000: got 334, want 333\n"}
+{"Time":"2026-06-12T11:40:01.5Z","Action":"fail","Package":"example.com/ledger","Test":"TestRefundRoundsHalfEven","Elapsed":0.01}
+{"Time":"2026-06-12T11:40:01.5Z","Action":"run","Package":"example.com/ledger","Test":"TestStatementPagination"}
+{"Time":"2026-06-12T11:40:01.6Z","Action":"pass","Package":"example.com/ledger","Test":"TestStatementPagination","Elapsed":0.03}
+{"Time":"2026-06-12T11:40:01.6Z","Action":"output","Package":"example.com/ledger","Output":"FAIL\n"}
+{"Time":"2026-06-12T11:40:01.6Z","Action":"fail","Package":"example.com/ledger","Elapsed":0.51}
