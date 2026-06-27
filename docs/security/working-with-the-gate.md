@@ -93,10 +93,10 @@ host, the rules that fired, and a copy-paste fix — `--scope repo` first, then
 ```
 contextcrawler: Tirith flagged this command before it ran.
   rules: plain_http_to_sink, private_network_access
-  host gitea.example.com:
-    trust here:       tirith trust add gitea.example.com --scope repo
-    trust everywhere: tirith trust add gitea.example.com --scope user
-  review: tirith trust last   ·   why: tirith why
+  host:  gitea.example.com
+  trust (this repo):  tirith trust add gitea.example.com --scope repo
+  trust (everywhere): tirith trust add gitea.example.com --scope user
+  review / why:       tirith trust last   ·   tirith why
 ```
 
 Only the host is ever shown — never the path/query/credentials. Pattern-only

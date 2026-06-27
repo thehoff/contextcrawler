@@ -651,12 +651,12 @@ pub fn suggest_trust(tirith_json: &str) -> Option<String> {
     out.push_str(&format!("  rules: {}\n", rules.join(", ")));
 
     for host in hosts.iter().take(MAX_HOSTS) {
-        out.push_str(&format!("  host {host}:\n"));
+        out.push_str(&format!("  host:  {host}\n"));
         out.push_str(&format!(
-            "    trust here:       tirith trust add {host} --scope repo\n"
+            "  trust (this repo):  tirith trust add {host} --scope repo\n"
         ));
         out.push_str(&format!(
-            "    trust everywhere: tirith trust add {host} --scope user\n"
+            "  trust (everywhere): tirith trust add {host} --scope user\n"
         ));
     }
     if hosts.len() > MAX_HOSTS {
@@ -667,14 +667,13 @@ pub fn suggest_trust(tirith_json: &str) -> Option<String> {
         // Pattern-only findings (e.g. pipe_to_interpreter) have no host to
         // trust — and are the shape most prone to false positives. Point at
         // inspection rather than fabricating a trust target.
-        out.push_str("  no host to trust (pattern rule) — may be a false positive.\n");
-        out.push_str("  inspect: tirith why\n");
+        out.push_str("  no host to trust (pattern rule) — inspect with tirith why.\n");
     } else {
         if any_pattern_only {
             out.push_str("  (some findings are pattern rules with no host — see tirith why)\n");
         }
-        out.push_str("  review: tirith trust last   ·   why: tirith why\n");
     }
+    out.push_str("  review / why:       tirith trust last   ·   tirith why\n");
     Some(out)
 }
 
@@ -781,6 +780,7 @@ mod tests {
         let out = suggest_trust(json).expect("should suggest");
         assert!(out.contains("pipe_to_interpreter"));
         assert!(out.contains("tirith why"));
+        assert!(out.contains("tirith trust last"));
         assert!(!out.contains("trust add"), "no host → no fabricated trust target");
     }
 
