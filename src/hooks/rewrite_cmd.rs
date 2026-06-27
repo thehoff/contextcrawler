@@ -300,7 +300,7 @@ mod tests {
         ///   Ask            → 3 (ask — install set unvettable, fail closed)
         ///   Unavailable    → 3 (ask — gate could not verify, fail closed)
         fn supply_chain_exit_code(v: &Verdict) -> i32 {
-            match gate_decision(&tirith_gate::Verdict::Allow, v) {
+            match gate_decision("npm install example", &tirith_gate::Verdict::Allow, v) {
                 GateDecision::Proceed => 0,
                 GateDecision::Ask { .. } => 3,
                 GateDecision::Deny { .. } => 3,
