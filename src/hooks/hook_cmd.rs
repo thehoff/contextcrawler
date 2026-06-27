@@ -14,21 +14,48 @@ use super::{supply_chain_gate, tirith_gate};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
+const STDIN_READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn read_stdin_limited() -> Result<String> {
-    let mut input = String::new();
-    io::stdin()
-        .take((STDIN_CAP + 1) as u64)
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
-    if input.len() > STDIN_CAP {
-        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+    read_stdin_limited_with_timeout(io::stdin(), STDIN_READ_TIMEOUT)
+}
+
+fn read_stdin_limited_with_timeout<R>(reader: R, timeout: Duration) -> Result<String>
+where
+    R: Read + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut input = String::new();
+        let result = reader
+            .take((STDIN_CAP + 1) as u64)
+            .read_to_string(&mut input)
+            .context("Failed to read stdin")
+            .and_then(|_| {
+                if input.len() > STDIN_CAP {
+                    anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+                }
+                Ok(input)
+            });
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("hook stdin read timed out after {}ms", timeout.as_millis())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("hook stdin reader disconnected")
+        }
     }
-    Ok(input)
 }
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
@@ -46,7 +73,15 @@ enum HookFormat {
 /// Run the Copilot preToolUse hook.
 /// Auto-detects VS Code Copilot Chat vs Copilot CLI format.
 pub fn run_copilot() -> Result<()> {
-    let input = read_stdin_limited()?;
+    let input = match read_stdin_limited() {
+        Ok(input) => input,
+        Err(e) => {
+            // Fail OPEN: Copilot remains the permission backstop and a hook
+            // read timeout must not wedge the shell tool invocation.
+            let _ = writeln!(io::stderr(), "[contextcrawler hook] {e}");
+            return Ok(());
+        }
+    };
 
     let input = input.trim();
     if input.is_empty() {
@@ -867,7 +902,16 @@ fn strip_leading_bom(input: &str) -> &str {
 
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
-    let input = read_stdin_limited()?;
+    let input = match read_stdin_limited() {
+        Ok(input) => input,
+        Err(e) => {
+            // Fail OPEN: Cursor's own permission engine is the backstop, and
+            // `{}` is the existing pass-through shape for malformed payloads.
+            let _ = writeln!(io::stderr(), "[contextcrawler hook] {e}");
+            let _ = writeln!(io::stdout(), "{{}}");
+            return Ok(());
+        }
+    };
 
     let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
@@ -1168,14 +1212,11 @@ mod tests {
         // gate (mirrors Tirith default-off). Auto-allow only happens on a true
         // `Allow` verdict, which the unattestable gate downgrades to `Ask`.
         let allow = vec!["*".to_string()];
-        let check = move |c: &str| {
-            permissions::check_command_with_rules(c, &[], &[], &allow)
-        };
+        let check = move |c: &str| permissions::check_command_with_rules(c, &[], &[], &allow);
         let v: Value = serde_json::from_str(&claude_input(cmd)).unwrap();
         match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
             PayloadAction::Rewrite { output, .. } => {
-                output.pointer("/hookSpecificOutput/permissionDecision")
-                    == Some(&json!("allow"))
+                output.pointer("/hookSpecificOutput/permissionDecision") == Some(&json!("allow"))
             }
             _ => false,
         }
@@ -1192,9 +1233,7 @@ mod tests {
     fn test_live_substitution_never_auto_allows() {
         assert!(!auto_allowed_on_live_path("git status `whoami`"));
         assert!(!auto_allowed_on_live_path("git log --pretty=$(whoami)"));
-        assert!(!auto_allowed_on_live_path(
-            "git log --pretty=\"$(whoami)\""
-        ));
+        assert!(!auto_allowed_on_live_path("git log --pretty=\"$(whoami)\""));
     }
 
     #[test]
