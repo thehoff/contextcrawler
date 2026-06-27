@@ -1,18 +1,9 @@
 //! Translates a raw shell command into its ContextCrawler-optimized equivalent.
 
 use super::permissions::{check_command, PermissionVerdict};
+use super::{hook_cmd, supply_chain_gate, tirith_gate};
 use crate::discover::registry;
 use std::io::Write;
-
-// ===== downstream: supply-chain gate import begin =====
-use super::supply_chain_gate;
-// ===== downstream: supply-chain gate import end =====
-
-// ===== downstream: Tirith pre-execution gate begin =====
-// Gate logic lives in `super::tirith_gate` so both this path and the
-// modern `contextcrawler hook claude` path (hook_cmd.rs) share one implementation.
-use super::tirith_gate;
-// ===== downstream: Tirith pre-execution gate end =====
 
 /// Run the `contextcrawler rewrite` command.
 ///
@@ -25,7 +16,9 @@ use super::tirith_gate;
 /// | 1    | (none)   | No equivalent, Default verdict — hook passes through.         |
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.   |
 /// | 3    | original | Ask verdict, no rewrite (#2286) — original cmd, host prompts. |
+/// | 3    | original | Gate flagged, no rewrite (#192) — original cmd, host prompts. |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt. |
+/// | 3    | rewritten| Gate flagged, rewritten cmd, host prompts.                   |
 pub fn run(cmd: &str) -> anyhow::Result<()> {
     let (excluded, transparent_prefixes) = crate::core::config::Config::load()
         .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
@@ -38,80 +31,23 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
+    // SECURITY (#192): run Tirith + supply-chain gates on the raw command
+    // before deciding whether it is rewritable. The old legacy path only ran
+    // these gates inside the `Some(rewritten)` arm, so non-rewritable commands
+    // skipped both gates and fell through as host passthrough.
+    let gate_decision = run_rewrite_gates(cmd);
+
     match registry::rewrite_command(cmd, &excluded, &transparent_prefixes) {
         Some(rewritten) => match verdict {
             PermissionVerdict::Allow => {
-                // ===== downstream: Tirith gate fires here =====
-                let tirith_verdict = tirith_gate::check(cmd);
-                if let Some((reason, tirith_json)) =
-                    tirith_gate::should_downgrade(&tirith_verdict)
-                {
-                    eprintln!(
-                        "[contextcrawler] Tirith {}; downgrading auto-allow to Ask.",
-                        if reason == "tirith_block" {
-                            "flagged the command"
-                        } else {
-                            "required but unavailable"
-                        }
-                    );
-                    // Surface the copy-paste trust hint (#197) so the operator
-                    // can allowlist the host without digging through logs.
-                    if let Some(hint) = tirith_json.and_then(tirith_gate::suggest_trust) {
-                        eprintln!("{hint}");
-                    }
-                    tirith_gate::log_downgrade(cmd, reason, tirith_json);
-                    print!("{}", rewritten);
-                    let _ = std::io::stdout().flush();
-                    std::process::exit(3);
-                }
-                // ===== downstream: end Tirith gate =====
-
-                // ===== downstream: supply-chain gate fires here =====
-                // SECURITY: a `Block` verdict (failed gate) AND an
-                // `Unavailable` verdict (registry/OSV lookup failed) both
-                // downgrade the auto-allow to Ask. Treating `Unavailable`
-                // as a silent allow would be fail-open: every network
-                // timeout or OSV outage would wave installs straight
-                // through. The gate is opt-in (`supply_chain.enabled`), so
-                // once a user has turned it on we fail CLOSED on error.
-                let sc_verdict = supply_chain_gate::check(cmd);
-                supply_chain_gate::log_event(cmd, &sc_verdict);
-                match &sc_verdict {
-                    supply_chain_gate::Verdict::Block(_) => {
-                        eprintln!("{}", supply_chain_gate::render(&sc_verdict));
-                        print!("{}", rewritten);
-                        let _ = std::io::stdout().flush();
-                        std::process::exit(3);
-                    }
-                    supply_chain_gate::Verdict::Unavailable(_) => {
-                        eprintln!("{}", supply_chain_gate::render(&sc_verdict));
-                        eprintln!(
-                            "[contextcrawler] supply-chain gate could not verify; \
-                             downgrading auto-allow to Ask."
-                        );
-                        print!("{}", rewritten);
-                        let _ = std::io::stdout().flush();
-                        std::process::exit(3);
-                    }
-                    supply_chain_gate::Verdict::Ask(_) => {
-                        // Install verb detected but its package set is
-                        // unvettable (lockfile / requirements file). Fail
-                        // closed: downgrade the auto-allow to Ask.
-                        eprintln!("{}", supply_chain_gate::render(&sc_verdict));
-                        print!("{}", rewritten);
-                        let _ = std::io::stdout().flush();
-                        std::process::exit(3);
-                    }
-                    supply_chain_gate::Verdict::Skip | supply_chain_gate::Verdict::Allow => {}
-                }
-                // ===== downstream: end supply-chain gate =====
-
+                apply_gate_decision(gate_decision, &rewritten);
 
                 print!("{}", rewritten);
                 let _ = std::io::stdout().flush();
                 Ok(())
             }
             PermissionVerdict::Ask | PermissionVerdict::Default => {
+                apply_gate_decision(gate_decision, &rewritten);
                 print!("{}", rewritten);
                 let _ = std::io::stdout().flush();
                 std::process::exit(3);
@@ -125,6 +61,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
             }
         },
         None => {
+            apply_gate_decision(gate_decision, cmd);
             // No ContextCrawler equivalent. SECURITY (#2286): a permission
             // `Ask` verdict on a non-rewritable command must still force a
             // prompt — exiting 1 (passthrough) lets the host auto-allow it via
@@ -138,6 +75,52 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
                 std::process::exit(3);
             }
             std::process::exit(1);
+        }
+    }
+}
+
+fn run_rewrite_gates(cmd: &str) -> hook_cmd::GateDecision {
+    let tirith_verdict = tirith_gate::check(cmd);
+    let sc_verdict = supply_chain_gate::check(cmd);
+    supply_chain_gate::log_event(cmd, &sc_verdict);
+    let decision = hook_cmd::gate_decision(&tirith_verdict, &sc_verdict);
+    if matches!(decision, hook_cmd::GateDecision::Ask { .. }) {
+        if let Some((reason, tirith_json)) = tirith_gate::should_downgrade(&tirith_verdict) {
+            tirith_gate::log_downgrade(cmd, reason, tirith_json);
+        }
+    }
+    decision
+}
+
+#[cfg(test)]
+fn gate_exit_code(decision: &hook_cmd::GateDecision) -> Option<i32> {
+    match decision {
+        hook_cmd::GateDecision::Proceed => None,
+        hook_cmd::GateDecision::Ask { .. } => Some(3),
+        hook_cmd::GateDecision::Deny { .. } => Some(3),
+    }
+}
+
+fn apply_gate_decision(decision: hook_cmd::GateDecision, ask_stdout: &str) {
+    match decision {
+        hook_cmd::GateDecision::Proceed => {}
+        hook_cmd::GateDecision::Ask { suggestion } => {
+            eprintln!(
+                "[contextcrawler] a defence-in-depth gate flagged this command; \
+                 downgrading auto-allow to Ask."
+            );
+            if let Some(hint) = suggestion {
+                eprintln!("{hint}");
+            }
+            print!("{ask_stdout}");
+            let _ = std::io::stdout().flush();
+            std::process::exit(3);
+        }
+        hook_cmd::GateDecision::Deny { reason } => {
+            eprintln!("{reason}");
+            print!("{ask_stdout}");
+            let _ = std::io::stdout().flush();
+            std::process::exit(3);
         }
     }
 }
@@ -304,20 +287,21 @@ mod tests {
     /// a silent allow, every transient network failure would wave installs
     /// through — fail-open. See issue #100 (G1).
     mod supply_chain_fail_closed {
+        use crate::hooks::hook_cmd::{gate_decision, GateDecision};
         use crate::hooks::supply_chain_gate::Verdict;
+        use crate::hooks::tirith_gate;
 
         /// The exit code `run()` applies for a given supply-chain verdict
         /// once the upstream permission verdict is Allow.
         ///   Skip / Allow   → 0 (proceed, auto-allow)
-        ///   Block          → 3 (ask — gate failed)
+        ///   Block          → 3 (ask — legacy bridge cannot emit native deny)
         ///   Ask            → 3 (ask — install set unvettable, fail closed)
         ///   Unavailable    → 3 (ask — gate could not verify, fail closed)
         fn supply_chain_exit_code(v: &Verdict) -> i32 {
-            match v {
-                Verdict::Skip | Verdict::Allow => 0,
-                Verdict::Block(_) => 3,
-                Verdict::Ask(_) => 3,
-                Verdict::Unavailable(_) => 3,
+            match gate_decision(&tirith_gate::Verdict::Allow, v) {
+                GateDecision::Proceed => 0,
+                GateDecision::Ask { .. } => 3,
+                GateDecision::Deny { .. } => 3,
             }
         }
 
@@ -332,7 +316,7 @@ mod tests {
         }
 
         #[test]
-        fn block_still_downgrades_to_ask() {
+        fn block_maps_to_ask_in_legacy_bridge() {
             let v = Verdict::Block(vec![]);
             assert_eq!(supply_chain_exit_code(&v), 3);
         }
@@ -353,6 +337,35 @@ mod tests {
         fn allow_and_skip_proceed() {
             assert_eq!(supply_chain_exit_code(&Verdict::Allow), 0);
             assert_eq!(supply_chain_exit_code(&Verdict::Skip), 0);
+        }
+    }
+
+    mod legacy_gate_exit_protocol {
+        use crate::hooks::hook_cmd::GateDecision;
+
+        #[test]
+        fn non_rewritable_gate_ask_maps_to_ask_exit() {
+            assert_eq!(
+                super::gate_exit_code(&GateDecision::Ask { suggestion: None }),
+                Some(3),
+                "legacy non-rewritable gate Ask must force a host prompt, not passthrough"
+            );
+        }
+
+        #[test]
+        fn gate_deny_maps_to_ask_exit() {
+            assert_eq!(
+                super::gate_exit_code(&GateDecision::Deny {
+                    reason: "blocked".into()
+                }),
+                Some(3),
+                "legacy gate Deny must prompt because exit 2 only delegates to native deny rules"
+            );
+        }
+
+        #[test]
+        fn clean_gate_has_no_exit_override() {
+            assert_eq!(super::gate_exit_code(&GateDecision::Proceed), None);
         }
     }
 }

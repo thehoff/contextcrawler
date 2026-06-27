@@ -88,10 +88,12 @@ There are two code paths, and only one is live in the Claude Code wiring:
 
 Both share the gate logic in `src/hooks/tirith_gate.rs` and
 `src/hooks/supply_chain_gate.rs`. The decisive difference is **gate ordering**:
-the live path gates the raw command *before* deciding on a rewrite, so every
-command class is gated. The legacy path gates inside the rewrite branch and so
-has a known gap for non-rewritable commands. New work should follow the live
-path's ordering.
+both paths gate the raw command *before* deciding on a rewrite, so every
+command class is gated. The live hook can emit native JSON `ask` / `deny`
+decisions; the legacy `contextcrawler rewrite` bridge models the same outcome
+with its exit-code protocol. In that bridge, defense-in-depth gate findings use
+exit `3` to force a host prompt; exit `2` remains reserved for native permission
+deny-rule delegation.
 
 ## The Claude Code hook flow
 
