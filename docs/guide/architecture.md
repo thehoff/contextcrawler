@@ -96,8 +96,12 @@ path's ordering.
 ## The Claude Code hook flow
 
 The live flow lives in `hook_cmd.rs`. The agent sends a PreToolUse JSON payload
-on stdin; `run_claude` reads it (size-limited, failing closed on a malformed or
-oversized payload) and hands the parsed value to
+on stdin; `run_claude` reads it with a short deadline and a size limit. Empty
+EOF is a no-op. Malformed, oversized, unreadable, or timed-out payloads fail
+closed with a Claude deny verdict. Copilot and Cursor share the same bounded
+stdin reader but fail open on read failure because their host permission engines
+remain the backstop; Gemini shares the bounded reader and fails closed with a
+Gemini deny verdict. Parsed Claude payloads are handed to
 `process_claude_payload_with_gate`.
 
 The critical ordering property: the **defence-in-depth gates run on the RAW
@@ -107,7 +111,7 @@ a flagged command from the gate.
 ```mermaid
 flowchart TD
     A[PreToolUse JSON on stdin] --> B{Parse payload}
-    B -- malformed / oversized --> DENY1[Deny - fail closed]
+    B -- malformed / oversized / timeout --> DENY1[Deny - fail closed]
     B -- ok --> C{Extract /tool_input/command}
     C -- absent --> IGN1[Ignore - non-Bash tool]
     C -- present but not a string --> DENY2[Deny - malformed payload]
