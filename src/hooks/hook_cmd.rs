@@ -1168,14 +1168,11 @@ mod tests {
         // gate (mirrors Tirith default-off). Auto-allow only happens on a true
         // `Allow` verdict, which the unattestable gate downgrades to `Ask`.
         let allow = vec!["*".to_string()];
-        let check = move |c: &str| {
-            permissions::check_command_with_rules(c, &[], &[], &allow)
-        };
+        let check = move |c: &str| permissions::check_command_with_rules(c, &[], &[], &allow);
         let v: Value = serde_json::from_str(&claude_input(cmd)).unwrap();
         match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
             PayloadAction::Rewrite { output, .. } => {
-                output.pointer("/hookSpecificOutput/permissionDecision")
-                    == Some(&json!("allow"))
+                output.pointer("/hookSpecificOutput/permissionDecision") == Some(&json!("allow"))
             }
             _ => false,
         }
@@ -1188,13 +1185,45 @@ mod tests {
         assert!(auto_allowed_on_live_path("git status 2>&1"));
     }
 
+    fn permission_decision_for_live_path(cmd: &str, allow: Vec<String>) -> Option<String> {
+        let check = move |c: &str| permissions::check_command_with_rules(c, &[], &[], &allow);
+        let v: Value = serde_json::from_str(&claude_input(cmd)).unwrap();
+        match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
+            PayloadAction::Rewrite { output, .. } => output
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_live_newline_trailing_command_does_not_auto_allow() {
+        let cmd = "cat /etc/hostname\nrm -rf --no-preserve-root /";
+
+        assert_ne!(
+            permission_decision_for_live_path(cmd, vec!["cat *".to_string()]),
+            Some("allow".to_string()),
+            "a newline-separated trailing command must satisfy allow rules independently"
+        );
+    }
+
+    #[test]
+    fn test_live_crlf_trailing_command_does_not_auto_allow() {
+        let cmd = "cat /etc/hostname\r\nrm -rf --no-preserve-root /";
+
+        assert_ne!(
+            permission_decision_for_live_path(cmd, vec!["cat *".to_string()]),
+            Some("allow".to_string()),
+            "a CRLF-separated trailing command must satisfy allow rules independently"
+        );
+    }
+
     #[test]
     fn test_live_substitution_never_auto_allows() {
         assert!(!auto_allowed_on_live_path("git status `whoami`"));
         assert!(!auto_allowed_on_live_path("git log --pretty=$(whoami)"));
-        assert!(!auto_allowed_on_live_path(
-            "git log --pretty=\"$(whoami)\""
-        ));
+        assert!(!auto_allowed_on_live_path("git log --pretty=\"$(whoami)\""));
     }
 
     #[test]
