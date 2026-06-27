@@ -416,6 +416,7 @@ pub(crate) enum GateDecision {
 /// in `process_claude_payload_with`; this function only classifies their
 /// results. Precedence: a supply-chain `Block` (Deny) outranks any Ask.
 pub(crate) fn gate_decision(
+    cmd: &str,
     tirith_verdict: &tirith_gate::Verdict,
     sc_verdict: &supply_chain_gate::Verdict,
 ) -> GateDecision {
@@ -430,7 +431,9 @@ pub(crate) fn gate_decision(
     // downgrade to Ask. `should_downgrade` already honours the opt-in
     // (`CONTEXTCRAWLER_TIRITH_REQUIRED`) — when tirith is not required and is
     // merely unavailable it returns `None`, so this is a no-op by default.
-    if let Some((_reason, tirith_json)) = tirith_gate::should_downgrade(tirith_verdict) {
+    if let Some((_reason, tirith_json)) =
+        tirith_gate::should_downgrade_for_command(cmd, tirith_verdict)
+    {
         // Build the copy-paste trust hint (#197) from the verdict when we have
         // one. `suggest_trust` is pure string parsing, so this keeps
         // `gate_decision` I/O-free and unit-testable.
@@ -468,12 +471,14 @@ pub(crate) fn run_gates(cmd: &str) -> GateDecision {
     let tirith_verdict = tirith_gate::check(cmd);
     let sc_verdict = supply_chain_gate::check(cmd);
     supply_chain_gate::log_event(cmd, &sc_verdict);
-    let decision = gate_decision(&tirith_verdict, &sc_verdict);
+    let decision = gate_decision(cmd, &tirith_verdict, &sc_verdict);
     // Emit the Tirith downgrade audit line when (and only when) the
     // classification is an Ask driven by Tirith — the pure `gate_decision`
     // does no I/O, so the logging stays here on the production path.
     if matches!(decision, GateDecision::Ask { .. }) {
-        if let Some((reason, tirith_json)) = tirith_gate::should_downgrade(&tirith_verdict) {
+        if let Some((reason, tirith_json)) =
+            tirith_gate::should_downgrade_for_command(cmd, &tirith_verdict)
+        {
             tirith_gate::log_downgrade(cmd, reason, tirith_json);
         }
     }
@@ -1585,7 +1590,11 @@ mod tests {
     /// supply-chain `Block` → Deny (reuses #102 deny machinery downstream).
     #[test]
     fn test_gate_decision_supply_chain_block_is_deny() {
-        let d = gate_decision(&TirithVerdict::Allow, &ScVerdict::Block(vec![]));
+        let d = gate_decision(
+            "git status",
+            &TirithVerdict::Allow,
+            &ScVerdict::Block(vec![]),
+        );
         assert!(matches!(d, GateDecision::Deny { .. }));
     }
 
@@ -1593,6 +1602,7 @@ mod tests {
     #[test]
     fn test_gate_decision_supply_chain_unavailable_is_ask() {
         let d = gate_decision(
+            "git status",
             &TirithVerdict::Allow,
             &ScVerdict::Unavailable("registry timeout".into()),
         );
@@ -1604,11 +1614,11 @@ mod tests {
     #[test]
     fn test_gate_decision_both_clean_is_proceed() {
         assert_eq!(
-            gate_decision(&TirithVerdict::Allow, &ScVerdict::Skip),
+            gate_decision("git status", &TirithVerdict::Allow, &ScVerdict::Skip),
             GateDecision::Proceed
         );
         assert_eq!(
-            gate_decision(&TirithVerdict::Allow, &ScVerdict::Allow),
+            gate_decision("git status", &TirithVerdict::Allow, &ScVerdict::Allow),
             GateDecision::Proceed
         );
     }
@@ -1619,7 +1629,7 @@ mod tests {
     fn test_gate_decision_tirith_unavailable_not_required_is_proceed() {
         std::env::remove_var("CONTEXTCRAWLER_TIRITH_REQUIRED");
         assert_eq!(
-            gate_decision(&TirithVerdict::Unavailable, &ScVerdict::Skip),
+            gate_decision("git status", &TirithVerdict::Unavailable, &ScVerdict::Skip),
             GateDecision::Proceed
         );
     }
@@ -1686,6 +1696,7 @@ mod tests {
     fn test_gate_decision_tirith_block_is_ask() {
         // Empty verdict body → no resolvable host → Ask with no hint.
         let d = gate_decision(
+            "git status",
             &TirithVerdict::Block {
                 tirith_json: "{}".into(),
             },
@@ -1701,6 +1712,7 @@ mod tests {
             {"rule_id":"plain_http_to_sink","evidence":[{"type":"url","raw":"http://gitea.example.com:3000/x"}]}
         ]}"#;
         let d = gate_decision(
+            "git status",
             &TirithVerdict::Block {
                 tirith_json: json.into(),
             },
@@ -1718,6 +1730,7 @@ mod tests {
     #[test]
     fn test_gate_decision_block_outranks_ask() {
         let d = gate_decision(
+            "git status",
             &TirithVerdict::Block {
                 tirith_json: "{}".into(),
             },

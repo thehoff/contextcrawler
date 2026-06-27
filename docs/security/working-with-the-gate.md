@@ -12,7 +12,9 @@ runs. Tirith returns one of:
 
 - **clean** — the command proceeds unchanged.
 - **flagged** — Tirith matched a detection rule. The gate downgrades the
-  command to *Ask* so the original command is reviewed before it runs.
+  command to *Ask* so the original command is reviewed before it runs,
+  except for a small ContextCrawler post-filter of known lab false
+  positives listed below.
 - **unavailable** — Tirith is not installed, crashed, or timed out.
   Fail-open by default; fail-closed only under
   `CONTEXTCRAWLER_TIRITH_REQUIRED=1`.
@@ -102,6 +104,27 @@ contextcrawler: Tirith flagged this command before it ran.
 Only the host is ever shown — never the path/query/credentials. Pattern-only
 rules (e.g. `pipe_to_interpreter`) have no host to trust, so the hint points
 you at `tirith why` instead (these are the false-positive-prone ones).
+
+## False-positive tuning
+
+ContextCrawler does not own Tirith's rule bodies, but it does own the final
+"downgrade to Ask" decision. To avoid alert fatigue on normal local
+development workflows, the gate suppresses Tirith `block` verdicts only when
+every finding matches one of these known benign shapes:
+
+- local data producers such as `cat`, `tail`, `head`, `grep`, `rg`, `git`,
+  `gh`, `glab`, `tea`, or `contextcrawler` piped into an interpreter;
+- `python` / `python3 -m json.tool`, where `json.tool` is a module name, not
+  a schemeless URL;
+- loopback and Hoff lab hosts from issue #191, including
+  `localhost`, `127.0.0.0/8`, `::1`, `gitea.h.hoff-network.com`, and
+  `192.168.80.0/22`;
+- `dotfile_overwrite` findings caused by dotfile text inside `git add` or
+  `git commit` metadata commands.
+
+Mixed verdicts still downgrade. For example, if a local `cat ... | python3`
+finding appears alongside a real `curl https://... | sh` finding, the command
+still prompts for review.
 
 ## Diagnose what fired
 

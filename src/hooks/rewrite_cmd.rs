@@ -83,9 +83,11 @@ fn run_rewrite_gates(cmd: &str) -> hook_cmd::GateDecision {
     let tirith_verdict = tirith_gate::check(cmd);
     let sc_verdict = supply_chain_gate::check(cmd);
     supply_chain_gate::log_event(cmd, &sc_verdict);
-    let decision = hook_cmd::gate_decision(&tirith_verdict, &sc_verdict);
+    let decision = hook_cmd::gate_decision(cmd, &tirith_verdict, &sc_verdict);
     if matches!(decision, hook_cmd::GateDecision::Ask { .. }) {
-        if let Some((reason, tirith_json)) = tirith_gate::should_downgrade(&tirith_verdict) {
+        if let Some((reason, tirith_json)) =
+            tirith_gate::should_downgrade_for_command(cmd, &tirith_verdict)
+        {
             tirith_gate::log_downgrade(cmd, reason, tirith_json);
         }
     }
