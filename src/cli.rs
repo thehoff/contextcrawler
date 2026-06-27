@@ -1531,6 +1531,124 @@ fn token_has_path_separator(token: &str) -> bool {
     token.contains('/') || token.contains('\\')
 }
 
+fn proxy_sensitive_env_read_path(tool: &str, args: &[String]) -> Option<String> {
+    let tool = bin_basename(tool);
+    if !matches!(
+        tool,
+        "cat"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "rg"
+            | "ripgrep"
+            | "sed"
+            | "awk"
+            | "head"
+            | "tail"
+            | "nl"
+            | "less"
+            | "more"
+            | "bat"
+            | "batcat"
+            | "diff"
+    ) {
+        return None;
+    }
+
+    let candidates = match tool {
+        "grep" | "egrep" | "fgrep" | "rg" | "ripgrep" => proxy_search_path_args(args),
+        "diff" => args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .cloned()
+            .collect(),
+        _ => proxy_generic_file_args(args),
+    };
+
+    candidates
+        .into_iter()
+        .find(|arg| core::sensitive_paths::is_sensitive_env_path(std::path::Path::new(arg)))
+}
+
+fn proxy_generic_file_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut after_double_dash = false;
+    let mut skip_next = false;
+
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if !after_double_dash && arg == "--" {
+            after_double_dash = true;
+            continue;
+        }
+        if !after_double_dash && arg.starts_with('-') {
+            if matches!(
+                arg.as_str(),
+                "-n" | "--lines" | "-c" | "--bytes" | "-s" | "-f" | "-e"
+            ) {
+                skip_next = !arg.contains('=');
+            }
+            continue;
+        }
+        out.push(arg.clone());
+    }
+
+    out
+}
+
+fn proxy_search_path_args(args: &[String]) -> Vec<String> {
+    let mut positionals = Vec::new();
+    let mut after_double_dash = false;
+    let mut skip_next = false;
+    let mut pattern_from_flag = false;
+
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if !after_double_dash && arg == "--" {
+            after_double_dash = true;
+            continue;
+        }
+        if !after_double_dash && matches!(arg.as_str(), "-e" | "--regexp") {
+            pattern_from_flag = true;
+            skip_next = true;
+            continue;
+        }
+        if !after_double_dash
+            && matches!(
+                arg.as_str(),
+                "-f" | "--file"
+                    | "-m" | "--max-count"
+                    | "-A" | "--after-context"
+                    | "-B" | "--before-context"
+                    | "-C" | "--context"
+                    | "-g" | "--glob"
+                    | "--iglob"
+                    | "-t" | "--type"
+                    | "-T" | "--type-not"
+            )
+        {
+            skip_next = true;
+            continue;
+        }
+        if !after_double_dash && arg.starts_with('-') {
+            continue;
+        }
+        positionals.push(arg.clone());
+    }
+
+    if pattern_from_flag {
+        positionals
+    } else {
+        positionals.into_iter().skip(1).collect()
+    }
+}
+
 /// `true` when the proxy nudge should be printed to stderr. Three independent
 /// suppression knobs (any one silences the nudge): explicit env opt-out,
 /// `CI=*` env marker, stderr is not a tty. The override env var can carry
@@ -4200,6 +4318,28 @@ fn run_cli() -> Result<i32> {
                 .iter()
                 .map(|s| s.to_string_lossy().into_owned())
                 .collect();
+
+            if !core::sensitive_paths::sensitive_env_override_enabled() {
+                if let Some(path) =
+                    proxy_sensitive_env_read_path(&cmd_name_display, &cmd_args_display)
+                {
+                    eprintln!(
+                        "contextcrawler: refusing to proxy sensitive env file read `{}` via `{}`. \
+                         Use `{}`=1 only when you intentionally need raw secret-file contents. \
+                         Safe templates such as .env.example, .env.sample, and .env.template are allowed.",
+                        path,
+                        cmd_name_display,
+                        core::sensitive_paths::SENSITIVE_ENV_OVERRIDE
+                    );
+                    timer.track(
+                        &format!("proxy {} (sensitive env refused)", cmd_name_display),
+                        &format!("contextcrawler proxy {}", cmd_name_display),
+                        "",
+                        "",
+                    );
+                    std::process::exit(126);
+                }
+            }
 
             if cli.verbose > 0 {
                 eprintln!(

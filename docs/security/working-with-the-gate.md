@@ -228,6 +228,14 @@ executes. When a gate flags a proxied command, proxy refuses with exit 126:
 - A gate **block** (supply-chain hard block) cannot be overridden by the
   ack variable — restructure the command or use `tirith trust`.
 
+Proxy also refuses known content-reading tools (`grep`, `rg`, `cat`,
+`sed`, `head`, `tail`, `diff`, and similar) when a path operand targets a
+secret env file such as `.env` or `.env.local`. Template/example files are
+allowed: `.env.example`, `.env.sample`, `.env.template`, and matching
+`.example` / `.sample` / `.template` suffixes. If you intentionally need
+raw secret-file contents through proxy, re-run with
+`CONTEXTCRAWLER_ALLOW_SENSITIVE_ENV_READ=1`.
+
 ## Enabling the supply-chain gate
 
 The supply-chain gate is off until you write a config file. The first of

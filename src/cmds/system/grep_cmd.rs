@@ -2,6 +2,7 @@
 
 use crate::core::config;
 use crate::core::runner;
+use crate::core::sensitive_paths;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{check_forbidden_rg_args, secure_rg_command};
@@ -27,6 +28,8 @@ pub fn run(
     verbose: u8,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    sensitive_paths::ensure_not_sensitive_env_path(std::path::Path::new(path), "contextcrawler grep")?;
 
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern, path);

@@ -4,6 +4,7 @@ use crate::cmds::system::intent as intent_extractor;
 use crate::cmds::system::json_cmd;
 use crate::core::config;
 use crate::core::filter::{self, FilterLevel, Language};
+use crate::core::sensitive_paths;
 use crate::core::tracking;
 use crate::core::utils::format_tokens;
 use anyhow::{Context, Result};
@@ -23,6 +24,8 @@ pub fn run(
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
+
+    sensitive_paths::ensure_not_sensitive_env_path(file, "contextcrawler read")?;
 
     if verbose > 0 {
         eprintln!("Reading: {} (filter: {})", file.display(), level);

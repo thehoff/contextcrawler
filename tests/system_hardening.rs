@@ -23,6 +23,13 @@ fn unique_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ctxc-g5-{}-{}-{}", tag, pid, ts))
 }
 
+fn contextcrawler_cmd() -> Command {
+    let mut cmd = Command::new(binary_path());
+    cmd.env("CONTEXTCRAWLER_TEST_MODE", "1");
+    cmd.env_remove("CONTEXTCRAWLER_ALLOW_SENSITIVE_ENV_READ");
+    cmd
+}
+
 /// `ls` of a directory that contains an entry named `-la` must succeed and
 /// show the dash-prefixed entry — the `--` boundary keeps `ls` from parsing
 /// any operand as an option.
@@ -33,10 +40,9 @@ fn ls_lists_dash_prefixed_entry() {
     fs::create_dir_all(root.join("-la")).expect("create -la subdir");
     fs::write(root.join("normal.txt"), "hi").expect("write normal.txt");
 
-    let out = Command::new(binary_path())
+    let out = contextcrawler_cmd()
         .arg("ls")
         .arg(&root)
-        .env("CONTEXTCRAWLER_TEST_MODE", "1")
         .output()
         .expect("spawn contextcrawler ls");
 
@@ -79,10 +85,9 @@ fn tree_handles_dash_prefixed_path() {
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("-la")).expect("create -la subdir");
 
-    let out = Command::new(binary_path())
+    let out = contextcrawler_cmd()
         .arg("tree")
         .arg(&root)
-        .env("CONTEXTCRAWLER_TEST_MODE", "1")
         .output()
         .expect("spawn contextcrawler tree");
 
@@ -116,8 +121,7 @@ fn grep_pattern_shaped_like_pre_flag_is_not_executed() {
     let root = unique_dir("grep-pre");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("create grep-pre dir");
-    fs::write(root.join("haystack.txt"), "nothing interesting here\n")
-        .expect("write haystack.txt");
+    fs::write(root.join("haystack.txt"), "nothing interesting here\n").expect("write haystack.txt");
 
     // If `--pre` were honoured, rg would exec this script per file.
     let marker = root.join("pwned.marker");
@@ -135,11 +139,10 @@ fn grep_pattern_shaped_like_pre_flag_is_not_executed() {
         fs::set_permissions(&script, perms).unwrap();
     }
 
-    let out = Command::new(binary_path())
+    let out = contextcrawler_cmd()
         .arg("grep")
         .arg(format!("--pre={}", script.display()))
         .arg(&root)
-        .env("CONTEXTCRAWLER_TEST_MODE", "1")
         .output()
         .expect("spawn contextcrawler grep");
 
@@ -168,11 +171,10 @@ fn grep_path_starting_with_dash_is_treated_as_path() {
     fs::create_dir_all(&dash_dir).expect("create -dashdir");
     fs::write(dash_dir.join("file.txt"), "findme_token\n").expect("write file.txt");
 
-    let out = Command::new(binary_path())
+    let out = contextcrawler_cmd()
         .arg("grep")
         .arg("findme_token")
         .arg(&dash_dir)
-        .env("CONTEXTCRAWLER_TEST_MODE", "1")
         .output()
         .expect("spawn contextcrawler grep");
 
@@ -201,9 +203,8 @@ fn read_no_files_reads_piped_stdin() {
 
     let input: String = (1..=100).map(|i| format!("{}\n", i)).collect();
 
-    let mut child = Command::new(binary_path())
+    let mut child = contextcrawler_cmd()
         .args(["read", "--tail-lines", "20"])
-        .env("CONTEXTCRAWLER_TEST_MODE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -226,10 +227,163 @@ fn read_no_files_reads_piped_stdin() {
         "read with no files + piped stdin should exit 0; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr),
     );
-    assert!(stdout.contains("100"), "should show last lines, got:\n{}", stdout);
+    assert!(
+        stdout.contains("100"),
+        "should show last lines, got:\n{}",
+        stdout
+    );
     assert!(
         !stdout.contains("a value is required"),
         "must not emit the clap missing-arg error, got:\n{}",
         stdout,
     );
+}
+
+#[test]
+fn read_refuses_dotenv_secret_without_echoing_value() {
+    let root = unique_dir("dotenv-read");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create dotenv-read dir");
+    fs::write(root.join(".env"), "PASSWORD=demo-only\n").expect("write .env");
+
+    let out = contextcrawler_cmd()
+        .arg("read")
+        .arg(".env")
+        .current_dir(&root)
+        .output()
+        .expect("spawn contextcrawler read");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_ne!(out.status.code(), Some(0), "read .env must fail");
+    assert!(
+        combined.contains("refusing to read sensitive env file"),
+        "expected clear refusal, got:\n{}",
+        combined
+    );
+    assert!(
+        !combined.contains("demo-only"),
+        "refusal must not echo secret values, got:\n{}",
+        combined
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn grep_refuses_dotenv_secret_without_echoing_value() {
+    let root = unique_dir("dotenv-grep");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create dotenv-grep dir");
+    fs::write(root.join(".env"), "PASSWORD=demo-only\n").expect("write .env");
+
+    let out = contextcrawler_cmd()
+        .args(["grep", "PASSWORD", ".env"])
+        .current_dir(&root)
+        .output()
+        .expect("spawn contextcrawler grep");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_ne!(out.status.code(), Some(0), "grep .env must fail");
+    assert!(
+        combined.contains("refusing to read sensitive env file"),
+        "expected clear refusal, got:\n{}",
+        combined
+    );
+    assert!(
+        !combined.contains("demo-only"),
+        "refusal must not echo secret values, got:\n{}",
+        combined
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn proxy_grep_refuses_dotenv_secret_without_echoing_value() {
+    let root = unique_dir("dotenv-proxy-grep");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create dotenv-proxy-grep dir");
+    fs::write(root.join(".env"), "PASSWORD=demo-only\n").expect("write .env");
+
+    let out = contextcrawler_cmd()
+        .args(["proxy", "grep", "PASSWORD", ".env"])
+        .current_dir(&root)
+        .output()
+        .expect("spawn contextcrawler proxy grep");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(out.status.code(), Some(126), "proxy refusal exit code");
+    assert!(
+        combined.contains("refusing to proxy sensitive env file read"),
+        "expected clear proxy refusal, got:\n{}",
+        combined
+    );
+    assert!(
+        !combined.contains("demo-only"),
+        "refusal must not echo secret values, got:\n{}",
+        combined
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn documented_dotenv_templates_are_allowed() {
+    let root = unique_dir("dotenv-templates");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create dotenv-templates dir");
+
+    for name in [".env.example", ".env.sample", ".env.template"] {
+        fs::write(root.join(name), "PASSWORD=demo-only\n").expect("write template");
+
+        let read = contextcrawler_cmd()
+            .arg("read")
+            .arg(name)
+            .current_dir(&root)
+            .output()
+            .expect("spawn contextcrawler read template");
+        assert_eq!(
+            read.status.code(),
+            Some(0),
+            "read {name} should be allowed; stderr:\n{}",
+            String::from_utf8_lossy(&read.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&read.stdout).contains("demo-only"),
+            "read {name} should show template content"
+        );
+
+        let grep = contextcrawler_cmd()
+            .args(["grep", "PASSWORD", name])
+            .current_dir(&root)
+            .output()
+            .expect("spawn contextcrawler grep template");
+        assert_eq!(
+            grep.status.code(),
+            Some(0),
+            "grep {name} should be allowed; stderr:\n{}",
+            String::from_utf8_lossy(&grep.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&grep.stdout).contains("demo-only"),
+            "grep {name} should show template content"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
 }

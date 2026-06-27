@@ -1,6 +1,6 @@
 //! Compares two files and shows only the changed lines.
 
-use crate::core::tracking;
+use crate::core::{sensitive_paths, tracking};
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
@@ -8,6 +8,9 @@ use std::path::Path;
 /// Ultra-condensed diff - only changed lines, no context
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
+
+    sensitive_paths::ensure_not_sensitive_env_path(file1, "contextcrawler diff")?;
+    sensitive_paths::ensure_not_sensitive_env_path(file2, "contextcrawler diff")?;
 
     if verbose > 0 {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
