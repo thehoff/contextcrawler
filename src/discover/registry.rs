@@ -697,6 +697,20 @@ fn has_unquoted_continuation(s: &str) -> bool {
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
 /// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
 /// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
+fn strip_ctxcrl_shell_builtin_prefix(cmd: &str) -> Option<&str> {
+    let rest = cmd
+        .strip_prefix("contextcrawler ")
+        .or_else(|| cmd.strip_prefix("rtk "))?;
+    let builtin = rest.split_whitespace().next().unwrap_or("");
+    const SHELL_SIDE_EFFECT_BUILTINS: &[&str] = &[
+        "cd", "pushd", "popd", "export", "source", ".", "alias", "unalias", "unset",
+        "ulimit", "umask", "set", "shift", "typeset", "declare",
+    ];
+    SHELL_SIDE_EFFECT_BUILTINS
+        .contains(&builtin)
+        .then_some(rest)
+}
+
 /// Also strips user-configured transparent wrapper prefixes
 /// (`[hooks].transparent_prefixes` in `config.toml`) before routing.
 ///
@@ -731,7 +745,11 @@ pub fn rewrite_command(
     let compiled = compile_exclude_patterns(excluded);
     let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
 
-    // Simple (non-compound) already-CTXCRL command — return as-is.
+    // Simple (non-compound) already-CTXCRL command — return as-is, except
+    // shell builtins. `contextcrawler cd /x` / `rtk export FOO=bar` run in a
+    // subprocess, so their side effect is lost when the subprocess exits.
+    // Strip the redundant prefix so the shell executes the builtin in the
+    // current process instead (#2508).
     // For compound commands that start with "rtk" (e.g. "contextcrawler git add . && cargo test"),
     // fall through to rewrite_compound so the remaining segments get rewritten.
     let has_compound = trimmed.contains("&&")
@@ -745,6 +763,9 @@ pub fn rewrite_command(
             || trimmed == "contextcrawler"
             || trimmed == "rtk")
     {
+        if let Some(stripped) = strip_ctxcrl_shell_builtin_prefix(trimmed) {
+            return Some(stripped.to_string());
+        }
         return Some(trimmed.to_string());
     }
 
@@ -967,6 +988,16 @@ fn rewrite_segment_inner(
 
     if depth >= MAX_PREFIX_DEPTH {
         return None;
+    }
+
+    // #2508 (compound): an already-CTXCRL shell-builtin segment
+    // (`contextcrawler cd /x`, `rtk export FOO=bar`) inside a compound command
+    // loses its side effect when run in a subprocess. Strip the redundant
+    // prefix so the builtin executes in the current shell, mirroring the
+    // simple-command path in `rewrite_command`. Only pure side-effect builtins
+    // match, so real CTXCRL commands (`contextcrawler read …`) are untouched.
+    if let Some(stripped) = strip_ctxcrl_shell_builtin_prefix(trimmed) {
+        return Some(stripped.to_string());
     }
 
     // #195: `sudo` with flags (`sudo -u user <cmd>`). Strip the `sudo …`
@@ -1894,6 +1925,44 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("contextcrawler git status", &[]),
             Some("contextcrawler git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_already_ctxcrl_shell_builtin_strips_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("contextcrawler cd /tmp", &[]),
+            Some("cd /tmp".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk export FOO=bar", &[]),
+            Some("export FOO=bar".into())
+        );
+        // `contextcrawler read` is a real ContextCrawler command, not the shell builtin.
+        assert_eq!(
+            rewrite_command_no_prefixes("contextcrawler read README.md", &[]),
+            Some("contextcrawler read README.md".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_ctxcrl_shell_builtin_strips_prefix() {
+        // #2508 (compound): a builtin segment must lose its redundant
+        // CTXCRL prefix so it runs in the current shell, while sibling
+        // segments still get rewritten.
+        assert_eq!(
+            rewrite_command_no_prefixes("contextcrawler cd /tmp && git status", &[]),
+            Some("cd /tmp && contextcrawler git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rtk export FOO=bar && ls", &[]),
+            Some("export FOO=bar && contextcrawler ls".into())
+        );
+        // `contextcrawler read` is a real CTXCRL command, not the `read`
+        // builtin — it must survive untouched inside a compound.
+        assert_eq!(
+            rewrite_command_no_prefixes("contextcrawler read README.md && git status", &[]),
+            Some("contextcrawler read README.md && contextcrawler git status".into())
         );
     }
 
