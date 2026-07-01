@@ -3,6 +3,37 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.1] — 2026-07-01
+
+Hardening + compatibility release. Adds support for Claude Code's newer hook
+payload schema, closes a hook-gating bypass surfaced in council review, and
+lands several output-fidelity fixes.
+
+### Fixed
+- **Claude Code new hook schema.** The hook now accepts the newer
+  `tool` + `input.command` payload alongside the legacy
+  `tool_name` + `tool_input.command`. The active schema is selected by the tool
+  discriminator (not field presence), and the shell hook (`rtk-rewrite.sh`) is
+  now a thin delegator to the Rust binary — a single, tested source of truth
+  for schema selection and gating. Conflicting discriminators, mismatched or
+  partial dual-schema payloads, non-string commands, unmodeled command
+  containers, and unparseable/non-object payloads all fail closed. (#2493)
+- **Machine-readable git output.** `git status --porcelain`/`-z` and
+  `git log --format`/`--pretty=format:` now pass through unfiltered, so tooling
+  that consumes that output is never mangled.
+- **Shell builtins under the proxy.** `contextcrawler cd /x`, `rtk export …`
+  and other side-effecting builtins are stripped of the redundant prefix —
+  standalone and inside compound commands — so the builtin runs in the current
+  shell and its effect survives. (#2508)
+- **`rg`/`grep` split** into separate rewrite rules; `rg` now rewrites to
+  `contextcrawler rg`.
+- **First-run global init** creates the parent directory before the atomic
+  write, fixing a failure when the target directory does not yet exist. (#2519)
+
+### Internal
+- Refreshed the branding-lint allowlist after a test rename; `.cptr/` agent
+  logs are now git-ignored.
+
 ## [0.4.0] — 2026-06-07
 
 The library pivot: ContextCrawler is now a proper lib + bin. The binary is a thin
