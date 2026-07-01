@@ -68,3 +68,6 @@ bench/claude-code-*.md
 .agy-intent-diff.patch
 package-lock.json
 .ctxcrl/
+
+# Agent task logs / chats (transient, never commit)
+.cptr/

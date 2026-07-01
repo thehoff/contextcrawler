@@ -90,7 +90,7 @@ const STRUCTURAL_ALLOW_NEEDLES_IN_COMMENTS_ONLY: &[&str] = &[
 /// boundaries by tracking brace depth starting from the `fn` declaration.
 const ALLOWED_FUNCTION_PREFIXES: &[&str] = &[
     "fn test_cleanup_legacy_codex_files_",
-    "fn test_uninstall_codex_at_removes_legacy_rtk_md_file_and_ref",
+    "fn test_uninstall_codex_at_removes_legacy_ctxcrl_md_file_and_ref",
     "fn test_patch_claude_md_migrates_legacy_at_ref_in_place",
     "fn test_strip_at_reference_line_collapses_surrounding_blanks",
     "fn test_rtk_md_constant_pinned_to_contextcrawler_filename",

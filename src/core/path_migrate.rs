@@ -25,7 +25,7 @@ use std::sync::Once;
 use super::constants::{CONFIG_TOML, FILTERS_TOML, RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 
 /// Legacy directory segment that predates the rename.
-const LEGACY_DATA_DIR: &str = "rtk";
+const LEGACY_DATA_DIR: &str = "rtk"; // branding-lint: allow legacy
 /// Legacy project-local directory.
 const LEGACY_PROJECT_DIR: &str = ".rtk";
 
@@ -142,7 +142,7 @@ fn move_path(old: &Path, new: &Path) -> bool {
     match std::fs::rename(old, new) {
         Ok(()) => {
             eprintln!(
-                "[contextcrawler] migrated {} -> {} (legacy rtk path)",
+                "[contextcrawler] migrated {} -> {} (legacy rtk path)", // branding-lint: allow legacy
                 old.display(),
                 new.display()
             );
