@@ -72,6 +72,22 @@ fn uses_compact_status_path(args: &[String]) -> bool {
     saw_branch
 }
 
+fn is_machine_status_args(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(arg.as_str(), "--porcelain" | "--porcelain=v1" | "--porcelain=v2" | "-z")
+            || arg.starts_with("--porcelain=")
+    })
+}
+
+fn is_machine_log_args(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--format"
+            || arg.starts_with("--format=")
+            || arg.starts_with("--pretty=format:")
+            || arg.starts_with("--pretty=tformat:")
+    })
+}
+
 fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
@@ -614,6 +630,24 @@ fn run_log(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
+    if is_machine_log_args(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("log");
+        cmd.args(args);
+        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        print!("{}", result.stdout);
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        let original_cmd = if args.is_empty() {
+            "git log".to_string()
+        } else {
+            format!("git log {}", args.join(" "))
+        };
+        timer.track_passthrough(&original_cmd, &format!("contextcrawler {}", original_cmd));
+        return Ok(result.exit_code);
+    }
+
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
@@ -1031,6 +1065,24 @@ fn filter_status_with_args(output: &str) -> String {
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
+    if is_machine_status_args(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("status");
+        cmd.args(args);
+        let result = exec_capture(&mut cmd).context("Failed to run git status")?;
+        print!("{}", result.stdout);
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        let original_cmd = if args.is_empty() {
+            "git status".to_string()
+        } else {
+            format!("git status {}", args.join(" "))
+        };
+        timer.track_passthrough(&original_cmd, &format!("contextcrawler {}", original_cmd));
+        return Ok(result.exit_code);
+    }
+
     // Keep a narrow compact path for no-arg status and branch/short-only flags.
     // More complex explicit args still use the existing minimal-filter path.
     if !uses_compact_status_path(args) {
@@ -1309,6 +1361,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             &raw_output,
             "ok (nothing to commit)",
         );
+        return Ok(exit_code);
     } else {
         if !stderr.trim().is_empty() {
             eprint!("{}", stderr);
@@ -2312,6 +2365,22 @@ mod tests {
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
+    fn test_machine_status_args_detected() {
+        assert!(is_machine_status_args(&["--porcelain".to_string()]));
+        assert!(is_machine_status_args(&["--porcelain=v2".to_string()]));
+        assert!(is_machine_status_args(&["-z".to_string()]));
+        assert!(!is_machine_status_args(&["--branch".to_string()]));
+    }
+
+    #[test]
+    fn test_machine_log_args_detected() {
+        assert!(is_machine_log_args(&["--format=%H".to_string()]));
+        assert!(is_machine_log_args(&["--pretty=format:%H".to_string()]));
+        assert!(is_machine_log_args(&["--pretty=tformat:%H".to_string()]));
+        assert!(!is_machine_log_args(&["--oneline".to_string()]));
     }
 
     #[test]
