@@ -612,6 +612,14 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         )
     })?;
 
+    // Create the parent before creating the same-directory temp file. Global
+    // first-run init may target ~/.claude/CONTEXTCRAWLER.md before ~/.claude
+    // exists; NamedTempFile::new_in(parent) cannot create that directory for
+    // us (#2519). Dry-run callers never reach atomic_write(), so dry-run stays
+    // side-effect free.
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create parent directory {}", parent.display()))?;
+
     // Create temp file in same directory (ensures same filesystem for atomic rename)
     let mut temp_file = NamedTempFile::new_in(parent)
         .with_context(|| format!("Failed to create temp file in {}", parent.display()))?;
