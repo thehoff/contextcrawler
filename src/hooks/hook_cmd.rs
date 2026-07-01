@@ -35,7 +35,8 @@ fn read_stdin_limited() -> Result<String> {
 
 /// Format detected from the preToolUse JSON input.
 enum HookFormat {
-    /// VS Code Copilot Chat / Claude Code: `tool_name` + `tool_input.command`, supports `updatedInput`.
+    /// VS Code Copilot Chat / Claude Code: `tool_name` + `tool_input.command`
+    /// or the newer `tool` + `input.command`, supports `updatedInput`.
     VsCode { command: String },
     /// GitHub Copilot CLI: camelCase `toolName` + `toolArgs` (JSON string), deny-with-suggestion only.
     CopilotCli { command: String },
@@ -72,11 +73,27 @@ pub fn run_copilot() -> Result<()> {
 }
 
 fn detect_format(v: &Value) -> HookFormat {
-    // VS Code Copilot Chat / Claude Code: snake_case keys
+    // VS Code Copilot Chat / Claude Code: legacy snake_case keys.
     if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
         if matches!(tool_name, "runTerminalCommand" | "Bash" | "bash") {
             if let Some(cmd) = v
                 .pointer("/tool_input/command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+            {
+                return HookFormat::VsCode {
+                    command: cmd.to_string(),
+                };
+            }
+        }
+        return HookFormat::PassThrough;
+    }
+
+    // Claude Code newer schema: `tool` + `input.command` (#2493).
+    if let Some(tool_name) = v.get("tool").and_then(|t| t.as_str()) {
+        if matches!(tool_name, "runTerminalCommand" | "Bash" | "bash") {
+            if let Some(cmd) = v
+                .pointer("/input/command")
                 .and_then(|c| c.as_str())
                 .filter(|c| !c.is_empty())
             {
@@ -525,6 +542,175 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     process_claude_payload_with(v, permissions::check_command)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ClaudeInputKey {
+    ToolInput,
+    Input,
+}
+
+impl ClaudeInputKey {
+    fn object_key(self) -> &'static str {
+        match self {
+            ClaudeInputKey::ToolInput => "tool_input",
+            ClaudeInputKey::Input => "input",
+        }
+    }
+
+    fn command_pointer(self) -> &'static str {
+        match self {
+            ClaudeInputKey::ToolInput => "/tool_input/command",
+            ClaudeInputKey::Input => "/input/command",
+        }
+    }
+}
+
+/// Tool identifiers that denote a shell-command invocation (the only ones we
+/// gate). Mirrors the `detect_format` allowlist.
+fn is_bash_tool(tool: &str) -> bool {
+    matches!(tool, "runTerminalCommand" | "Bash" | "bash")
+}
+
+/// Outcome of resolving which schema/command a Claude PreToolUse payload
+/// carries. #2493 + council BLOCKER: the schema is selected by the ACTIVE tool
+/// discriminator (`tool_name` legacy / `tool` new), NOT by command-field
+/// presence — otherwise a mixed payload (`tool: "Bash"` + dangerous
+/// `input.command` + stale benign `tool_input.command`) would gate/auto-allow
+/// the benign legacy field while the harness executes the ungated new one.
+enum ClaudeCmdResolution {
+    /// A command to gate, read from the active schema's command field.
+    Gate { key: ClaudeInputKey, cmd: String },
+    /// Nothing to gate (non-shell tool, or no command on any schema).
+    Ignore,
+    /// Malformed/ambiguous payload — fail closed with this reason.
+    Deny(&'static str),
+}
+
+fn resolve_claude_command(v: &Value) -> ClaudeCmdResolution {
+    // Defensive (council round-3 follow-up): reject any UNMODELED command
+    // container. Claude Code carries the command in `tool_input.command`
+    // (legacy) or `input.command` (new). A top-level `parameters.command` /
+    // `arguments.command` is not a known Claude Code shape — if one appears we
+    // cannot gate it reliably, so fail closed rather than pass a possibly-live
+    // command through ungated. No legitimate payload carries these, so this
+    // never over-denies. If a future schema makes one real, model it here.
+    for ptr in ["/parameters/command", "/arguments/command"] {
+        if v.pointer(ptr).is_some() {
+            return ClaudeCmdResolution::Deny(
+                "contextcrawler: command in an unrecognised payload container; denying",
+            );
+        }
+    }
+
+    let legacy_tool = v.get("tool_name").and_then(|t| t.as_str());
+    let new_tool = v.get("tool").and_then(|t| t.as_str());
+
+    // Rule A (council round 3): conflicting discriminators — both `tool_name`
+    // and `tool` present but naming DIFFERENT tools — is adversarial/malformed.
+    // A legitimate payload carries exactly one. A mixed payload (e.g.
+    // `tool_name: "Read"` + `tool: "Bash"` + a live `input.command`) must not
+    // let the non-Bash claim short-circuit to passthrough while the harness
+    // runs the ungated Bash command. Fail closed.
+    if let (Some(l), Some(n)) = (legacy_tool, new_tool) {
+        if l != n {
+            return ClaudeCmdResolution::Deny(
+                "contextcrawler: payload carries conflicting tool_name and tool \
+                 discriminators; denying (ambiguous schema)",
+            );
+        }
+    }
+
+    let legacy_cmd = v.pointer(ClaudeInputKey::ToolInput.command_pointer());
+    let new_cmd = v.pointer(ClaudeInputKey::Input.command_pointer());
+
+    // Any present-but-non-string command on EITHER schema is a malformed shape
+    // (#100 G2) — fail closed, so a non-string can't be coerced or hide on the
+    // inactive schema (council round 3).
+    for c in [legacy_cmd, new_cmd].into_iter().flatten() {
+        if !c.is_string() {
+            return ClaudeCmdResolution::Deny(
+                "contextcrawler: hook payload `command` was not a string; denying",
+            );
+        }
+    }
+
+    // Conflicting commands across schemas → fail closed: we cannot know which
+    // the harness will execute (council BLOCKER, #2493).
+    if let (Some(lc), Some(nc)) = (legacy_cmd, new_cmd) {
+        if lc != nc {
+            return ClaudeCmdResolution::Deny(
+                "contextcrawler: payload carries tool_input.command and input.command \
+                 with different values; denying (ambiguous schema)",
+            );
+        }
+    }
+
+    // Select the active schema by tool discriminator (mirrors detect_format:
+    // legacy `tool_name` first, then new `tool`). Fall back to command-field
+    // presence only when neither discriminator is present.
+    let (key, tool) = match (legacy_tool, new_tool) {
+        (Some(t), _) => (ClaudeInputKey::ToolInput, Some(t)),
+        (None, Some(t)) => (ClaudeInputKey::Input, Some(t)),
+        (None, None) => {
+            if legacy_cmd.is_some() {
+                (ClaudeInputKey::ToolInput, None)
+            } else if new_cmd.is_some() {
+                (ClaudeInputKey::Input, None)
+            } else {
+                return ClaudeCmdResolution::Ignore;
+            }
+        }
+    };
+
+    let any_command = legacy_cmd.is_some() || new_cmd.is_some();
+
+    // Rule C (council round 3): a non-shell tool (Read/Edit/editFiles) must
+    // carry NO command. A non-Bash tool that nonetheless presents a command
+    // field is anomalous — legitimate non-shell payloads never do — and could
+    // be a Bash command smuggled under a benign discriminator. Fail closed
+    // rather than pass it through ungated; only a clean no-command payload
+    // stays the lenient Ignore.
+    if let Some(t) = tool {
+        if !is_bash_tool(t) {
+            if any_command {
+                return ClaudeCmdResolution::Deny(
+                    "contextcrawler: non-shell tool carries a command field; denying \
+                     (ambiguous payload)",
+                );
+            }
+            return ClaudeCmdResolution::Ignore;
+        }
+    }
+
+    // Active schema (a Bash tool, or the no-discriminator fallback) must carry a
+    // non-empty string command. Non-string was already denied above.
+    match v.pointer(key.command_pointer()) {
+        Some(Value::String(s)) if !s.is_empty() => ClaudeCmdResolution::Gate {
+            key,
+            cmd: s.clone(),
+        },
+        // Empty string: nothing to run — preserve the lenient Ignore.
+        Some(Value::String(_)) => ClaudeCmdResolution::Ignore,
+        _ => {
+            // Active schema has no command. If the OTHER schema carries one, the
+            // harness could run a command we never gated → fail closed. If
+            // neither carries one, there is genuinely nothing to gate (matches
+            // the long-standing lenient passthrough for a bare Bash payload).
+            let other_present = match key {
+                ClaudeInputKey::ToolInput => new_cmd.is_some(),
+                ClaudeInputKey::Input => legacy_cmd.is_some(),
+            };
+            if other_present {
+                ClaudeCmdResolution::Deny(
+                    "contextcrawler: active tool schema missing `command` while the \
+                     other schema carries one; denying (ambiguous payload)",
+                )
+            } else {
+                ClaudeCmdResolution::Ignore
+            }
+        }
+    }
+}
+
 /// Stderr line emitted when a gate flags a command `Ask` but it has no
 /// contextcrawler rewrite. The command is routed to a real Claude Code `ask`
 /// permission decision so the user can approve or deny it (#111). Factored
@@ -567,26 +753,21 @@ fn process_claude_payload_with_gate(
     // Copy-paste trust hint built from the Tirith verdict (#197), surfaced in
     // the Ask permission reason so the user can act on the flag.
     let mut gate_suggestion: Option<String> = None;
-    // Distinguish "legitimately no command to rewrite" (Ignore — correct)
-    // from "malformed payload shape" (Deny — fail closed, #100 G2).
-    let cmd = match v.pointer("/tool_input/command") {
-        // A present `command` that is not a non-empty string is a shape
-        // error — the harness sent something we can't reason about.
-        Some(c) => match c.as_str() {
-            Some(s) if !s.is_empty() => s,
-            Some(_) => return PayloadAction::Ignore, // empty string: nothing to do
-            None => {
-                return PayloadAction::Deny {
-                    reason: "contextcrawler: hook payload `command` was not a string; denying"
-                        .to_string(),
-                    audit_tag: "deny:malformed_payload",
-                    cmd: String::new(),
-                }
+    // #2493 + council BLOCKER: resolve the active schema + command by tool
+    // discriminator (not field presence), distinguishing "nothing to gate"
+    // (Ignore) from "malformed/ambiguous payload" (Deny — fail closed, #100 G2).
+    let (input_key, cmd_owned) = match resolve_claude_command(v) {
+        ClaudeCmdResolution::Gate { key, cmd } => (key, cmd),
+        ClaudeCmdResolution::Ignore => return PayloadAction::Ignore,
+        ClaudeCmdResolution::Deny(reason) => {
+            return PayloadAction::Deny {
+                reason: reason.to_string(),
+                audit_tag: "deny:malformed_payload",
+                cmd: String::new(),
             }
-        },
-        // No `command` field at all — non-Bash tool or no command to gate.
-        None => return PayloadAction::Ignore,
+        }
     };
+    let cmd: &str = &cmd_owned;
 
     let verdict = check(cmd);
     if verdict == PermissionVerdict::Deny {
@@ -682,7 +863,10 @@ fn process_claude_payload_with_gate(
     };
 
     let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        let mut ti = v
+            .get(input_key.object_key())
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         if let Some(obj) = ti.as_object_mut() {
             obj.insert("command".into(), Value::String(rewritten.clone()));
         }
@@ -1002,6 +1186,13 @@ mod tests {
         })
     }
 
+    fn claude_new_schema_input(tool: &str, cmd: &str) -> Value {
+        json!({
+            "tool": tool,
+            "input": { "command": cmd }
+        })
+    }
+
     fn copilot_cli_input(cmd: &str) -> Value {
         let args = serde_json::to_string(&json!({ "command": cmd })).unwrap();
         json!({ "toolName": "bash", "toolArgs": args })
@@ -1025,6 +1216,14 @@ mod tests {
     fn test_detect_vscode_bash() {
         assert!(matches!(
             detect_format(&vscode_input("Bash", "git status")),
+            HookFormat::VsCode { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_claude_new_schema_bash() {
+        assert!(matches!(
+            detect_format(&claude_new_schema_input("Bash", "git status")),
             HookFormat::VsCode { .. }
         ));
     }
@@ -1299,6 +1498,196 @@ mod tests {
         }
     }
 
+    /// #2493: the NEW Claude Code schema (`tool` + `input.command`) must pass
+    /// through the defence-in-depth gates EXACTLY like the legacy schema — a
+    /// supply-chain `Deny` and a Tirith `Ask` must both fire when the command
+    /// arrives via `input.command`, proving the new shape can't bypass gating.
+    #[test]
+    fn test_new_schema_is_gated_like_legacy() {
+        let v = json!({
+            "tool": "Bash",
+            "input": { "command": "git status" }
+        });
+        // Gate Deny (supply-chain block) must win even on the new schema.
+        match process_claude_payload_with_gate(
+            &v,
+            |_| PermissionVerdict::Default,
+            |_| GateDecision::Deny {
+                reason: "blocked".to_string(),
+            },
+        ) {
+            PayloadAction::Deny { audit_tag, .. } => {
+                assert_eq!(audit_tag, "deny:supply_chain_block")
+            }
+            other => panic!("new schema must honour gate Deny, got {other:?}"),
+        }
+        // Gate Ask must SUPPRESS an otherwise-auto-allow on the new schema:
+        // the rewrite is emitted but without the `permissionDecision: allow`
+        // key, so Claude Code prompts instead of running unattended.
+        match process_claude_payload_with_gate(
+            &v,
+            |_| PermissionVerdict::Allow,
+            |_| GateDecision::Ask { suggestion: None },
+        ) {
+            PayloadAction::Rewrite { output, .. } => {
+                let decision = output
+                    .pointer("/hookSpecificOutput/permissionDecision")
+                    .and_then(|d| d.as_str());
+                assert_ne!(
+                    decision,
+                    Some("allow"),
+                    "gate Ask must suppress auto-allow on the new schema"
+                );
+            }
+            other => panic!("new schema gate Ask should Rewrite-without-allow, got {other:?}"),
+        }
+    }
+
+    /// Council BLOCKER (#2493): a mixed payload — new-schema `tool: "Bash"`
+    /// carrying a dangerous `input.command` plus a stale benign
+    /// `tool_input.command` — must FAIL CLOSED, never gate/auto-allow the
+    /// benign legacy field while the harness runs the ungated new one.
+    #[test]
+    fn test_dual_schema_mismatch_denies() {
+        let v = json!({
+            "tool": "Bash",
+            "tool_input": { "command": "echo safe" },
+            "input": { "command": "rm -rf /" }
+        });
+        assert!(
+            matches!(
+                process_claude_payload_with_gate(
+                    &v,
+                    |_| PermissionVerdict::Allow,
+                    |_| GateDecision::Proceed,
+                ),
+                PayloadAction::Deny { .. }
+            ),
+            "conflicting dual-schema payload must fail closed"
+        );
+    }
+
+    /// The active schema is chosen by the tool discriminator: a new-schema
+    /// payload gates `input.command`, not whatever a legacy field might hold.
+    #[test]
+    fn test_new_schema_selected_by_discriminator() {
+        let v = json!({
+            "tool": "Bash",
+            "input": { "command": "git status" }
+        });
+        match process_claude_payload_with_gate(
+            &v,
+            |_| PermissionVerdict::Default,
+            |_| GateDecision::Proceed,
+        ) {
+            PayloadAction::Rewrite { cmd, .. } => assert_eq!(cmd, "git status"),
+            other => panic!("expected Rewrite gating input.command, got {other:?}"),
+        }
+    }
+
+    /// New-schema tool but the command lives only on the stale legacy field:
+    /// the active schema is missing its command while another is present →
+    /// fail closed (Codex: no silent fall-open on partial new-schema payloads).
+    #[test]
+    fn test_active_schema_missing_command_denies() {
+        let v = json!({
+            "tool": "Bash",
+            "tool_input": { "command": "git status" }
+        });
+        assert!(matches!(
+            process_claude_payload_with_gate(
+                &v,
+                |_| PermissionVerdict::Allow,
+                |_| GateDecision::Proceed,
+            ),
+            PayloadAction::Deny { .. }
+        ));
+    }
+
+    /// Council round 3 BLOCKER: a payload with CONFLICTING discriminators —
+    /// legacy `tool_name: "Read"` (non-Bash) plus new `tool: "Bash"` carrying a
+    /// live `input.command` — must fail closed, not short-circuit to Ignore and
+    /// let the Bash command run ungated.
+    #[test]
+    fn test_conflicting_discriminators_deny() {
+        let v = json!({
+            "tool_name": "Read",
+            "tool": "Bash",
+            "input": { "command": "rm -rf /" }
+        });
+        assert!(
+            matches!(
+                process_claude_payload_with_gate(
+                    &v,
+                    |_| PermissionVerdict::Allow,
+                    |_| GateDecision::Proceed,
+                ),
+                PayloadAction::Deny { .. }
+            ),
+            "conflicting tool discriminators must fail closed"
+        );
+    }
+
+    /// A non-Bash tool that nonetheless carries a command on the other schema is
+    /// anomalous (legit non-shell payloads never do) → fail closed.
+    #[test]
+    fn test_non_bash_tool_with_command_denies() {
+        let v = json!({
+            "tool_name": "Read",
+            "input": { "command": "rm -rf /" }
+        });
+        assert!(matches!(
+            process_claude_payload_with_gate(
+                &v,
+                |_| PermissionVerdict::Allow,
+                |_| GateDecision::Proceed,
+            ),
+            PayloadAction::Deny { .. }
+        ));
+    }
+
+    /// A non-string command on the INACTIVE schema must still deny — a
+    /// non-string can't be allowed to hide on the schema we didn't select.
+    #[test]
+    fn test_inactive_schema_non_string_command_denies() {
+        let v = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" },
+            "input": { "command": 123 }
+        });
+        assert!(matches!(
+            process_claude_payload_with_gate(
+                &v,
+                |_| PermissionVerdict::Allow,
+                |_| GateDecision::Proceed,
+            ),
+            PayloadAction::Deny { .. }
+        ));
+    }
+
+    /// Defensive: a command in an UNMODELED container (`parameters.command` /
+    /// `arguments.command`) — not a known Claude Code shape — must fail closed
+    /// rather than pass through ungated.
+    #[test]
+    fn test_unmodeled_command_container_denies() {
+        for v in [
+            json!({ "tool": "Bash", "parameters": { "command": "rm -rf /" } }),
+            json!({ "tool_name": "Bash", "arguments": { "command": "rm -rf /" } }),
+        ] {
+            assert!(
+                matches!(
+                    process_claude_payload_with_gate(
+                        &v,
+                        |_| PermissionVerdict::Allow,
+                        |_| GateDecision::Proceed,
+                    ),
+                    PayloadAction::Deny { .. }
+                ),
+                "unmodeled command container must fail closed: {v}"
+            );
+        }
+    }
+
     /// Direct verdict-injection proof of the #2286 None-branch fix: an `Ask`
     /// permission verdict on a non-rewritable command (no gate involvement)
     /// must yield `PayloadAction::Ask` with the `ask:no_rewrite` tag and the
@@ -1336,6 +1725,20 @@ mod tests {
             .and_then(|c| c.as_str())
             .unwrap();
         assert_eq!(cmd, "contextcrawler git status");
+    }
+
+    #[test]
+    fn test_claude_rewrite_new_tool_input_schema() {
+        let input = json!({
+            "tool": "Bash",
+            "input": { "command": "git status", "timeout": 30000 }
+        })
+        .to_string();
+        let result = run_claude_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "contextcrawler git status");
+        assert_eq!(updated["timeout"], 30000);
     }
 
     #[test]

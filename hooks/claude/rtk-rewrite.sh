@@ -1,87 +1,30 @@
 #!/usr/bin/env bash
-# rtk-hook-version: 3
-# ContextCrawler Claude Code hook — rewrites commands to use contextcrawler for token savings.
-# Requires: contextcrawler on PATH (with the rewrite subcommand), jq
+# rtk-hook-version: 4
+# ContextCrawler Claude Code hook — thin delegator.
 #
-# This is a thin delegating hook: all rewrite logic lives in `contextcrawler rewrite`,
-# which is the single source of truth (src/discover/registry.rs).
-# To add or change rewrite rules, edit the Rust registry — not this file.
+# This hook makes NO decisions of its own. It hands the raw PreToolUse payload
+# on stdin to the Rust binary, which is the single source of truth for schema
+# selection, security gating (Tirith + supply-chain), and the permission
+# verdict (allow / ask / deny / rewrite) — see src/hooks/hook_cmd.rs.
 #
-# Exit code protocol for `contextcrawler rewrite`:
-#   0 + stdout  Rewrite found, no deny/ask rule matched → auto-allow
-#   1           No RTK equivalent → pass through unchanged
-#   2           Deny rule matched → pass through (Claude Code native deny handles it)
-#   3 + stdout  Ask rule matched → rewrite but let Claude Code prompt the user
-
-if ! command -v jq &>/dev/null; then
-  echo "[contextcrawler] WARNING: jq is not installed. Hook cannot rewrite commands. Install jq: https://jqlang.github.io/jq/download/" >&2
-  exit 0
-fi
+# Keeping every decision in one tested place removes the whole class of
+# schema/gating bugs that recurs when the logic is duplicated in bash (the
+# #2493 council review found three successive fail-open holes in the old
+# bash implementation). To change rewrite or gate behaviour, edit the Rust
+# source — not this file.
+#
+# Requires: contextcrawler on PATH. (No jq — the binary parses the payload.)
 
 if ! command -v contextcrawler &>/dev/null; then
   echo "[contextcrawler] WARNING: contextcrawler is not installed or not in PATH. Hook cannot rewrite commands. Install: https://github.com/thehoff/contextcrawler#install" >&2
+  # Fail OPEN only on a MISSING binary: the proxy is a token-saving optimisation,
+  # not a security boundary the user opted into at this layer, so never block the
+  # workflow just because the tool is absent (fallback-pattern rule). The binary
+  # itself fails CLOSED on malformed/ambiguous payloads once present.
   exit 0
 fi
 
-# ContextCrawler downstream: no version guard.
-# Upstream's logic parsed `rtk <ver>` output to enforce a minimum version;
-# our --version banner format doesn't match that shape, and ContextCrawler
-# always ships against a recent rtk core. The hook simply requires the
-# binary to be present; the binary itself enforces its own minimums.
-:
-
-INPUT=$(cat)
-CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT")
-
-if [ -z "$CMD" ]; then
-  exit 0
-fi
-
-# Delegate all rewrite + permission logic to the Rust binary.
-REWRITTEN=$(contextcrawler rewrite "$CMD" 2>/dev/null)
-EXIT_CODE=$?
-
-case $EXIT_CODE in
-  0)
-    # Rewrite found, no permission rules matched — safe to auto-allow.
-    # If the output is identical, the command was already using RTK.
-    [ "$CMD" = "$REWRITTEN" ] && exit 0
-    ;;
-  1)
-    # No RTK equivalent — pass through unchanged.
-    exit 0
-    ;;
-  2)
-    # Deny rule matched — let Claude Code's native deny rule handle it.
-    exit 0
-    ;;
-  3)
-    # Ask rule matched — rewrite the command but do NOT auto-allow so that
-    # Claude Code prompts the user for confirmation.
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-
-if [ "$EXIT_CODE" -eq 3 ]; then
-  # Ask: rewrite the command, omit permissionDecision so Claude Code prompts.
-  jq -c --arg cmd "$REWRITTEN" \
-    '.tool_input.command = $cmd | {
-      "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "updatedInput": .tool_input
-      }
-    }' <<<"$INPUT"
-else
-  # Allow: rewrite the command and auto-allow.
-  jq -c --arg cmd "$REWRITTEN" \
-    '.tool_input.command = $cmd | {
-      "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "allow",
-        "permissionDecisionReason": "ContextCrawler auto-rewrite",
-        "updatedInput": .tool_input
-      }
-    }' <<<"$INPUT"
-fi
+# Delegate the entire decision to the Rust hook handler. It reads the payload
+# from stdin and writes the PreToolUse hook JSON (or nothing, to pass through)
+# to stdout, always exiting 0 — the verdict travels in the JSON, not the code.
+exec contextcrawler hook claude
