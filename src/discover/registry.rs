@@ -2004,7 +2004,7 @@ mod tests {
     fn test_rewrite_rg_pattern() {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("contextcrawler grep \"fn main\"".into())
+            Some("contextcrawler rg \"fn main\"".into())
         );
     }
 
