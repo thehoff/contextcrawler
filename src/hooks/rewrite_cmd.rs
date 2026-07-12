@@ -167,7 +167,9 @@ mod tests {
     /// See: https://github.com/rtk-ai/rtk/issues/1155
     mod exit_code_protocol {
         use super::registry;
-        use crate::hooks::permissions::{check_command_with_rules, PermissionVerdict};
+        use crate::hooks::permissions::{
+            check_command_with_rules, check_command_with_rules_trusted, PermissionVerdict,
+        };
 
         /// Exit code that `run()` returns for each verdict:
         ///   Allow  → 0 (exit Ok(()))
@@ -261,7 +263,10 @@ mod tests {
             // UNSAFE substitution (reads file contents), so the verdict is Ask
             // regardless of rules — must exit 3, not 1. (A safe payload like
             // `$(whoami)` is now attestable and would exit 1; see #2286 follow-up.)
-            let verdict = check_command_with_rules("notarealcmd $(cat secret)", &[], &[], &[]);
+            // #209: pin untrusted so ambient CONTEXTCRAWLER_TRUST_UNATTESTABLE
+            // can't flip this attestation assert.
+            let verdict =
+                check_command_with_rules_trusted("notarealcmd $(cat secret)", &[], &[], &[], false);
             assert_eq!(verdict, PermissionVerdict::Ask);
             assert!(registry::rewrite_command("notarealcmd $(cat secret)", &[], &[]).is_none());
             assert_eq!(

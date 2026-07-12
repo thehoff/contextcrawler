@@ -1464,6 +1464,7 @@ mod tests {
         // Non-rewritable + UNSAFE command substitution → Ask verdict. Must
         // escalate to a real `ask`, NOT Skip (which leaks to the host's allow
         // rule). `$(cat …)` reads file contents → not attestable.
+        let _env = crate::hooks::test_env::TrustEnvGuard::untrusted(); // #209
         assert!(
             live_path_asks("notarealcmd $(cat /etc/passwd)"),
             "an unattestable non-rewritable command must emit ask, not skip (#2286)"
@@ -1473,6 +1474,7 @@ mod tests {
     #[test]
     fn test_live_file_redirect_non_rewritable_asks() {
         // Non-rewritable + file-write redirect → Ask verdict → must `ask`.
+        let _env = crate::hooks::test_env::TrustEnvGuard::untrusted(); // #209
         assert!(
             live_path_asks("notarealcmd > /tmp/x"),
             "a file-write-redirect non-rewritable command must emit ask (#2286)"
