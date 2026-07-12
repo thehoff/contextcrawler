@@ -3,6 +3,35 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.2] — 2026-07-13
+
+Security-precision and analytics-honesty release. Rebuilds the Tirith
+`pipe_to_interpreter` false-positive filter around the pipe source, and corrects
+the `gain` savings headline to the host-truncated counterfactual.
+
+### Fixed
+- **Tirith `pipe_to_interpreter` false positives (#191).** The gate downgraded
+  almost every local data-parsing pipe (`grep … | python3 -c "json.load(…)"`) to
+  an Ask. Suppression is now gated on the pipe SOURCE, not the program body:
+  a finding is a false positive only when no producer anywhere in the command
+  fetches remote content (fetcher denylist + URL/`/dev/tcp` scan) AND every
+  interpreter sink runs an explicit program (`-c`/`-e`/`-m`/script). Body
+  screening remains defence-in-depth only, since proving an arbitrary program
+  body benign by pattern is undecidable. Eight rounds of council review closed
+  every bypass (bundled getopt flags, `exec`/`eval` aliasing, wrapper-hidden and
+  assignment-carried fetchers, `/dev/stdin` script paths, xargs interpolation,
+  bash `/dev/tcp`). Measured 56.9% reduction in false prompts on real usage;
+  all genuine `curl … | sh` shapes still prompt.
+- **`gain` savings counterfactual (#208).** The headline divided
+  `saved / raw_output`, but the host truncates a command's output before the
+  model sees it, so a few huge outputs inflated the figure. `gain` now reports
+  an EFFECTIVE metric that caps each command's input at the host's output limit
+  (`[tracking] host_truncation_tokens`, default 7500 ≈ 30000 chars), with the
+  raw figure kept beneath for reference. Raw recording is unchanged ground
+  truth; JSON export carries the effective fields.
+- **`read` line-range flags (#207, tracked).** Recorded for a follow-up: agents
+  passing `--start-line`/`--end-line` currently fall back to raw.
+
 ## [0.4.1] — 2026-07-01
 
 Hardening + compatibility release. Adds support for Claude Code's newer hook
