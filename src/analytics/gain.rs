@@ -137,7 +137,12 @@ pub fn run(
                 summary.effective_savings_pct
             ),
         );
-        if summary.total_saved != summary.effective_saved {
+        // Show the raw line whenever capping changed the picture. Gate on the
+        // INPUT, not the saved total: a huge zero-savings dump (#196 inflation
+        // or an unfiltered passthrough) contributes 0 to both saved totals yet
+        // still shrinks effective_input, so the two percentages diverge while
+        // total_saved == effective_saved (council #208, codex).
+        if summary.total_input != summary.effective_input {
             print_kpi(
                 "  vs raw output",
                 format!(
