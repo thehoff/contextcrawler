@@ -187,7 +187,9 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
-use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::constants::{
+    DEFAULT_HISTORY_DAYS, DEFAULT_HOST_TRUNCATION_TOKENS, HISTORY_DB, RTK_DATA_DIR,
+};
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -250,8 +252,18 @@ pub struct GainSummary {
     /// Total tokens by which filters INFLATED output beyond input (#196).
     /// `saved_tokens` floors at zero, so inflation is otherwise invisible.
     pub total_inflation: usize,
-    /// Average savings percentage across all commands
+    /// Average savings percentage across all commands (`saved / raw input`).
+    /// This is savings versus the unfiltered command output in bytes.
     pub avg_savings_pct: f64,
+    /// #208: input tokens after capping each command at the host's output
+    /// truncation limit — the tokens the model would actually have ingested
+    /// without contextcrawler. A few huge outputs the host would truncate
+    /// no longer inflate the headline.
+    pub effective_input: usize,
+    /// #208: tokens saved against the host-capped counterfactual.
+    pub effective_saved: usize,
+    /// #208: `effective_saved / effective_input` — the honest savings figure.
+    pub effective_savings_pct: f64,
     /// Total execution time across all commands (milliseconds)
     pub total_time_ms: u64,
     /// Average execution time per command (milliseconds)
@@ -916,14 +928,29 @@ impl Tracker {
     /// Get summary statistics filtered by project path. // added
     ///
     /// When `project_path` is `Some`, matches the exact working directory
-    /// or any subdirectory (prefix match with path separator).
+    /// or any subdirectory (prefix match with path separator). Uses the
+    /// default host truncation cap for the effective-savings metric.
     pub fn get_summary_filtered(&self, project_path: Option<&str>) -> Result<GainSummary> {
+        self.get_summary_capped(project_path, DEFAULT_HOST_TRUNCATION_TOKENS)
+    }
+
+    /// #208: as [`Self::get_summary_filtered`], but caps each command's input
+    /// at `host_truncation_tokens` when computing the effective-savings
+    /// metric — the tokens the model would truly have ingested without
+    /// contextcrawler, since the host truncates raw command output.
+    pub fn get_summary_capped(
+        &self,
+        project_path: Option<&str>,
+        host_truncation_tokens: usize,
+    ) -> Result<GainSummary> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
         let mut total_inflation = 0usize; // added (#196): output-overflow, floored elsewhere
+        let mut effective_input = 0usize; // added (#208): host-capped counterfactual
+        let mut effective_saved = 0usize; // added (#208)
         let mut total_time_ms = 0u64;
 
         let mut stmt = self.conn.prepare(
@@ -950,11 +977,22 @@ impl Tracker {
             total_output += output;
             total_saved += saved;
             total_inflation += inflation; // added (#196)
+                                          // #208: the host would have truncated raw output to the cap before
+                                          // the model saw it, so the counterfactual input is min(raw, cap).
+            let capped_input = input.min(host_truncation_tokens);
+            effective_input += capped_input;
+            effective_saved += capped_input.saturating_sub(output);
             total_time_ms += time_ms;
         }
 
         let avg_savings_pct = if total_input > 0 {
             (total_saved as f64 / total_input as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let effective_savings_pct = if effective_input > 0 {
+            (effective_saved as f64 / effective_input as f64) * 100.0
         } else {
             0.0
         };
@@ -975,6 +1013,9 @@ impl Tracker {
             total_saved,
             total_inflation, // added (#196)
             avg_savings_pct,
+            effective_input,       // added (#208)
+            effective_saved,       // added (#208)
+            effective_savings_pct, // added (#208)
             total_time_ms,
             avg_time_ms,
             by_command,
@@ -987,9 +1028,9 @@ impl Tracker {
         project_path: Option<&str>, // added
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        // Avg% is volume-weighted (SUM(saved)/SUM(input)) to match the
-        // summary-level metric — an unweighted AVG(savings_pct) over-counts
-        // low-volume high-percentage invocations. Guard divide-by-zero → 0%.
+                                                                                 // Avg% is volume-weighted (SUM(saved)/SUM(input)) to match the
+                                                                                 // summary-level metric — an unweighted AVG(savings_pct) over-counts
+                                                                                 // low-volume high-percentage invocations. Guard divide-by-zero → 0%.
         let mut stmt = self.conn.prepare(
             "SELECT ctxcrl_cmd, COUNT(*), SUM(saved_tokens),
                     CASE WHEN SUM(input_tokens) > 0
@@ -1664,10 +1705,8 @@ fn get_db_path() -> Result<PathBuf> {
     // that need to inspect tracking still work because every `Tracker::new()`
     // call within the same process resolves to the same path.
     if is_test_context() {
-        let tmp = std::env::temp_dir().join(format!(
-            "contextcrawler-test-{}.db",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("contextcrawler-test-{}.db", std::process::id()));
         return Ok(tmp);
     }
 
@@ -2020,6 +2059,58 @@ mod tests {
     }
 
     #[test]
+    fn summary_effective_savings_caps_input_at_host_truncation() {
+        // #208: the host truncates a command's raw output before the model
+        // ever sees it, so the honest counterfactual is min(raw, cap). A
+        // single monster command must not inflate the headline.
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        // Monster: 1_000_000 raw tokens the host would have truncated to 30k.
+        t.record(
+            "cat big.log",
+            "contextcrawler cat big.log",
+            1_000_000,
+            100,
+            0,
+        )
+        .unwrap();
+        // Ordinary: well under the cap, counted as-is.
+        t.record("git log", "contextcrawler git log", 100, 30, 0)
+            .unwrap();
+
+        let s = t.get_summary_capped(None, 30_000).expect("capped summary");
+
+        // Raw totals are unchanged ground truth.
+        assert_eq!(s.total_input, 1_000_100);
+        assert_eq!(s.total_saved, 999_970);
+
+        // Effective caps the monster's input at 30_000: 30_000 + 100.
+        assert_eq!(s.effective_input, 30_100, "monster input capped at 30k");
+        // Effective saved: (30_000 - 100) + (100 - 30) = 29_900 + 70.
+        assert_eq!(s.effective_saved, 29_970);
+        let expect_pct = 29_970.0 / 30_100.0 * 100.0;
+        assert!(
+            (s.effective_savings_pct - expect_pct).abs() < 0.01,
+            "effective pct {} != {}",
+            s.effective_savings_pct,
+            expect_pct
+        );
+        // The honest number is far below the raw 99.99%.
+        assert!(s.effective_savings_pct < s.avg_savings_pct);
+    }
+
+    #[test]
+    fn summary_effective_equals_raw_when_nothing_exceeds_cap() {
+        // When every command is under the cap, effective == raw.
+        let t = Tracker::new_in_memory().expect("in-memory tracker");
+        t.record("git log", "contextcrawler git log", 100, 30, 0)
+            .unwrap();
+        let s = t.get_summary_capped(None, 30_000).expect("capped summary");
+        assert_eq!(s.effective_input, s.total_input);
+        assert_eq!(s.effective_saved, s.total_saved);
+        assert!((s.effective_savings_pct - s.avg_savings_pct).abs() < 0.01);
+    }
+
+    #[test]
     fn summary_total_inflation_zero_on_clean_data() {
         // #196: a clean install (no inflation) must report 0 so the gain
         // output omits the "Tokens inflated" line entirely.
@@ -2041,7 +2132,7 @@ mod tests {
         // Inflating tool: input>0 so it survives the leak filter, output>input.
         // `weak_filter_tool_key` collapses "rtk grep x" → "grep x".
         t.record("grep x", "rtk grep x", 10, 25, 0).unwrap(); // inflates by 15
-        // Clean tool: real savings, no inflation.
+                                                              // Clean tool: real savings, no inflation.
         t.record("git log", "rtk git log", 100, 30, 0).unwrap();
         let weak = t.get_weak_filters(None, None).expect("weak filters");
         let grep = weak
@@ -2096,14 +2187,20 @@ mod tests {
         let out = scrub_secrets(
             r#"curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig" https://api"#,
         );
-        assert!(out.contains("Authorization: Bearer <REDACTED>"), "got: {out}");
+        assert!(
+            out.contains("Authorization: Bearer <REDACTED>"),
+            "got: {out}"
+        );
         assert!(!out.contains("eyJhbGciOiJIUzI1NiJ9"));
     }
 
     #[test]
     fn scrub_redacts_basic_auth_header() {
         let out = scrub_secrets(r#"curl -H 'Authorization: Basic dXNlcjpwYXNz' https://api"#);
-        assert!(out.contains("Authorization: Basic <REDACTED>"), "got: {out}");
+        assert!(
+            out.contains("Authorization: Basic <REDACTED>"),
+            "got: {out}"
+        );
     }
 
     #[test]
@@ -2163,7 +2260,10 @@ mod tests {
             "quoted password leaked: {out}"
         );
         let out = scrub_secrets(r#"foo --token 'tok en with spaces' bar"#);
-        assert!(!out.contains("tok en with spaces"), "single-quoted leaked: {out}");
+        assert!(
+            !out.contains("tok en with spaces"),
+            "single-quoted leaked: {out}"
+        );
     }
 
     #[test]
@@ -2266,7 +2366,10 @@ mod tests {
         let input_tokens = estimate_tokens(raw);
         // No clamp: the true (larger) output count is what gets recorded.
         let output_tokens = estimate_tokens(inflated);
-        assert!(output_tokens > input_tokens, "precondition: filter inflated");
+        assert!(
+            output_tokens > input_tokens,
+            "precondition: filter inflated"
+        );
 
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
         tracker
@@ -2287,7 +2390,10 @@ mod tests {
             .expect("record not found");
 
         // #95: saved floored at 0, savings_pct at 0% (never negative).
-        assert_eq!(rec.saved_tokens, 0, "inflation must not show negative savings");
+        assert_eq!(
+            rec.saved_tokens, 0,
+            "inflation must not show negative savings"
+        );
         assert!(
             rec.savings_pct >= 0.0 && rec.savings_pct < 0.001,
             "savings floored at 0%, got {:.2}%",
@@ -2314,10 +2420,9 @@ mod tests {
         let prior = std::env::var("RTK_DB_PATH").ok();
         // RTK_DB_PATH is confined to $HOME (G3 audit #111); a unique per-pid
         // file keeps total_inflation_tokens() reading only this test's rows.
-        let tmp = dirs::home_dir().expect("home dir").join(format!(
-            "cc-track-inflation-{}.db",
-            std::process::id()
-        ));
+        let tmp = dirs::home_dir()
+            .expect("home dir")
+            .join(format!("cc-track-inflation-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         std::env::set_var("RTK_DB_PATH", &tmp);
 
@@ -2327,7 +2432,10 @@ mod tests {
         let inflated = "═══════════════════════════════════════\nTypeScript: 0 errors\n";
         let input_tokens = estimate_tokens(raw);
         let output_tokens = estimate_tokens(inflated);
-        assert!(output_tokens > input_tokens, "precondition: filter inflated");
+        assert!(
+            output_tokens > input_tokens,
+            "precondition: filter inflated"
+        );
 
         let timer = TimedExecution::start();
         timer.track("tsc -b", "contextcrawler tsc -b", raw, inflated);
@@ -2367,7 +2475,11 @@ mod tests {
         let filtered = "6 lines";
         let input_tokens = estimate_tokens(raw);
         let output_tokens = estimate_tokens(filtered);
-        assert_eq!(output_tokens, estimate_tokens(filtered), "real saving untouched");
+        assert_eq!(
+            output_tokens,
+            estimate_tokens(filtered),
+            "real saving untouched"
+        );
         assert!(output_tokens < input_tokens);
     }
 
@@ -2653,7 +2765,12 @@ mod tests {
         for escape in [
             home.join("sub").join("..").join("..").join("evil.db"),
             home.join("..").join("evil.db"),
-            home.join("a").join("b").join("..").join("..").join("..").join("x"),
+            home.join("a")
+                .join("b")
+                .join("..")
+                .join("..")
+                .join("..")
+                .join("x"),
         ] {
             env::set_var("RTK_DB_PATH", &escape);
             let result = get_db_path();
@@ -2681,8 +2798,7 @@ mod tests {
         let name = format!("contextcrawler-dotdot-{}.db", std::process::id());
         let with_dotdot = home.join("sub").join("..").join(&name);
         env::set_var("RTK_DB_PATH", &with_dotdot);
-        let resolved =
-            get_db_path().expect("a `..` staying inside $HOME must resolve");
+        let resolved = get_db_path().expect("a `..` staying inside $HOME must resolve");
         assert_eq!(
             resolved,
             home.join(&name),
@@ -2797,9 +2913,15 @@ mod tests {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         // 2 recovered, 1 not → recovery_rate = 2/3.
-        tracker.record_parse_failure("cmd_ok1", "err", true).unwrap();
-        tracker.record_parse_failure("cmd_ok2", "err", true).unwrap();
-        tracker.record_parse_failure("cmd_fail", "err", false).unwrap();
+        tracker
+            .record_parse_failure("cmd_ok1", "err", true)
+            .unwrap();
+        tracker
+            .record_parse_failure("cmd_ok2", "err", true)
+            .unwrap();
+        tracker
+            .record_parse_failure("cmd_fail", "err", false)
+            .unwrap();
 
         let summary = tracker.get_parse_failure_summary().unwrap();
         assert_eq!(summary.total, 3);
@@ -2887,10 +3009,9 @@ mod tests {
 
         // RTK_DB_PATH is confined to $HOME (G3 audit #111) — keep the opt-in
         // DB inside $HOME so get_db_path() resolves it unchanged.
-        let tmp = dirs::home_dir().expect("home dir").join(format!(
-            "contextcrawler-optin-{}.db",
-            std::process::id()
-        ));
+        let tmp = dirs::home_dir()
+            .expect("home dir")
+            .join(format!("contextcrawler-optin-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         std::env::set_var("RTK_DB_PATH", &tmp);
 
@@ -3086,9 +3207,7 @@ mod tests {
         // new_in_memory() does not call ensure_release_boundary() (production
         // path does, but the test constructor mirrors only the schema). Call
         // it explicitly to validate the insert path.
-        tracker
-            .ensure_release_boundary()
-            .expect("boundary insert");
+        tracker.ensure_release_boundary().expect("boundary insert");
         let ts = tracker
             .latest_boundary_timestamp()
             .expect("read boundary")
@@ -3107,11 +3226,9 @@ mod tests {
         tracker.ensure_release_boundary().expect("no-op call");
         let n: i64 = tracker
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM release_boundaries",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM release_boundaries", [], |row| {
+                row.get(0)
+            })
             .expect("count rows");
         assert_eq!(
             n, 1,
@@ -3218,11 +3335,9 @@ mod tests {
             .expect("boundary on version change");
         let n: i64 = tracker
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM release_boundaries",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM release_boundaries", [], |row| {
+                row.get(0)
+            })
             .expect("count rows");
         assert_eq!(n, 2, "a version change must append a new boundary row");
         // The latest row must carry the CURRENT compile-time version, not
@@ -3250,11 +3365,9 @@ mod tests {
         }
         let n: i64 = tracker
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM release_boundaries",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM release_boundaries", [], |row| {
+                row.get(0)
+            })
             .expect("count rows");
         assert_eq!(n, 1, "tight-loop calls must not append duplicate rows");
     }
@@ -3294,11 +3407,9 @@ mod tests {
         let tracker = Tracker::new().expect("verifier tracker");
         let n: i64 = tracker
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM release_boundaries",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM release_boundaries", [], |row| {
+                row.get(0)
+            })
             .expect("count rows");
         assert_eq!(
             n, 1,

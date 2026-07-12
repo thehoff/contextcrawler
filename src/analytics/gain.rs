@@ -90,8 +90,12 @@ pub fn run(
         _ => {} // Continue with text format
     }
 
+    // #208: cap effective savings at the host's Bash-output truncation limit.
+    let host_cap = crate::core::config::Config::load()
+        .map(|c| c.tracking.host_truncation_tokens)
+        .unwrap_or(crate::core::constants::DEFAULT_HOST_TRUNCATION_TOKENS);
     let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+        .get_summary_capped(project_scope.as_deref(), host_cap) // changed: host-capped effective savings (#208)
         .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
@@ -120,14 +124,29 @@ pub fn run(
         print_kpi("Total commands", summary.total_commands.to_string());
         print_kpi("Input tokens", format_tokens(summary.total_input));
         print_kpi("Output tokens", format_tokens(summary.total_output));
+        // #208: the headline is the honest, host-capped figure — savings
+        // against what the model would truly have ingested. The raw figure
+        // (vs unfiltered output bytes) is kept below for reference; it runs
+        // higher because a few huge outputs the host would truncate anyway
+        // dominate the raw total.
         print_kpi(
             "Tokens saved",
             format!(
                 "{} ({:.1}%)",
-                format_tokens(summary.total_saved),
-                summary.avg_savings_pct
+                format_tokens(summary.effective_saved),
+                summary.effective_savings_pct
             ),
         );
+        if summary.total_saved != summary.effective_saved {
+            print_kpi(
+                "  vs raw output",
+                format!(
+                    "{} ({:.1}%)",
+                    format_tokens(summary.total_saved),
+                    summary.avg_savings_pct
+                ),
+            );
+        }
         // #196: surface filter regressions hidden by the floored savings_pct.
         // Only show when there's actual inflation so clean installs read clean.
         if summary.total_inflation > 0 {
@@ -147,7 +166,7 @@ pub fn run(
                 format_duration(summary.avg_time_ms)
             ),
         );
-        print_efficiency_meter(summary.avg_savings_pct);
+        print_efficiency_meter(summary.effective_savings_pct);
         println!();
 
         // Warn about hook issues that silently kill savings (stderr, not stdout)
@@ -559,6 +578,9 @@ struct ExportSummary {
     total_saved: usize,
     total_inflation: usize, // added (#196)
     avg_savings_pct: f64,
+    effective_input: usize,     // added (#208): host-capped counterfactual
+    effective_saved: usize,     // added (#208)
+    effective_savings_pct: f64, // added (#208): the honest headline figure
     total_time_ms: u64,
     avg_time_ms: u64,
 }
@@ -571,8 +593,12 @@ fn export_json(
     all: bool,
     project_scope: Option<&str>, // added: project scope
 ) -> Result<()> {
+    // #208: export the host-capped effective metric alongside the raw one.
+    let host_cap = crate::core::config::Config::load()
+        .map(|c| c.tracking.host_truncation_tokens)
+        .unwrap_or(crate::core::constants::DEFAULT_HOST_TRUNCATION_TOKENS);
     let summary = tracker
-        .get_summary_filtered(project_scope) // changed: use filtered variant
+        .get_summary_capped(project_scope, host_cap) // changed: host-capped effective savings (#208)
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
@@ -583,6 +609,9 @@ fn export_json(
             total_saved: summary.total_saved,
             total_inflation: summary.total_inflation, // added (#196)
             avg_savings_pct: summary.avg_savings_pct,
+            effective_input: summary.effective_input, // added (#208)
+            effective_saved: summary.effective_saved, // added (#208)
+            effective_savings_pct: summary.effective_savings_pct, // added (#208)
             total_time_ms: summary.total_time_ms,
             avg_time_ms: summary.avg_time_ms,
         },
@@ -733,11 +762,7 @@ fn check_ctxcrl_disabled_bypass() -> Option<String> {
 
 /// Render `gain --weak-filters`: tools ranked by leaked tokens, so the
 /// reader can see where a better or new filter would recover the most.
-fn show_weak_filters(
-    tracker: &Tracker,
-    project_scope: Option<&str>,
-    all_time: bool,
-) -> Result<()> {
+fn show_weak_filters(tracker: &Tracker, project_scope: Option<&str>, all_time: bool) -> Result<()> {
     // Default: slice from the latest release boundary so we measure the
     // *current* binary's filter quality, not months of pre-upgrade history.
     // `--all-time` bypasses the slice for cross-version analysis.
@@ -781,9 +806,7 @@ fn show_weak_filters(
                 .map(|w| w.iter().map(|f| f.runs).sum::<usize>())
                 .unwrap_or(0);
             if lifetime_runs > 0 {
-                println!(
-                    "No commands recorded since the latest release boundary."
-                );
+                println!("No commands recorded since the latest release boundary.");
                 println!(
                     "Run some commands or use `--all-time` to see the lifetime view ({} historical runs).",
                     lifetime_runs
@@ -961,8 +984,7 @@ mod sigpipe_regression {
         let db_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let db_path = db_dir.path().join("tracking.db");
         {
-            let conn = rusqlite::Connection::open(&db_path)
-                .expect("Failed to open temp DB");
+            let conn = rusqlite::Connection::open(&db_path).expect("Failed to open temp DB");
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS commands (
                     id INTEGER PRIMARY KEY,

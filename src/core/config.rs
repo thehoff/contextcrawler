@@ -1,6 +1,8 @@
 //! Reads user settings from config.toml.
 
-use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
+use super::constants::{
+    CONFIG_TOML, DEFAULT_HISTORY_DAYS, DEFAULT_HOST_TRUNCATION_TOKENS, RTK_DATA_DIR,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -61,6 +63,16 @@ pub struct TrackingConfig {
     pub history_days: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_path: Option<PathBuf>,
+    /// #208: the host truncates a Bash command's output at this many estimated
+    /// tokens before the model sees it, so `gain`'s effective-savings metric
+    /// caps each command's raw input here. Tune to your Claude Code output
+    /// limit; defaults to [`DEFAULT_HOST_TRUNCATION_TOKENS`].
+    #[serde(default = "default_host_truncation_tokens")]
+    pub host_truncation_tokens: usize,
+}
+
+fn default_host_truncation_tokens() -> usize {
+    DEFAULT_HOST_TRUNCATION_TOKENS
 }
 
 impl Default for TrackingConfig {
@@ -69,6 +81,7 @@ impl Default for TrackingConfig {
             enabled: true,
             history_days: DEFAULT_HISTORY_DAYS as u32,
             database_path: None,
+            host_truncation_tokens: DEFAULT_HOST_TRUNCATION_TOKENS,
         }
     }
 }
@@ -261,6 +274,27 @@ exclude_commands = ["curl", "gh"]
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
         assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_host_truncation_tokens_defaults_when_absent() {
+        // #208: a config that predates the field must still parse and get the
+        // default cap, not 0 (which would zero the effective-savings metric).
+        let config: Config =
+            toml::from_str("[tracking]\nenabled = true\nhistory_days = 90\n").expect("valid toml");
+        assert_eq!(
+            config.tracking.host_truncation_tokens,
+            DEFAULT_HOST_TRUNCATION_TOKENS
+        );
+    }
+
+    #[test]
+    fn test_host_truncation_tokens_override() {
+        let config: Config = toml::from_str(
+            "[tracking]\nenabled = true\nhistory_days = 90\nhost_truncation_tokens = 15000\n",
+        )
+        .expect("valid toml");
+        assert_eq!(config.tracking.host_truncation_tokens, 15000);
     }
 
     #[test]
