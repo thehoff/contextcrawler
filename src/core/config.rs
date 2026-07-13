@@ -3,8 +3,10 @@
 use super::constants::{
     CONFIG_TOML, DEFAULT_HISTORY_DAYS, DEFAULT_HOST_TRUNCATION_TOKENS, RTK_DATA_DIR,
 };
+use anyhow::Context;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -205,9 +207,21 @@ impl Config {
         let path = get_config_path()?;
 
         if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            let config: Config = toml::from_str(&content)?;
-            Ok(config)
+            // #222: read-and-validate the SAME fd (TOCTOU-safe). An untrusted
+            // config (symlink / foreign-owner / world-writable, e.g. via a
+            // hostile XDG_CONFIG_HOME) is ignored — safe defaults rather than
+            // attacker-controlled hook policy.
+            match read_trusted_config(&path) {
+                Some(content) => Ok(toml::from_str(&content)?),
+                None => {
+                    eprintln!(
+                        "[contextcrawler] WARNING: config at {} is not a trusted, readable file \
+                         (symlink, foreign owner, or group/world-writable); using defaults",
+                        path.display()
+                    );
+                    Ok(Config::default())
+                }
+            }
         } else {
             Ok(Config::default())
         }
@@ -233,8 +247,70 @@ impl Config {
 }
 
 fn get_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    // #222: NEVER fall back to the current directory. Config controls
+    // security-relevant behaviour (hooks.exclude_commands disables the proxy
+    // for those commands; transparent_prefixes), so reading `./ctxcrl/config.toml`
+    // from an untrusted project checkout is a policy-injection vector. Fail
+    // closed when no user config dir can be resolved.
+    let config_dir = dirs::config_dir()
+        .context("cannot determine a user config directory; refusing to read config from the current directory")?;
     Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
+}
+
+/// #222: read a config file ONLY if it is trusted, validating and reading the
+/// SAME open descriptor to avoid a TOCTOU (council HIGH). A hostile environment
+/// can point `XDG_CONFIG_HOME` at an attacker-owned directory or commit a
+/// symlinked config, and config drives security-relevant hook behaviour, so an
+/// untrusted file must be ignored (→ `None`, caller uses defaults) rather than
+/// obeyed. `O_NOFOLLOW` refuses a symlinked final component atomically on unix;
+/// the fd is fstat-validated (regular file, user-owned, not group/world
+/// writable) and the content read from that fd — no path re-resolution between
+/// check and read. `None` = don't trust / can't read (fail closed).
+fn read_trusted_config(path: &Path) -> Option<String> {
+    use std::io::Read;
+    // Non-unix (Windows): no `O_NOFOLLOW` and no fd owner/mode check, so this
+    // pre-check→open is not fully atomic and can be raced (council #222, codex).
+    // Accepted residual, same call as #221: unix (Linux + macOS, the deployment
+    // targets) is atomic + owner/mode-validated below; a Windows atomic
+    // no-reparse open (`openat2`/reparse-point handling) is a documented
+    // follow-up, not a blocker for the unix-correct fix. Best-effort symlink
+    // pre-check here; on stat failure, fail closed.
+    #[cfg(not(unix))]
+    {
+        if std::fs::symlink_metadata(path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = opts.open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // 0o022 = group-write | other-write.
+        if meta.mode() & 0o022 != 0 {
+            return None;
+        }
+        let our_uid = unsafe { libc::geteuid() };
+        if meta.uid() != our_uid && meta.uid() != 0 {
+            return None;
+        }
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content).ok()?;
+    Some(content)
 }
 
 pub fn show_config() -> Result<()> {
@@ -258,6 +334,40 @@ pub fn show_config() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn read_trusted_config_rejects_symlink_and_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ctxcrl-cfg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let good = dir.join("config.toml");
+        std::fs::write(&good, b"[hooks]\n").unwrap();
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_trusted_config(&good).as_deref(),
+            Some("[hooks]\n"),
+            "0600 user-owned file is trusted and read"
+        );
+
+        // World-writable → untrusted → None.
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(
+            read_trusted_config(&good).is_none(),
+            "world-writable must be rejected"
+        );
+
+        // Symlink → untrusted → None (O_NOFOLLOW).
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("link.toml");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        assert!(
+            read_trusted_config(&link).is_none(),
+            "symlinked config must be rejected"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_hooks_config_deserialize() {
