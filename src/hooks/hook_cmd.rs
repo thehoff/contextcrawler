@@ -146,61 +146,114 @@ fn get_rewritten(cmd: &str) -> Option<String> {
     Some(rewritten)
 }
 
-fn handle_vscode(cmd: &str) -> Result<()> {
+/// Post-resolution decision shared by the non-Claude handlers (#225). The
+/// VS Code / Copilot / Gemini paths previously skipped the Tirith +
+/// supply-chain gates entirely and dropped Ask/Deny verdicts when a command
+/// had no rewrite, so an allowlisted `curl … | sh` bypassed every check. This
+/// mirrors the Claude live path (`process_claude_payload_with_gate`) so all
+/// hosts get the same protection.
+enum HandlerAction {
+    /// Benign non-rewritable command: stay silent, let the host apply its rules.
+    Passthrough,
+    /// Auto-allow the rewritten command.
+    Allow { rewritten: String },
+    /// Prompt the user (rewritten form if available, else the original).
+    Ask { command: String },
+    /// Hard block.
+    Deny { reason: String },
+}
+
+fn handler_action(cmd: &str) -> HandlerAction {
     let verdict = permissions::check_command(cmd);
     if verdict == PermissionVerdict::Deny {
-        audit_log("deny", cmd, "");
-        return Ok(());
+        return HandlerAction::Deny {
+            reason: "contextcrawler: command blocked by permission deny rule".to_string(),
+        };
     }
-
-    let rewritten = match get_rewritten(cmd) {
-        Some(r) => r,
-        None => return Ok(()),
+    // Defence-in-depth gates on the RAW command (both no-ops when disabled).
+    let gate_ask = match run_gates(cmd) {
+        GateDecision::Deny { reason } => return HandlerAction::Deny { reason },
+        GateDecision::Ask { .. } => true,
+        GateDecision::Proceed => false,
     };
-
-    // Allow (explicit rule matched): auto-allow the rewritten command.
-    // Ask/Default (no allow rule matched): rewrite but let the host tool prompt.
-    let decision = match verdict {
-        PermissionVerdict::Allow => "allow",
-        _ => "ask",
-    };
-
-    audit_log("rewrite", cmd, &rewritten);
-
-    let output = json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecision": decision,
-            "permissionDecisionReason": "contextcrawler auto-rewrite",
-            "updatedInput": { "command": rewritten }
+    match get_rewritten(cmd) {
+        // A gate Ask, or any non-Allow permission verdict, must win over an
+        // auto-allow so the host prompts.
+        Some(rewritten) if gate_ask || verdict != PermissionVerdict::Allow => {
+            HandlerAction::Ask { command: rewritten }
         }
-    });
-    let _ = writeln!(io::stdout(), "{output}");
-    Ok(())
+        Some(rewritten) => HandlerAction::Allow { rewritten },
+        // No rewrite: an Ask verdict / gate Ask must still force a prompt
+        // (#2286) rather than falling through to the host's own (possibly
+        // Allow) rule; a genuinely benign command passes through.
+        None if gate_ask || verdict == PermissionVerdict::Ask => HandlerAction::Ask {
+            command: cmd.to_string(),
+        },
+        None => HandlerAction::Passthrough,
+    }
+}
+
+fn handle_vscode(cmd: &str) -> Result<()> {
+    let emit = |decision: &str, command: &str, reason: &str| -> Result<()> {
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecision": decision,
+                "permissionDecisionReason": reason,
+                "updatedInput": { "command": command }
+            }
+        });
+        writeln!(io::stdout(), "{output}").context("failed to write VS Code hook decision")
+    };
+    match handler_action(cmd) {
+        HandlerAction::Passthrough => Ok(()),
+        HandlerAction::Deny { reason } => {
+            audit_log("deny", cmd, "");
+            emit("deny", cmd, &reason)
+        }
+        HandlerAction::Ask { command } => {
+            audit_log("ask", cmd, &command);
+            emit("ask", &command, "contextcrawler: review required")
+        }
+        HandlerAction::Allow { rewritten } => {
+            audit_log("rewrite", cmd, &rewritten);
+            emit("allow", &rewritten, "contextcrawler auto-rewrite")
+        }
+    }
 }
 
 fn handle_copilot_cli(cmd: &str) -> Result<()> {
-    if permissions::check_command(cmd) == PermissionVerdict::Deny {
-        audit_log("deny", cmd, "");
-        return Ok(());
-    }
-
-    let rewritten = match get_rewritten(cmd) {
-        Some(r) => r,
-        None => return Ok(()),
+    // The Copilot CLI protocol uses `deny` + a reason to steer the agent to a
+    // replacement command; a security block also uses `deny` but with a
+    // block reason. #225: gate the raw command and honour Ask/Deny.
+    let emit = |reason: String| -> Result<()> {
+        let output = json!({
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason
+        });
+        writeln!(io::stdout(), "{output}").context("failed to write Copilot hook decision")
     };
-
-    audit_log("rewrite", cmd, &rewritten);
-
-    let output = json!({
-        "permissionDecision": "deny",
-        "permissionDecisionReason": format!(
-            "Token savings: use `{}` instead (contextcrawler saves 60-90% tokens)",
-            rewritten
-        )
-    });
-    let _ = writeln!(io::stdout(), "{output}");
-    Ok(())
+    match handler_action(cmd) {
+        HandlerAction::Passthrough => Ok(()),
+        HandlerAction::Deny { reason } => {
+            audit_log("deny", cmd, "");
+            emit(reason)
+        }
+        HandlerAction::Ask { command } => {
+            // Copilot has no "ask"; surface a deny+reason so the agent stops
+            // and the human reviews, rather than silently auto-running.
+            audit_log("ask", cmd, &command);
+            emit(format!(
+                "contextcrawler: review required before running `{command}`"
+            ))
+        }
+        HandlerAction::Allow { rewritten } => {
+            audit_log("rewrite", cmd, &rewritten);
+            emit(format!(
+                "Token savings: use `{rewritten}` instead (contextcrawler saves 60-90% tokens)"
+            ))
+        }
+    }
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -282,25 +335,24 @@ fn run_gemini_decision(json: &Value) {
         return;
     }
 
-    // Check deny rules — Gemini CLI only supports allow/deny (no ask mode).
-    if permissions::check_command(cmd) == PermissionVerdict::Deny {
-        let _ = writeln!(
-            io::stdout(),
-            r#"{{"decision":"deny","reason":"Blocked by ContextCrawler permission rule"}}"#
-        );
-        return;
-    }
-
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
-
-    match rewrite_command(cmd, &excluded, &transparent_prefixes) {
-        Some(ref rewritten) => {
-            audit_log("rewrite", cmd, rewritten);
-            print_rewrite(rewritten);
+    // #225: run the full permission + gate decision. Gemini CLI only supports
+    // allow/deny (no ask mode), so a gate/verdict Ask fails CLOSED to `deny` —
+    // the command with no visible rewrite is not silently allowed.
+    let deny = |reason: &str| {
+        let out = json!({ "decision": "deny", "reason": reason });
+        let _ = writeln!(io::stdout(), "{out}");
+    };
+    match handler_action(cmd) {
+        HandlerAction::Deny { .. } => deny("Blocked by ContextCrawler permission rule"),
+        HandlerAction::Ask { .. } => {
+            audit_log("ask", cmd, cmd);
+            deny("ContextCrawler flagged this command for review (no ask mode; denying)")
         }
-        None => print_allow(),
+        HandlerAction::Allow { rewritten } => {
+            audit_log("rewrite", cmd, &rewritten);
+            print_rewrite(&rewritten);
+        }
+        HandlerAction::Passthrough => print_allow(),
     }
 }
 
@@ -1175,6 +1227,46 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
+    }
+
+    #[test]
+    fn handler_action_asks_on_unattestable_non_rewritable() {
+        // #225: the non-Claude handlers must not drop an Ask verdict on a
+        // command with no rewrite (would fall through to a host auto-allow).
+        // Pinned untrusted (#209) so ambient env can't flip the attestation.
+        let _env = crate::hooks::test_env::TrustEnvGuard::untrusted();
+        assert!(
+            matches!(
+                handler_action("notarealcmd $(cat /etc/passwd)"),
+                HandlerAction::Ask { .. }
+            ),
+            "unattestable non-rewritable command must Ask, not passthrough"
+        );
+    }
+
+    #[test]
+    fn handler_action_passes_through_benign_non_rewritable() {
+        let _env = crate::hooks::test_env::TrustEnvGuard::untrusted();
+        assert!(
+            matches!(
+                handler_action("notarealcmd --flag"),
+                HandlerAction::Passthrough
+            ),
+            "a benign non-rewritable command must pass through to the host"
+        );
+    }
+
+    #[test]
+    fn handler_action_rewrites_known_command() {
+        let _env = crate::hooks::test_env::TrustEnvGuard::untrusted();
+        // `git status` rewrites; with no explicit allow rule the verdict is
+        // Default, so it surfaces as Ask carrying the rewritten command.
+        match handler_action("git status") {
+            HandlerAction::Ask { command } | HandlerAction::Allow { rewritten: command } => {
+                assert!(command.contains("contextcrawler git"), "got: {command}");
+            }
+            _ => panic!("expected a rewrite decision for `git status`"),
+        }
     }
 
     // --- Copilot format detection ---
