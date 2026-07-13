@@ -473,13 +473,16 @@ pub fn prefix_contains_ctxcrl_disabled(prefix_part: &str) -> bool {
 /// keeps the quoted value as one word (`FOO=bar RTK_DISABLED=1` → key `FOO`).
 /// Returns owned strings since shlex un-quotes into new allocations.
 fn env_prefix_assignments(prefix_part: &str) -> Vec<(String, String)> {
-    // #229 round 2: shlex is quote-aware but NOT a nested-shell parser, so
-    // `FOO=$(echo RTK_DISABLED=1)` / backticks / `${…}` split at an inner space
-    // and leak a fake standalone assignment. A legitimate disable prefix never
-    // needs a substitution, so refuse to parse (→ no disable honoured, proxy
-    // stays enabled) when one is present. Fail closed against the security
-    // opt-out.
-    if prefix_part.contains("$(") || prefix_part.contains('`') || prefix_part.contains("${") {
+    // #229 rounds 2-3: shlex is quote-aware but NOT a nested-shell parser, so
+    // any construct with an internal space — `$(…)`, backtick, `${…}`, `$[…]`
+    // arithmetic, `<(…)`/`>(…)` process substitution — mis-splits and leaks a
+    // fake standalone assignment. Rather than enumerate forms (codex kept
+    // finding more), reject the ENTIRE substitution/expansion metacharacter
+    // class: a legitimate disable prefix is plain `KEY=value` and needs none of
+    // it. Reject → no disable honoured → proxy stays ENABLED (fail closed
+    // against the security opt-out). Over-matching a benign value only keeps
+    // the proxy on, never wrongly disables it.
+    if prefix_part.contains(['$', '`', '(', ')', '<', '>']) {
         return Vec::new();
     }
     let Some(words) = shlex::split(prefix_part) else {
@@ -4153,6 +4156,8 @@ mod tests {
             r#"FOO=$(echo RTK_DISABLED=1) git status"#,
             r#"FOO=`echo RTK_DISABLED=1` git status"#,
             r#"FOO=${x-RTK_DISABLED=1} git status"#,
+            r#"FOO=$[1?1:( RTK_DISABLED=1)] git status"#,
+            r#"FOO=<(echo RTK_DISABLED=1) git status"#,
         ] {
             assert!(
                 !cmd_has_ctxcrl_disabled_prefix(cmd),
