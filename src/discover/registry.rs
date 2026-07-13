@@ -458,33 +458,38 @@ fn strip_absolute_path(cmd: &str) -> String {
 pub fn prefix_contains_ctxcrl_disabled(prefix_part: &str) -> bool {
     env_prefix_assignments(prefix_part)
         .iter()
-        .any(|(key, _)| *key == "CTXCRL_DISABLED" || *key == "RTK_DISABLED")
+        .any(|(key, _)| key == "CTXCRL_DISABLED" || key == "RTK_DISABLED")
 }
 
 /// Split an env-prefix chunk into individual `(KEY, VALUE)` assignments.
 ///
 /// The prefix is the portion matched by `ENV_PREFIX` — a run of `sudo `,
-/// `env ` words and `KEY=VALUE` assignments. Whitespace-tokenises the chunk,
-/// drops bare `sudo`/`env` words, and splits each remaining token at the
-/// FIRST `=` only (so `FOO=RTK_DISABLED=1` yields key `FOO`, not `RTK_DISABLED`).
-/// Quoted values are kept verbatim — the key is all that matters here.
-fn env_prefix_assignments(prefix_part: &str) -> Vec<(&str, &str)> {
+/// `env ` words and `KEY=VALUE` assignments. Splits with SHELL-WORD semantics
+/// (quote-aware) and splits each remaining word at the FIRST `=` only.
+///
+/// #229: a naive whitespace split let a QUOTED value with an embedded space
+/// (`FOO="bar RTK_DISABLED=1"`) break into two words, so `RTK_DISABLED=1`
+/// surfaced as a standalone assignment and spoofed the disable. `shlex`
+/// keeps the quoted value as one word (`FOO=bar RTK_DISABLED=1` → key `FOO`).
+/// Returns owned strings since shlex un-quotes into new allocations.
+fn env_prefix_assignments(prefix_part: &str) -> Vec<(String, String)> {
+    let Some(words) = shlex::split(prefix_part) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for tok in prefix_part.split_whitespace() {
+    for tok in words {
         if tok == "sudo" || tok == "env" {
             continue;
         }
         if let Some(eq) = tok.find('=') {
             let key = &tok[..eq];
-            // A valid shell env key: [A-Za-z_][A-Za-z0-9_]* — the ENV_PREFIX
-            // regex already enforces uppercase, but be defensive.
+            // A valid shell env key: [A-Za-z_][A-Za-z0-9_]*.
             if !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && !key.chars().next().unwrap().is_ascii_digit()
             {
-                out.push((key, &tok[eq + 1..]));
+                let value = tok[eq + 1..].to_string();
+                out.push((key.to_string(), value));
             }
         }
     }
@@ -703,8 +708,8 @@ fn strip_ctxcrl_shell_builtin_prefix(cmd: &str) -> Option<&str> {
         .or_else(|| cmd.strip_prefix("rtk "))?;
     let builtin = rest.split_whitespace().next().unwrap_or("");
     const SHELL_SIDE_EFFECT_BUILTINS: &[&str] = &[
-        "cd", "pushd", "popd", "export", "source", ".", "alias", "unalias", "unset",
-        "ulimit", "umask", "set", "shift", "typeset", "declare",
+        "cd", "pushd", "popd", "export", "source", ".", "alias", "unalias", "unset", "ulimit",
+        "umask", "set", "shift", "typeset", "declare",
     ];
     SHELL_SIDE_EFFECT_BUILTINS
         .contains(&builtin)
@@ -1139,7 +1144,9 @@ fn rewrite_segment_inner(
     // follow-up) so user-configured exclude_commands rules apply to
     // `/usr/bin/env git ...` and `sudo /usr/bin/env git ...`.
     let ctxcrl_equivalent = match classify_command(cmd_part) {
-        Classification::Supported { ctxcrl_equivalent, .. } => {
+        Classification::Supported {
+            ctxcrl_equivalent, ..
+        } => {
             let normalised_for_exclude = normalise_command(cmd_part);
             if is_excluded(normalised_for_exclude.trim(), excluded) {
                 return None;
@@ -1468,7 +1475,10 @@ mod tests {
 
     #[test]
     fn test_classify_ctxcrl_already() {
-        assert_eq!(classify_command("contextcrawler git status"), Classification::Ignored);
+        assert_eq!(
+            classify_command("contextcrawler git status"),
+            Classification::Ignored
+        );
     }
 
     #[test]
@@ -1483,10 +1493,7 @@ mod tests {
     #[test]
     fn test_classify_shell_variable_ignored() {
         // #87: $VAR-prefixed commands are shell expansions; can't classify.
-        assert_eq!(
-            classify_command("$EDITOR foo.txt"),
-            Classification::Ignored
-        );
+        assert_eq!(classify_command("$EDITOR foo.txt"), Classification::Ignored);
         assert_eq!(
             classify_command("$(which git) status"),
             Classification::Ignored
@@ -1675,7 +1682,9 @@ mod tests {
         // capture, `git checkout-tag-helper foo` would falsely match the
         // `checkout` alternation. The `(?:\s|$)` anchor in rules.rs prevents that.
         match classify_command("git checkout-tag-helper foo") {
-            Classification::Supported { category: "Git", .. } => {
+            Classification::Supported {
+                category: "Git", ..
+            } => {
                 panic!("git checkout-tag-helper should NOT classify as Supported Git");
             }
             _ => {}
@@ -1688,7 +1697,13 @@ mod tests {
         // embedded whitespace, e.g. `-c "core.editor=vim -w"`.
         let cls = classify_command(r#"git -c "core.editor=vim -w" merge --no-ff foo"#);
         assert!(
-            matches!(cls, Classification::Supported { category: "Git", .. }),
+            matches!(
+                cls,
+                Classification::Supported {
+                    category: "Git",
+                    ..
+                }
+            ),
             "expected Supported Git, got {cls:?}"
         );
     }
@@ -2286,7 +2301,10 @@ mod tests {
                 r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#,
                 &[]
             ),
-            Some(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" contextcrawler git push"#.into())
+            Some(
+                r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" contextcrawler git push"#
+                    .into()
+            )
         );
     }
 
@@ -3892,7 +3910,10 @@ mod tests {
                 "Rule '{}' has empty pattern",
                 rule.ctxcrl_cmd
             );
-            assert!(!rule.ctxcrl_cmd.is_empty(), "Rule with empty ctxcrl_cmd found");
+            assert!(
+                !rule.ctxcrl_cmd.is_empty(),
+                "Rule with empty ctxcrl_cmd found"
+            );
             assert!(
                 rule.ctxcrl_cmd.starts_with("contextcrawler "),
                 "ctxcrl_cmd '{}' must start with 'contextcrawler ' (#62)",
@@ -4076,15 +4097,35 @@ mod tests {
     fn test_ctxcrl_disabled_substring_does_not_bypass() {
         // A crafted prefix where RTK_DISABLED= appears inside another var's
         // VALUE must NOT count as setting RTK_DISABLED.
-        assert!(!cmd_has_ctxcrl_disabled_prefix("FOO=RTK_DISABLED=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
+            "FOO=RTK_DISABLED=1 git status"
+        ));
         assert!(!cmd_has_ctxcrl_disabled_prefix(
             "X=a RTK_DISABLED_NOT=1 git status"
         ));
-        assert!(!cmd_has_ctxcrl_disabled_prefix("MY_RTK_DISABLED=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
+            "MY_RTK_DISABLED=1 git status"
+        ));
         // ...and rewriting must still happen for the crafted prefix.
         assert_eq!(
             rewrite_command_no_prefixes("FOO=RTK_DISABLED=1 git status", &[]),
             Some("FOO=RTK_DISABLED=1 contextcrawler git status".into())
+        );
+    }
+
+    #[test]
+    fn test_quoted_env_value_cannot_inject_disable() {
+        // #229 (council): a quoted env value containing spaces must not be
+        // whitespace-split into a standalone RTK_DISABLED/CTXCRL_DISABLED token.
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
+            r#"FOO="bar RTK_DISABLED=1" git status"#
+        ));
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
+            r#"FOO='x CTXCRL_DISABLED=1' git status"#
+        ));
+        // ...and the command must still be rewritten (proxy not disabled).
+        assert!(
+            rewrite_command_no_prefixes(r#"FOO="bar RTK_DISABLED=1" git status"#, &[]).is_some()
         );
     }
 
@@ -4097,7 +4138,9 @@ mod tests {
             None
         );
         // ...even when preceded by other (innocuous) assignments.
-        assert!(cmd_has_ctxcrl_disabled_prefix("FOO=bar RTK_DISABLED=1 git status"));
+        assert!(cmd_has_ctxcrl_disabled_prefix(
+            "FOO=bar RTK_DISABLED=1 git status"
+        ));
         assert_eq!(
             rewrite_command_no_prefixes("FOO=bar RTK_DISABLED=1 git status", &[]),
             None
@@ -4110,7 +4153,9 @@ mod tests {
     #[test]
     fn test_both_disable_prefixes_bypass() {
         // Canonical name (new).
-        assert!(cmd_has_ctxcrl_disabled_prefix("CTXCRL_DISABLED=1 git status"));
+        assert!(cmd_has_ctxcrl_disabled_prefix(
+            "CTXCRL_DISABLED=1 git status"
+        ));
         assert_eq!(
             rewrite_command_no_prefixes("CTXCRL_DISABLED=1 git status", &[]),
             None
@@ -4122,8 +4167,12 @@ mod tests {
             None
         );
         // Crafted substring of the canonical key must NOT bypass.
-        assert!(!cmd_has_ctxcrl_disabled_prefix("FOO=CTXCRL_DISABLED=1 git status"));
-        assert!(!cmd_has_ctxcrl_disabled_prefix("CTXCRL_DISABLED_NOT=1 git status"));
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
+            "FOO=CTXCRL_DISABLED=1 git status"
+        ));
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
+            "CTXCRL_DISABLED_NOT=1 git status"
+        ));
     }
 
     // --- G7/#100: only TRUE absolute paths are normalised to a bare binary ---
@@ -4147,10 +4196,7 @@ mod tests {
     #[test]
     fn test_absolute_path_still_normalised() {
         // Regression guard: a real absolute path still strips to the binary.
-        assert_eq!(
-            strip_absolute_path("/usr/bin/git status"),
-            "git status"
-        );
+        assert_eq!(strip_absolute_path("/usr/bin/git status"), "git status");
     }
 
     #[test]
@@ -4677,7 +4723,9 @@ mod tests {
                 "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && git stash",
                 &[]
             ),
-            Some("RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && contextcrawler git stash".into())
+            Some(
+                "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && contextcrawler git stash".into()
+            )
         );
     }
 
@@ -4819,18 +4867,12 @@ mod tests {
         // outer level (echo is not in rules), so the rewrite returns
         // None. Guard that until/unless echo gets a filter; the inner
         // payload must not leak a rewrite either.
-        assert_eq!(
-            rewrite_command_no_prefixes("echo $(git status)", &[]),
-            None
-        );
+        assert_eq!(rewrite_command_no_prefixes("echo $(git status)", &[]), None);
     }
 
     #[test]
     fn issue_166_backtick_substitution_is_not_rewritten() {
-        assert_eq!(
-            rewrite_command_no_prefixes("echo `git status`", &[]),
-            None
-        );
+        assert_eq!(rewrite_command_no_prefixes("echo `git status`", &[]), None);
     }
 
     #[test]
@@ -4989,7 +5031,10 @@ mod tests {
     #[test]
     fn issue_195_unwrap_compound_and_returns_none() {
         // `a && b` is a compound script — must NOT unwrap.
-        assert_eq!(unwrap_shell_wrapper("sh -c 'git add . && cargo test'"), None);
+        assert_eq!(
+            unwrap_shell_wrapper("sh -c 'git add . && cargo test'"),
+            None
+        );
     }
 
     #[test]
@@ -5122,7 +5167,10 @@ mod tests {
         // and its args; must rewrite to the same thing as the single-line form.
         let multiline = rewrite_command_no_prefixes("git diff \\\nHEAD~1 --stat", &[]);
         let single = rewrite_command_no_prefixes("git diff HEAD~1 --stat", &[]);
-        assert_eq!(multiline, Some("contextcrawler git diff HEAD~1 --stat".into()));
+        assert_eq!(
+            multiline,
+            Some("contextcrawler git diff HEAD~1 --stat".into())
+        );
         assert_eq!(multiline, single);
     }
 
@@ -5169,7 +5217,10 @@ mod tests {
 
     #[test]
     fn test_collapse_line_continuations_collapses_to_single_space() {
-        assert_eq!(collapse_line_continuations("git diff \\\nHEAD~1"), "git diff HEAD~1");
+        assert_eq!(
+            collapse_line_continuations("git diff \\\nHEAD~1"),
+            "git diff HEAD~1"
+        );
     }
 
     // --- quote-aware continuation collapse (FIX 3) ----------------------
