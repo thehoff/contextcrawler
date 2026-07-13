@@ -24,12 +24,26 @@
 ///   8. on_empty             — message if result is empty
 use super::constants::{FILTERS_TOML, RTK_DATA_DIR};
 use lazy_static::lazy_static;
-use regex::{Regex, RegexSet};
+use regex::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 // Built-in filters: concatenated from src/filters/*.toml by build.rs at compile time.
 const BUILTIN_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filters.toml"));
+
+/// User-authored regex source and compiled automata are independently bounded.
+/// The regex crate guarantees linear-time search, but unbounded compilation can
+/// still consume excessive memory before a hook reaches the matching stage.
+const MAX_USER_REGEX_BYTES: usize = 16_384;
+const MAX_USER_REGEX_SET_BYTES: usize = 65_536;
+const USER_REGEX_SIZE_LIMIT: usize = 1_048_576;
+const USER_REGEX_DFA_SIZE_LIMIT: usize = 1_048_576;
+
+/// A byte-bounded blob can still contain hundreds of thousands of tiny lines;
+/// cap String/Vec metadata independently before materialising the pipeline.
+const MAX_FILTER_LINES: usize = 100_000;
+const FILTER_TRUNCATION_NOTICE: &str = "... (output truncated at filter safety limit)";
 
 // ---------------------------------------------------------------------------
 // Deserialization types (TOML schema)
@@ -222,7 +236,9 @@ impl TomlFilterRegistry {
                         let content = String::from_utf8_lossy(&bytes);
                         match Self::parse_and_compile(&content, "project") {
                             Ok(f) => filters.extend(f),
-                            Err(e) => eprintln!("[contextcrawler] warning: .ctxcrl/filters.toml: {}", e),
+                            Err(e) => {
+                                eprintln!("[contextcrawler] warning: .ctxcrl/filters.toml: {}", e)
+                            }
                         }
                     }
                     crate::hooks::trust::TrustStatus::Untrusted => {
@@ -258,9 +274,8 @@ impl TomlFilterRegistry {
             let global_path = config_dir.join(RTK_DATA_DIR).join(FILTERS_TOML);
             if global_path.exists() {
                 if let Ok(bytes) = std::fs::read(&global_path) {
-                    let trust_status =
-                        crate::hooks::trust::check_trust_bytes(&global_path, &bytes)
-                            .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
+                    let trust_status = crate::hooks::trust::check_trust_bytes(&global_path, &bytes)
+                        .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
 
                     match trust_status {
                         crate::hooks::trust::TrustStatus::Trusted
@@ -269,7 +284,11 @@ impl TomlFilterRegistry {
                             match Self::parse_and_compile(&content, "user-global") {
                                 Ok(f) => filters.extend(f),
                                 Err(e) => {
-                                    eprintln!("[contextcrawler] warning: {}: {}", global_path.display(), e)
+                                    eprintln!(
+                                        "[contextcrawler] warning: {}: {}",
+                                        global_path.display(),
+                                        e
+                                    )
                                 }
                             }
                         }
@@ -327,7 +346,10 @@ impl TomlFilterRegistry {
         for (name, def) in file.filters {
             match compile_filter(name.clone(), def) {
                 Ok(f) => compiled.push(f),
-                Err(e) => eprintln!("[contextcrawler] warning: filter '{}' in {}: {}", name, source, e),
+                Err(e) => eprintln!(
+                    "[contextcrawler] warning: filter '{}' in {}: {}",
+                    name, source, e
+                ),
             }
         }
         Ok(compiled)
@@ -390,6 +412,51 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "learn",
 ];
 
+fn compile_user_regex(pattern: &str, field: &str) -> Result<Regex, String> {
+    if pattern.len() > MAX_USER_REGEX_BYTES {
+        return Err(format!(
+            "{} regex exceeds {}-byte source limit",
+            field, MAX_USER_REGEX_BYTES
+        ));
+    }
+
+    let mut builder = RegexBuilder::new(pattern);
+    builder
+        .size_limit(USER_REGEX_SIZE_LIMIT)
+        .dfa_size_limit(USER_REGEX_DFA_SIZE_LIMIT);
+    builder
+        .build()
+        .map_err(|error| format!("invalid or over-complex {} regex: {}", field, error))
+}
+
+fn compile_user_regex_set(patterns: &[String], field: &str) -> Result<RegexSet, String> {
+    let total_bytes = patterns.iter().try_fold(0usize, |total, pattern| {
+        if pattern.len() > MAX_USER_REGEX_BYTES {
+            return Err(format!(
+                "{} regex exceeds {}-byte source limit",
+                field, MAX_USER_REGEX_BYTES
+            ));
+        }
+        total
+            .checked_add(pattern.len())
+            .ok_or_else(|| format!("{} regex source size overflow", field))
+    })?;
+    if total_bytes > MAX_USER_REGEX_SET_BYTES {
+        return Err(format!(
+            "{} regex set exceeds {}-byte combined source limit",
+            field, MAX_USER_REGEX_SET_BYTES
+        ));
+    }
+
+    let mut builder = RegexSetBuilder::new(patterns);
+    builder
+        .size_limit(USER_REGEX_SIZE_LIMIT)
+        .dfa_size_limit(USER_REGEX_DFA_SIZE_LIMIT);
+    builder
+        .build()
+        .map_err(|error| format!("invalid or over-complex {} regex: {}", field, error))
+}
+
 fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, String> {
     // Mutual exclusion: strip and keep cannot both be set
     if !def.strip_lines_matching.is_empty() && !def.keep_lines_matching.is_empty() {
@@ -403,8 +470,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         return Err("max_lines must be greater than 0".into());
     }
 
-    let match_regex = Regex::new(&def.match_command)
-        .map_err(|e| format!("invalid match_command regex: {}", e))?;
+    let match_regex = compile_user_regex(&def.match_command, "match_command")?;
 
     // Shadow warning: if match_command matches a Rust-handled command, this filter
     // will never activate (Clap routes before run_fallback). Warn the author.
@@ -423,13 +489,10 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         .replace
         .into_iter()
         .map(|r| {
-            let pat = r.pattern.clone();
-            Regex::new(&r.pattern)
-                .map(|pattern| CompiledReplaceRule {
-                    pattern,
-                    replacement: r.replacement,
-                })
-                .map_err(|e| format!("invalid replace pattern '{}': {}", pat, e))
+            compile_user_regex(&r.pattern, "replace pattern").map(|pattern| CompiledReplaceRule {
+                pattern,
+                replacement: r.replacement,
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -437,16 +500,11 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         .match_output
         .into_iter()
         .map(|r| -> Result<CompiledMatchOutputRule, String> {
-            let pat = r.pattern.clone();
-            let pattern = Regex::new(&r.pattern)
-                .map_err(|e| format!("invalid match_output pattern '{}': {}", pat, e))?;
+            let pattern = compile_user_regex(&r.pattern, "match_output pattern")?;
             let unless = r
                 .unless
                 .as_deref()
-                .map(|u| {
-                    Regex::new(u)
-                        .map_err(|e| format!("invalid match_output unless pattern '{}': {}", u, e))
-                })
+                .map(|pattern| compile_user_regex(pattern, "match_output unless pattern"))
                 .transpose()?;
             Ok(CompiledMatchOutputRule {
                 pattern,
@@ -457,12 +515,10 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         .collect::<Result<Vec<_>, _>>()?;
 
     let line_filter = if !def.strip_lines_matching.is_empty() {
-        let set = RegexSet::new(&def.strip_lines_matching)
-            .map_err(|e| format!("invalid strip_lines_matching regex: {}", e))?;
+        let set = compile_user_regex_set(&def.strip_lines_matching, "strip_lines_matching")?;
         LineFilter::Strip(set)
     } else if !def.keep_lines_matching.is_empty() {
-        let set = RegexSet::new(&def.keep_lines_matching)
-            .map_err(|e| format!("invalid keep_lines_matching regex: {}", e))?;
+        let set = compile_user_regex_set(&def.keep_lines_matching, "keep_lines_matching")?;
         LineFilter::Keep(set)
     } else {
         LineFilter::None
@@ -518,15 +574,28 @@ pub fn find_filter_in<'a>(
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
 pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
-    let mut lines: Vec<String> = stdout.lines().map(String::from).collect();
+    // Enforce the total byte ceiling before any String or Vec materialisation.
+    let (bounded_stdout, byte_truncated) = crate::core::utils::bounded_filter_blob(stdout);
 
-    // 1. strip_ansi
-    if filter.strip_ansi {
-        lines = lines
-            .into_iter()
-            .map(|l| crate::core::utils::strip_ansi(&l))
-            .collect();
+    // 1. strip_ansi — sanitise the complete blob so OSC/DCS state survives
+    // line breaks. Per-line sanitisation re-exposed unterminated payloads on
+    // the following line.
+    let sanitised = if filter.strip_ansi {
+        Cow::Owned(crate::core::utils::strip_ansi(bounded_stdout))
+    } else {
+        Cow::Borrowed(bounded_stdout)
+    };
+
+    let mut lines = Vec::new();
+    let mut line_truncated = false;
+    for line in sanitised.lines() {
+        if lines.len() >= MAX_FILTER_LINES {
+            line_truncated = true;
+            break;
+        }
+        lines.push(line.to_string());
     }
+    let input_truncated = byte_truncated || line_truncated;
 
     // Snapshot the pre-replace output. `match_output`/`unless` guards must
     // evaluate against the RAW (post-ansi-strip) text — a `replace` rule that
@@ -554,7 +623,7 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     //    If `unless` is set and also matches the blob, the rule is skipped.
     //    Evaluated against the pre-replace snapshot so `replace` rules cannot
     //    mask error markers that the `unless` guard depends on.
-    if !filter.match_output.is_empty() {
+    if !input_truncated && !filter.match_output.is_empty() {
         let blob = &pre_replace_blob;
         for rule in &filter.match_output {
             if rule.pattern.is_match(blob) {
@@ -616,7 +685,13 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     }
 
     // 8. on_empty
-    let result = lines.join("\n");
+    let mut result = lines.join("\n");
+    if input_truncated {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(FILTER_TRUNCATION_NOTICE);
+    }
     if result.trim().is_empty() {
         if let Some(ref msg) = filter.on_empty {
             return msg.clone();
@@ -702,7 +777,10 @@ fn collect_test_outcomes(
     let file: TomlFilterFile = match toml::from_str(content) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("[contextcrawler] warning: TOML parse error during verify: {}", e);
+            eprintln!(
+                "[contextcrawler] warning: TOML parse error during verify: {}",
+                e
+            );
             return;
         }
     };
@@ -715,7 +793,10 @@ fn collect_test_outcomes(
             Ok(f) => {
                 compiled_filters.insert(name, f);
             }
-            Err(e) => eprintln!("[contextcrawler] warning: filter '{}' compilation error: {}", name, e),
+            Err(e) => eprintln!(
+                "[contextcrawler] warning: filter '{}' compilation error: {}",
+                name, e
+            ),
         }
     }
 
@@ -765,8 +846,8 @@ fn collect_test_outcomes(
 pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
     if crate::core::env_compat::env_present("CTXCRL_TOML_DEBUG") {
         eprintln!(
-            "[contextcrawler:toml] looking up filter for: {:?} ({} filters loaded)",
-            command,
+            "[contextcrawler:toml] looking up filter for command '{}' ({} filters loaded)",
+            debug_command_name(command),
             REGISTRY.filters.len()
         );
     }
@@ -778,6 +859,28 @@ pub fn find_matching_filter(command: &str) -> Option<&'static CompiledFilter> {
         }
     }
     result
+}
+
+/// Return only a conservative executable basename for debug output. Arguments
+/// are never returned; suspicious command-position tokens (env assignments,
+/// shell syntax, quotes, or unusually long values) collapse to `<redacted>`.
+fn debug_command_name(command: &str) -> &str {
+    let token = match command.split_ascii_whitespace().next() {
+        Some(token) => token,
+        None => return "<redacted>",
+    };
+    let name = token.rsplit('/').next().unwrap_or(token);
+    let safe = !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'));
+    if safe {
+        name
+    } else {
+        "<redacted>"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -815,6 +918,37 @@ strip_ansi = true
         );
         let out = apply_filter(&f, "\x1b[31mError\x1b[0m\nnormal");
         assert_eq!(out, "Error\nnormal");
+    }
+
+    #[test]
+    fn test_strip_ansi_discards_unterminated_osc_across_lines() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+strip_ansi = true
+"#,
+        );
+        let out = apply_filter(
+            &f,
+            "visible\n\x1b]8;;https://evil.example/SECRET\nstill-secret",
+        );
+        assert_eq!(out, "visible");
+    }
+
+    #[test]
+    fn test_strip_ansi_discards_unterminated_dcs_across_lines() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+strip_ansi = true
+"#,
+        );
+        let out = apply_filter(&f, "visible\n\x1bP1$q hidden\nSECRET");
+        assert_eq!(out, "visible");
     }
 
     #[test]
@@ -1018,6 +1152,32 @@ match_command = "["
     }
 
     #[test]
+    fn test_oversized_user_regex_is_rejected_before_compilation() {
+        let pattern = "a".repeat(20_000);
+        let toml = format!(
+            "schema_version = 1\n[filters.f]\nmatch_command = {:?}\n",
+            pattern
+        );
+        let result = make_filters(&toml);
+        assert!(result.is_empty(), "oversized user regex was accepted");
+    }
+
+    #[test]
+    fn test_user_regex_compiled_size_limit_rejects_expansion() {
+        let result = make_filters(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "(?:\\p{L}){2000}"
+"#,
+        );
+        assert!(
+            result.is_empty(),
+            "regex exceeding the compiled automata limit was accepted"
+        );
+    }
+
+    #[test]
     fn test_schema_version_mismatch_errors() {
         let result = TomlFilterRegistry::parse_and_compile(
             r#"schema_version = 99
@@ -1148,6 +1308,20 @@ match_command = "^terraform"
         );
         let found = find_filter_in("kubectl get pods", &filters);
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_debug_command_name_never_includes_args_or_credentials() {
+        let command = "curl -H 'Authorization: Bearer sk-live-secret' https://example.test";
+        let label = debug_command_name(command);
+
+        assert_eq!(label, "curl");
+        assert!(!label.contains("Authorization"));
+        assert!(!label.contains("sk-live-secret"));
+        assert_eq!(
+            debug_command_name("TOKEN=secret curl example.test"),
+            "<redacted>"
+        );
     }
 
     #[test]
@@ -1313,6 +1487,50 @@ strip_lines_matching = ["^noise"]
         );
         let out = apply_filter(&f, "日本語テスト\nnoise\n中文内容");
         assert_eq!(out, "日本語テスト\n中文内容");
+    }
+
+    #[test]
+    fn test_apply_filter_caps_many_small_lines_before_materialising_them() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+"#,
+        );
+        let mut input = "x\n".repeat(600_000);
+        input.push_str("SECRET_AFTER_LIMIT");
+
+        let out = apply_filter(&f, &input);
+
+        assert!(!out.contains("SECRET_AFTER_LIMIT"));
+        assert!(
+            out.len() <= 1_048_700,
+            "bounded output unexpectedly large: {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn test_truncated_input_cannot_short_circuit_to_success() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+match_output = [
+  { pattern = "success", message = "ok", unless = "error" },
+]
+"#,
+        );
+        let mut input = String::from("success\n");
+        input.push_str(&"x".repeat(1_048_576));
+        input.push_str("\nerror: hidden beyond byte ceiling");
+
+        let out = apply_filter(&f, &input);
+
+        assert_ne!(out, "ok");
+        assert!(out.contains(FILTER_TRUNCATION_NOTICE));
     }
 
     // --- match_output tests (PR1) ---

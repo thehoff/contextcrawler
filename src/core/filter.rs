@@ -164,121 +164,325 @@ lazy_static! {
     static ref TRAILING_WHITESPACE: Regex = Regex::new(r"[ \t]+$").unwrap();
 }
 
-/// Scans a single line for C-style `/* ... */` block comments, preserving any
-/// code that lives outside the commented span.
-///
-/// Correctness rules (issue #471 — content loss in the language filter):
-/// - Code BEFORE `/*` and AFTER the matching `*/` is preserved, so an inline
-///   `let x = compute(); /* note */` keeps `let x = compute();`.
-/// - `/*` and `*/` that appear INSIDE a string literal (single or double
-///   quoted, honouring `\` escapes) are NOT treated as comment markers, so a
-///   line like `let g = "/*.txt";` never enters block-comment state.
-/// - `//` outside a string starts a line comment: the remainder is copied
-///   verbatim and block scanning stops, so `/*` after a `//` cannot latch.
-/// - While inside a block comment we deliberately do NOT track string state —
-///   apostrophes/quotes in prose (`/* don't */`) must not start a phantom
-///   string that swallows the closing `*/`. We only look for `*/`.
-///
-/// `in_block` is carried across lines for genuine multi-line block comments.
-/// Returns `(surviving_code, new_in_block_state)`.
-fn strip_c_block_comments(line: &str, mut in_block: bool) -> (String, bool) {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
+#[derive(Clone, Copy)]
+enum LiteralState {
+    Quoted {
+        quote: u8,
+        escaped: bool,
+    },
+    Backtick {
+        honours_escapes: bool,
+        escaped: bool,
+    },
+    RustRaw {
+        hashes: usize,
+    },
+}
+
+#[derive(Default)]
+struct CLikeScanState {
+    in_block_comment: bool,
+    literal: Option<LiteralState>,
+}
+
+struct CLikeScanResult {
+    code: String,
+    brace_delta: i32,
+    first_open_brace: Option<usize>,
+}
+
+fn uses_c_like_comments(lang: &Language) -> bool {
+    matches!(
+        lang,
+        Language::Rust
+            | Language::JavaScript
+            | Language::TypeScript
+            | Language::Go
+            | Language::C
+            | Language::Cpp
+            | Language::Java
+            | Language::Unknown
+    )
+}
+
+fn char_len_at(text: &str, index: usize) -> usize {
+    text[index..].chars().next().map_or(1, char::len_utf8)
+}
+
+/// Return `(opening byte length, hash count)` for a Rust `r#"..."#` or
+/// `br#"..."#` opener at `index`.
+fn rust_raw_string_start(line: &str, index: usize) -> Option<(usize, usize)> {
+    let bytes = line.as_bytes();
+    let prefix_len = if bytes.get(index) == Some(&b'r') {
+        1
+    } else if bytes.get(index) == Some(&b'b') && bytes.get(index + 1) == Some(&b'r') {
+        2
+    } else {
+        return None;
+    };
+
+    if index > 0 {
+        let previous = bytes[index - 1];
+        if previous.is_ascii_alphanumeric() || previous == b'_' {
+            return None;
+        }
+    }
+
+    let mut cursor = index + prefix_len;
+    let mut hashes = 0usize;
+    while bytes.get(cursor) == Some(&b'#') {
+        hashes += 1;
+        cursor += 1;
+    }
+    if bytes.get(cursor) == Some(&b'"') {
+        Some((cursor + 1 - index, hashes))
+    } else {
+        None
+    }
+}
+
+/// Scan one C-family source line while carrying block-comment and multiline
+/// literal state. The returned code has only genuine `/* ... */` spans
+/// removed; brace metadata counts braces in executable syntax, not strings or
+/// comments. This shared lexer keeps MinimalFilter and AggressiveFilter in
+/// agreement about JS/TS templates, Go raw strings, and Rust raw strings.
+fn scan_c_like_line(line: &str, lang: &Language, state: &mut CLikeScanState) -> CLikeScanResult {
+    let bytes = line.as_bytes();
+    let mut code = String::with_capacity(line.len());
+    let mut brace_delta = 0i32;
+    let mut first_open_brace = None;
     let mut i = 0usize;
-    // Some(quote_char) while inside a string literal (only tracked outside
-    // block comments).
-    let mut in_string: Option<char> = None;
-    let mut escaped = false;
 
-    while i < chars.len() {
-        let c = chars[i];
-
-        if in_block {
-            // Inside a block comment: only `*/` matters. No string tracking
-            // (see doc comment — avoids the apostrophe-latch).
-            if c == '*' && chars.get(i + 1) == Some(&'/') {
-                in_block = false;
+    while i < bytes.len() {
+        if state.in_block_comment {
+            if bytes.get(i) == Some(&b'*') && bytes.get(i + 1) == Some(&b'/') {
+                state.in_block_comment = false;
                 i += 2;
             } else {
-                i += 1;
+                i += char_len_at(line, i);
             }
             continue;
         }
 
-        if let Some(q) = in_string {
-            // Inside a string literal: copy verbatim, honour escapes, and only
-            // the matching quote can close it.
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                in_string = None;
+        if let Some(literal) = state.literal {
+            match literal {
+                LiteralState::Quoted { quote, escaped } => {
+                    let current = bytes[i];
+                    let len = char_len_at(line, i);
+                    code.push_str(&line[i..i + len]);
+                    state.literal = if escaped {
+                        Some(LiteralState::Quoted {
+                            quote,
+                            escaped: false,
+                        })
+                    } else if current == b'\\' {
+                        Some(LiteralState::Quoted {
+                            quote,
+                            escaped: true,
+                        })
+                    } else if current == quote {
+                        None
+                    } else {
+                        Some(LiteralState::Quoted {
+                            quote,
+                            escaped: false,
+                        })
+                    };
+                    i += len;
+                }
+                LiteralState::Backtick {
+                    honours_escapes,
+                    escaped,
+                } => {
+                    let current = bytes[i];
+                    let len = char_len_at(line, i);
+                    code.push_str(&line[i..i + len]);
+                    state.literal = if honours_escapes && escaped {
+                        Some(LiteralState::Backtick {
+                            honours_escapes,
+                            escaped: false,
+                        })
+                    } else if honours_escapes && current == b'\\' {
+                        Some(LiteralState::Backtick {
+                            honours_escapes,
+                            escaped: true,
+                        })
+                    } else if current == b'`' {
+                        None
+                    } else {
+                        Some(LiteralState::Backtick {
+                            honours_escapes,
+                            escaped: false,
+                        })
+                    };
+                    i += len;
+                }
+                LiteralState::RustRaw { hashes } => {
+                    if bytes[i] == b'"'
+                        && i + 1 + hashes <= bytes.len()
+                        && bytes[i + 1..i + 1 + hashes]
+                            .iter()
+                            .all(|byte| *byte == b'#')
+                    {
+                        let end = i + 1 + hashes;
+                        code.push_str(&line[i..end]);
+                        state.literal = None;
+                        i = end;
+                    } else {
+                        let len = char_len_at(line, i);
+                        code.push_str(&line[i..i + len]);
+                        i += len;
+                    }
+                }
             }
-            i += 1;
             continue;
         }
 
-        // Outside string and outside block comment.
-        if c == '"' || c == '\'' {
-            in_string = Some(c);
-            out.push(c);
-            i += 1;
-            continue;
-        }
-
-        if c == '/' && chars.get(i + 1) == Some(&'/') {
-            // Line comment: the rest of the line is a comment. Copy it verbatim
-            // so the caller's doc-comment (`///`) detection still works, and
-            // stop scanning (a `/*` after `//` must not enter block state).
-            out.extend(chars[i..].iter());
+        if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'/') {
+            // Preserve the line comment for the caller's doc-comment handling,
+            // but stop lexical scanning so braces and /* inside it are inert.
+            code.push_str(&line[i..]);
             break;
         }
 
-        if c == '/' && chars.get(i + 1) == Some(&'*') {
-            in_block = true;
+        if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'*') {
+            state.in_block_comment = true;
             i += 2;
             continue;
         }
 
-        out.push(c);
-        i += 1;
+        if *lang == Language::Rust {
+            if let Some((opening_len, hashes)) = rust_raw_string_start(line, i) {
+                code.push_str(&line[i..i + opening_len]);
+                state.literal = Some(LiteralState::RustRaw { hashes });
+                i += opening_len;
+                continue;
+            }
+        }
+
+        let current = bytes[i];
+        if current == b'"' || current == b'\'' {
+            code.push(current as char);
+            state.literal = Some(LiteralState::Quoted {
+                quote: current,
+                escaped: false,
+            });
+            i += 1;
+            continue;
+        }
+
+        if current == b'`'
+            && matches!(
+                lang,
+                Language::JavaScript | Language::TypeScript | Language::Go
+            )
+        {
+            code.push('`');
+            state.literal = Some(LiteralState::Backtick {
+                honours_escapes: *lang != Language::Go,
+                escaped: false,
+            });
+            i += 1;
+            continue;
+        }
+
+        if current == b'{' {
+            brace_delta += 1;
+            first_open_brace.get_or_insert(i);
+        } else if current == b'}' {
+            brace_delta -= 1;
+        }
+
+        let len = char_len_at(line, i);
+        code.push_str(&line[i..i + len]);
+        i += len;
     }
 
-    (out, in_block)
+    // Ordinary quoted strings cannot span a physical line unless the final
+    // backslash escapes its newline. Reset malformed/unclosed quotes here so a
+    // stray quote cannot suppress comment handling for the rest of the file.
+    if let Some(LiteralState::Quoted { quote, escaped }) = state.literal {
+        state.literal = if escaped {
+            Some(LiteralState::Quoted {
+                quote,
+                escaped: false,
+            })
+        } else {
+            None
+        };
+    }
+    if let Some(LiteralState::Backtick {
+        honours_escapes: true,
+        escaped: true,
+    }) = state.literal
+    {
+        state.literal = Some(LiteralState::Backtick {
+            honours_escapes: true,
+            escaped: false,
+        });
+    }
+
+    CLikeScanResult {
+        code,
+        brace_delta,
+        first_open_brace,
+    }
+}
+
+fn python_docstring_delimiter(line: &str) -> Option<&'static str> {
+    let bytes = line.as_bytes();
+    let mut prefix_len = 0usize;
+    while prefix_len < 2
+        && bytes
+            .get(prefix_len)
+            .is_some_and(|byte| matches!(byte.to_ascii_lowercase(), b'r' | b'f' | b'u' | b'b'))
+    {
+        prefix_len += 1;
+    }
+
+    let rest = &line[prefix_len..];
+    if rest.starts_with("\"\"\"") {
+        Some("\"\"\"")
+    } else if rest.starts_with("'''") {
+        Some("'''")
+    } else {
+        None
+    }
 }
 
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
         let patterns = lang.comment_patterns();
         let mut result = String::with_capacity(content.len());
+        let mut c_like_state = CLikeScanState::default();
         let mut in_block_comment = false;
-        let mut in_docstring = false;
+        let mut in_docstring: Option<&'static str> = None;
 
         // C-style `/* ... */` block comments get the quote-aware span scanner.
         // Other "block" markers (`"""` for Python, `=begin`/`=end` for Ruby)
         // are handled by their own dedicated paths below.
-        let c_style_block =
-            patterns.block_start == Some("/*") && patterns.block_end == Some("*/");
+        let c_style_block = patterns.block_start == Some("/*") && patterns.block_end == Some("*/");
 
         for line in content.lines() {
             let trimmed = line.trim();
 
-            // --- Python docstrings (""" markers, kept in minimal mode) ---
+            // --- Python docstrings (prefixed triple quotes, kept in minimal mode) ---
             if *lang == Language::Python {
-                if trimmed.starts_with("\"\"\"") {
-                    // Only toggle when an ODD number of delimiters appear on the
-                    // line. A one-line `"""doc"""` has two delimiters → no
-                    // toggle, so it never latches in_docstring on (the LOW bug).
-                    if trimmed.matches("\"\"\"").count() % 2 == 1 {
-                        in_docstring = !in_docstring;
+                if let Some(delimiter) = in_docstring {
+                    if line.matches(delimiter).count() % 2 == 1 {
+                        in_docstring = None;
                     }
                     result.push_str(line);
                     result.push('\n');
                     continue;
                 }
-                if in_docstring {
+
+                if let Some(delimiter) = python_docstring_delimiter(trimmed) {
+                    // A one-line triple-quoted string has two delimiters and
+                    // therefore does not latch multiline state.
+                    if trimmed.matches(delimiter).count() % 2 == 1 {
+                        in_docstring = Some(delimiter);
+                    }
                     result.push_str(line);
                     result.push('\n');
                     continue;
@@ -313,9 +517,9 @@ impl FilterStrategy for MinimalFilter {
 
             // --- C-style block comments: strip only the commented span ---
             let effective = if c_style_block {
-                let (code, new_state) = strip_c_block_comments(line, in_block_comment);
-                in_block_comment = new_state;
-                code
+                let scan = scan_c_like_line(line, lang, &mut c_like_state);
+                in_block_comment = c_like_state.in_block_comment;
+                scan.code
             } else {
                 line.to_string()
             };
@@ -362,7 +566,7 @@ lazy_static! {
     static ref IMPORT_PATTERN: Regex =
         Regex::new(r"^(use |import |from |require\(|#include)").unwrap();
     static ref FUNC_SIGNATURE: Regex = Regex::new(
-        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+"
+        r"^(pub\s+)?(async\s+)?(?:(fn|def|function|class|struct|enum|trait|interface|type)\s+\w+|func\s+(?:\([^)]*\)\s*)?\w+)"
     )
     .unwrap();
 }
@@ -378,9 +582,13 @@ impl FilterStrategy for AggressiveFilter {
         let mut result = String::with_capacity(minimal.len() / 2);
         let mut brace_depth = 0;
         let mut in_impl_body = false;
+        let mut brace_state = CLikeScanState::default();
 
         for line in minimal.lines() {
             let trimmed = line.trim();
+            let brace_scan =
+                uses_c_like_comments(lang).then(|| scan_c_like_line(line, lang, &mut brace_state));
+            let brace_delta = brace_scan.as_ref().map_or(0, |scan| scan.brace_delta);
 
             // Always keep imports
             if IMPORT_PATTERN.is_match(trimmed) {
@@ -391,20 +599,28 @@ impl FilterStrategy for AggressiveFilter {
 
             // Always keep function/struct/class signatures
             if FUNC_SIGNATURE.is_match(trimmed) {
-                result.push_str(line);
+                let first_open = brace_scan.as_ref().and_then(|scan| scan.first_open_brace);
+                let has_inline_body = first_open
+                    .is_some_and(|open| line[open + 1..].trim().chars().any(|ch| ch != '}'));
+                if has_inline_body {
+                    let open = first_open.unwrap_or(line.len().saturating_sub(1));
+                    result.push_str(&line[..open + 1]);
+                } else {
+                    result.push_str(line);
+                }
                 result.push('\n');
-                in_impl_body = true;
-                brace_depth = 0;
+                brace_depth = brace_delta;
+                in_impl_body = brace_depth > 0 || first_open.is_none();
+                if has_inline_body && brace_depth <= 0 {
+                    result.push_str("    // ... implementation\n}\n");
+                    in_impl_body = false;
+                }
                 continue;
             }
 
             // Track brace depth for implementation bodies
-            let open_braces = trimmed.matches('{').count();
-            let close_braces = trimmed.matches('}').count();
-
             if in_impl_body {
-                brace_depth += open_braces as i32;
-                brace_depth -= close_braces as i32;
+                brace_depth += brace_delta;
 
                 // Only keep the opening and closing braces
                 if brace_depth <= 1 && (trimmed == "{" || trimmed == "}" || trimmed.ends_with('{'))
@@ -447,8 +663,9 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
 }
 
 pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() <= max_lines {
+    let (content, byte_truncated) = crate::core::utils::bounded_filter_blob(content);
+    let total_lines = content.lines().count();
+    if !byte_truncated && total_lines <= max_lines {
         return content.to_string();
     }
 
@@ -459,7 +676,7 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
     let mut result = Vec::with_capacity(max_lines + 1);
     let mut kept_lines = 0;
 
-    for line in &lines {
+    for line in content.lines() {
         let trimmed = line.trim();
 
         // Prioritize structurally important lines so the visible window stays useful.
@@ -473,7 +690,7 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
             || trimmed == "{";
 
         if is_important || kept_lines < max_lines / 2 {
-            result.push((*line).to_string());
+            result.push(line.to_string());
             kept_lines += 1;
         }
         // Non-important lines beyond max_lines/2 are silently skipped —
@@ -486,7 +703,14 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
 
     // Single end-of-output marker: not code syntax, unambiguous to AI agents.
     // Invariant: kept_lines + N == lines.len() (N = lines not shown)
-    result.push(format!("[{} more lines]", lines.len() - kept_lines));
+    if byte_truncated {
+        result.push(format!(
+            "[output truncated at {} bytes]",
+            crate::core::utils::FILTER_BLOB_BYTE_LIMIT
+        ));
+    } else {
+        result.push(format!("[{} more lines]", total_lines - kept_lines));
+    }
 
     result.join("\n")
 }
@@ -723,6 +947,98 @@ y = 2";
     }
 
     #[test]
+    fn test_js_template_literal_preserves_block_comment_markers() {
+        let code =
+            "const template = `first line\n/* literal marker */\nlast line`;\nconst after = 1;";
+        let out = MinimalFilter.filter(code, &Language::JavaScript);
+        assert_eq!(out, code, "template literal was mangled:\n{out}");
+    }
+
+    #[test]
+    fn test_rust_multiline_raw_string_preserves_block_comment_markers() {
+        let code = r##"let value = r#"first line
+/* literal marker */
+last line"#;
+let after = 1;"##;
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        assert_eq!(out, code, "Rust raw string was mangled:\n{out}");
+    }
+
+    #[test]
+    fn test_go_multiline_raw_string_preserves_block_comment_markers() {
+        let code = "var value = `first line\n/* literal marker */\nlast line`\nvar after = 1";
+        let out = MinimalFilter.filter(code, &Language::Go);
+        assert_eq!(out, code, "Go raw string was mangled:\n{out}");
+    }
+
+    #[test]
+    fn test_python_prefixed_and_single_quote_docstrings_round_trip() {
+        let cases = [
+            (
+                "r\"\"\"raw doc\n# inside raw doc\n\"\"\"\n# outside comment\nx = 1",
+                "r\"\"\"raw doc\n# inside raw doc\n\"\"\"\nx = 1",
+            ),
+            (
+                "f\"\"\"formatted {value}\n# inside formatted doc\n\"\"\"\n# outside comment\ny = 2",
+                "f\"\"\"formatted {value}\n# inside formatted doc\n\"\"\"\ny = 2",
+            ),
+            (
+                "'''single-quoted doc\n# inside single doc\n'''\n# outside comment\nz = 3",
+                "'''single-quoted doc\n# inside single doc\n'''\nz = 3",
+            ),
+        ];
+
+        for (code, expected) in cases {
+            let out = MinimalFilter.filter(code, &Language::Python);
+            assert_eq!(out, expected, "Python docstring was mistracked:\n{out}");
+        }
+    }
+
+    #[test]
+    fn test_aggressive_filter_keeps_go_receiver_method_signature() {
+        let code = "func (r *Rcvr) F() {\n    r.call()\n}\nconst After = 1";
+        let out = AggressiveFilter.filter(code, &Language::Go);
+        assert!(
+            out.contains("func (r *Rcvr) F()"),
+            "Go receiver method signature was stripped:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_filter_does_not_leak_later_function_body_secrets() {
+        let code = "fn f() {\n    call();\n    let api_key = \"LATER_SECRET\";\n}\nconst AFTER: usize = 1;";
+        let out = AggressiveFilter.filter(code, &Language::Rust);
+        assert!(
+            !out.contains("LATER_SECRET"),
+            "function secret leaked:\n{out}"
+        );
+        assert!(
+            out.contains("const AFTER"),
+            "code after function was lost:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_filter_does_not_leak_inline_function_body_secrets() {
+        let code = "fn f() { call(); let api_key = \"INLINE_SECRET\"; }";
+        let out = AggressiveFilter.filter(code, &Language::Rust);
+        assert!(
+            !out.contains("INLINE_SECRET"),
+            "inline function secret leaked:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_aggressive_brace_depth_ignores_strings_and_comments() {
+        let code = "fn f() {\n    let brace = \"{\";\n    call(); // {\n}\nconst AFTER: usize = 1;";
+        let out = AggressiveFilter.filter(code, &Language::Rust);
+        assert!(
+            out.contains("const AFTER"),
+            "braces inside strings/comments corrupted body depth:\n{out}"
+        );
+    }
+
+    #[test]
     fn test_doc_block_comment_preserved() {
         // Rust /** ... */ doc comments are kept verbatim (prior behaviour).
         let code = "/** API docs */\npub fn f() {}";
@@ -807,5 +1123,21 @@ y = 2";
         let input = "a\nb\nc";
         let output = smart_truncate(input, 3, &Language::Unknown);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_smart_truncate_caps_one_huge_line_utf8_safely() {
+        let mut input = "é".repeat(600_000);
+        input.push_str("SECRET_AFTER_LIMIT");
+
+        let output = smart_truncate(&input, 100, &Language::Unknown);
+
+        assert!(!output.contains("SECRET_AFTER_LIMIT"));
+        assert!(
+            output.len() <= 1_048_700,
+            "bounded output unexpectedly large: {} bytes",
+            output.len()
+        );
+        assert!(std::str::from_utf8(output.as_bytes()).is_ok());
     }
 }
