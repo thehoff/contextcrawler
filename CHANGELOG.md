@@ -3,6 +3,34 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.3] — 2026-07-13
+
+Security release. Closes a 0.4.2 regression and four bypasses from the
+codex-5.6-max sweep + 5-voice council audit (register #210-#233). All fixes
+TDD'd and council-gated.
+
+### Fixed
+- **Tirith `pipe_to_interpreter` bypass regression (#210).** The #191 rework
+  left a whole-command `python -m json.tool` shortcut, so
+  `printf evil | sh; python3 -m json.tool x` re-opened the pipe-to-interpreter
+  bypass. Removed the shortcut; the source-gated sink scanner already handles
+  legitimate `json.tool` data pipes.
+- **Env-prefix proxy-disable injection (#229).** A quoted env value with an
+  embedded space (`FOO="bar RTK_DISABLED=1" cmd`) smuggled a standalone
+  `RTK_DISABLED`/`CTXCRL_DISABLED` and disabled the proxy. Now parsed with
+  shell-word semantics and the whole command-substitution/expansion
+  metacharacter class is rejected in the disable prefix.
+- **Project-filter GLOB injection (#224).** GLOB metacharacters (`* ? [`) in a
+  project directory name acted as wildcards, leaking sibling projects' history.
+  Metacharacters are now escaped; only the trailing wildcard is literal.
+- **`trust` symlink secret-exfil (#221).** `contextcrawler trust` read
+  `.ctxcrl/filters.toml` following symlinks, so a committed symlink to a secret
+  was printed and trusted. Now an `O_NOFOLLOW` no-follow read (atomic on
+  Linux/macOS) refuses symlinked filter files.
+- **Unscrubbed parse-failure error text (#223).** `record_parse_failure`
+  persisted `error_message` verbatim; a parser error echoing the command leaked
+  credentials into history. It is now scrubbed like the command.
+
 ## [0.4.2] — 2026-07-13
 
 Security-precision and analytics-honesty release. Rebuilds the Tirith
