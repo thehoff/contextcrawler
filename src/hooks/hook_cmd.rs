@@ -340,7 +340,12 @@ fn run_gemini_decision(json: &Value) {
     // the command with no visible rewrite is not silently allowed.
     let deny = |reason: &str| {
         let out = json!({ "decision": "deny", "reason": reason });
-        let _ = writeln!(io::stdout(), "{out}");
+        // #225 (council MEDIUM): a denial that fails to reach the host must NOT
+        // exit successfully — a closed/short stdout would then read as
+        // auto-allow. Fail closed with a non-zero exit.
+        if writeln!(io::stdout(), "{out}").is_err() {
+            std::process::exit(2);
+        }
     };
     match handler_action(cmd) {
         HandlerAction::Deny { .. } => deny("Blocked by ContextCrawler permission rule"),
