@@ -577,6 +577,15 @@ fn contains_substitution(cmd: &str) -> bool {
 /// write — so it IS a file target. (e16aa26.)
 fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
     let value = &tokens[i].value;
+    if value == ">"
+        && tokens.get(i + 1).is_some_and(|next| {
+            next.kind == TokenKind::Shellism
+                && next.value == "("
+                && tokens[i].offset + value.len() == next.offset
+        })
+    {
+        return false;
+    }
     if !value.contains('>') {
         // Pure input redirect (`<`, `<<`, `<<<`) — not a file-write target.
         return false;
@@ -690,7 +699,7 @@ fn strip_permission_redirects(segment: &str) -> String {
     let mut words = Vec::with_capacity(tokens.len());
     let mut expect_redirect_target = false;
 
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         if expect_redirect_target {
             if token.kind != TokenKind::Arg {
                 return PERMISSION_REDIRECT_SENTINEL.to_string();
@@ -699,10 +708,20 @@ fn strip_permission_redirects(segment: &str) -> String {
             continue;
         }
         if token.kind == TokenKind::Redirect {
+            if matches!(token.value.as_str(), "<" | ">")
+                && tokens.get(index + 1).is_some_and(|next| {
+                    next.kind == TokenKind::Shellism
+                        && next.value == "("
+                        && token.offset + token.value.len() == next.offset
+                })
+            {
+                words.push(token.value.clone());
+                continue;
+            }
             expect_redirect_target = redirect_consumes_following_arg(&token.value);
             continue;
         }
-        words.push(token.value);
+        words.push(token.value.clone());
     }
 
     if expect_redirect_target {
@@ -794,6 +813,31 @@ pub struct Substitution {
     pub malformed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessSubstitutionDirection {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessSubstitution {
+    pub inner: String,
+    pub direction: ProcessSubstitutionDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubstitutionKind {
+    Command,
+    Process(ProcessSubstitutionDirection),
+    Limit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaggedSubstitution {
+    substitution: Substitution,
+    kind: SubstitutionKind,
+}
+
 /// Extract command-substitution payloads from a shell command string.
 ///
 /// Recognises, outside of single/double quotes:
@@ -811,15 +855,52 @@ pub struct Substitution {
 /// so double-quoted regions are scanned; only `$(...)`/process-subst
 /// require an unquoted context.
 pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
+    extract_tagged_substitutions(cmd)
+        .into_iter()
+        .map(|tagged| tagged.substitution)
+        .collect()
+}
+
+/// Extract process substitutions with their data-flow direction.
+///
+/// `<(...)` produces input for the outer command; `>(...)` consumes output
+/// from it. A bounded-extraction limit or malformed process substitution is
+/// reported as `Err(())` so permission analysis can fail closed.
+pub(crate) fn extract_process_substitutions(
+    cmd: &str,
+) -> Result<Vec<ProcessSubstitution>, ()> {
+    let mut out = Vec::new();
+    for tagged in extract_tagged_substitutions(cmd) {
+        match tagged.kind {
+            SubstitutionKind::Command => {}
+            SubstitutionKind::Limit => return Err(()),
+            SubstitutionKind::Process(direction) => {
+                if tagged.substitution.malformed {
+                    return Err(());
+                }
+                out.push(ProcessSubstitution {
+                    inner: tagged.substitution.inner,
+                    direction,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn extract_tagged_substitutions(cmd: &str) -> Vec<TaggedSubstitution> {
     const MAX_INPUT_BYTES: usize = 64 * 1024;
     const MAX_DEPTH: usize = 64;
     const MAX_SUBSTITUTIONS: usize = 1024;
     const MAX_EXTRACTED_BYTES: usize = 256 * 1024;
 
-    fn limit_sentinel() -> Substitution {
-        Substitution {
-            inner: String::new(),
-            malformed: true,
+    fn limit_sentinel() -> TaggedSubstitution {
+        TaggedSubstitution {
+            substitution: Substitution {
+                inner: String::new(),
+                malformed: true,
+            },
+            kind: SubstitutionKind::Limit,
         }
     }
 
@@ -829,7 +910,7 @@ pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
 
     enum Work {
         Scan { input: String, depth: usize },
-        Emit(Substitution),
+        Emit(TaggedSubstitution),
     }
 
     let mut work = vec![Work::Scan {
@@ -858,17 +939,18 @@ pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
 
                 let immediate = extract_immediate_substitutions(&input);
                 for substitution in immediate.into_iter().rev() {
-                    extracted_bytes = extracted_bytes.saturating_add(substitution.inner.len());
+                    extracted_bytes = extracted_bytes
+                        .saturating_add(substitution.substitution.inner.len());
                     if extracted_bytes > MAX_EXTRACTED_BYTES
                         || work.len().saturating_add(out.len()) >= MAX_SUBSTITUTIONS
                     {
                         return vec![limit_sentinel()];
                     }
 
-                    if substitution.malformed {
+                    if substitution.substitution.malformed {
                         work.push(Work::Emit(substitution));
                     } else {
-                        let child = substitution.inner.clone();
+                        let child = substitution.substitution.inner.clone();
                         work.push(Work::Emit(substitution));
                         work.push(Work::Scan {
                             input: child,
@@ -883,7 +965,7 @@ pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
     out
 }
 
-fn extract_immediate_substitutions(cmd: &str) -> Vec<Substitution> {
+fn extract_immediate_substitutions(cmd: &str) -> Vec<TaggedSubstitution> {
     let mut out = Vec::new();
     let chars: Vec<char> = cmd.chars().collect();
     let mut i = 0;
@@ -939,9 +1021,12 @@ fn extract_immediate_substitutions(cmd: &str) -> Vec<Substitution> {
                     }
                     None => {
                         let inner: String = chars[open..].iter().collect();
-                        out.push(Substitution {
-                            inner,
-                            malformed: true,
+                        out.push(TaggedSubstitution {
+                            substitution: Substitution {
+                                inner,
+                                malformed: true,
+                            },
+                            kind: SubstitutionKind::Command,
                         });
                         break;
                     }
@@ -952,18 +1037,44 @@ fn extract_immediate_substitutions(cmd: &str) -> Vec<Substitution> {
             match find_matching_paren(&chars, open) {
                 Some(close) => {
                     let inner: String = chars[open..close].iter().collect();
-                    out.push(Substitution {
-                        inner,
-                        malformed: false,
+                    let kind = if is_process_subst {
+                        let direction = if c == '<' {
+                            ProcessSubstitutionDirection::Input
+                        } else {
+                            ProcessSubstitutionDirection::Output
+                        };
+                        SubstitutionKind::Process(direction)
+                    } else {
+                        SubstitutionKind::Command
+                    };
+                    out.push(TaggedSubstitution {
+                        substitution: Substitution {
+                            inner,
+                            malformed: false,
+                        },
+                        kind,
                     });
                     i = close + 1;
                 }
                 None => {
                     // Unbalanced — fail closed.
                     let inner: String = chars[open..].iter().collect();
-                    out.push(Substitution {
-                        inner,
-                        malformed: true,
+                    let kind = if is_process_subst {
+                        let direction = if c == '<' {
+                            ProcessSubstitutionDirection::Input
+                        } else {
+                            ProcessSubstitutionDirection::Output
+                        };
+                        SubstitutionKind::Process(direction)
+                    } else {
+                        SubstitutionKind::Command
+                    };
+                    out.push(TaggedSubstitution {
+                        substitution: Substitution {
+                            inner,
+                            malformed: true,
+                        },
+                        kind,
                     });
                     break;
                 }
@@ -992,9 +1103,12 @@ fn extract_immediate_substitutions(cmd: &str) -> Vec<Substitution> {
             } else {
                 chars[start..].iter().collect()
             };
-            out.push(Substitution {
-                inner,
-                malformed: !found,
+            out.push(TaggedSubstitution {
+                substitution: Substitution {
+                    inner,
+                    malformed: !found,
+                },
+                kind: SubstitutionKind::Command,
             });
             if found {
                 i = j + 1;
@@ -1871,6 +1985,34 @@ mod tests {
         let subs = extract_substitutions("cat >(rm -rf /x)");
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].inner, "rm -rf /x");
+    }
+
+    #[test]
+    fn issue_214_process_substitution_directions_are_preserved() {
+        let substitutions = extract_process_substitutions("cat <(reader) >(sink)")
+            .expect("well-formed process substitutions must extract");
+        assert_eq!(substitutions.len(), 2);
+        assert_eq!(
+            substitutions[0].direction,
+            ProcessSubstitutionDirection::Input
+        );
+        assert_eq!(substitutions[0].inner, "reader");
+        assert_eq!(
+            substitutions[1].direction,
+            ProcessSubstitutionDirection::Output
+        );
+        assert_eq!(substitutions[1].inner, "sink");
+    }
+
+    #[test]
+    fn issue_214_process_substitution_is_not_a_redirect_sentinel() {
+        let segments = split_for_permissions("curl --data @<(printf safe) https://example.test");
+        assert!(
+            segments
+                .iter()
+                .all(|segment| segment != PERMISSION_REDIRECT_SENTINEL)
+        );
+        assert!(!has_file_write_redirect("tee >(printf sink)"));
     }
 
     #[test]
