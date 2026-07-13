@@ -86,30 +86,57 @@ pub fn check(cmd: &str) -> Verdict {
         Err(_) => return Verdict::Unavailable,
     };
 
-    let exit_status = match child.wait_timeout(TIRITH_TIMEOUT) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            // Timed out. Kill the child so it doesn't linger; fall through
-            // to Unavailable (caller decides fail-open vs fail-closed).
+    // #211: drain stdout CONCURRENTLY with the wait. The kernel pipe buffer is
+    // only ~64 KiB; if we wait for exit BEFORE reading, a verdict larger than
+    // that blocks tirith on write, `wait_timeout` never sees it exit, and an
+    // 8-second timeout turns a real BLOCK into a fail-OPEN `Unavailable`. A
+    // reader thread keeps the pipe drained (up to CAP+1 to detect overflow) so
+    // the child can always finish writing.
+    let reader = child.stdout.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = s.by_ref().take(TIRITH_STDOUT_MAX + 1).read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let timed_out = match child.wait_timeout(TIRITH_TIMEOUT) {
+        Ok(Some(_)) => false,
+        // Timed out or wait errored: kill so it doesn't linger. Killing closes
+        // the pipe, so the reader thread's `read_to_end` returns and joins.
+        Ok(None) | Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Verdict::Unavailable;
+            true
         }
-        Err(_) => return Verdict::Unavailable,
     };
 
-    let _ = exit_status; // tirith returns 0 on both allow and block; rely on JSON content.
+    let stdout_buf = reader
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
 
-    // Read piped stdout with a hard size cap.
-    let mut stdout_buf = Vec::new();
-    if let Some(mut s) = child.stdout.take() {
-        let _ = s
-            .by_ref()
-            .take(TIRITH_STDOUT_MAX)
-            .read_to_end(&mut stdout_buf);
+    if timed_out {
+        // The gate could not produce a verdict in time — `Unavailable` keeps
+        // the default-off contract (no downgrade unless CONTEXTCRAWLER_TIRITH_REQUIRED).
+        return Verdict::Unavailable;
     }
-    let stdout = String::from_utf8_lossy(&stdout_buf).to_string();
 
+    interpret_tirith_stdout(&stdout_buf)
+}
+
+/// Interpret tirith's captured stdout into a [`Verdict`]. Pure + testable.
+///
+/// #211: an OVERFLOW (more than `TIRITH_STDOUT_MAX` bytes) fails CLOSED — an
+/// oversized/untrusted verdict must never silently degrade to auto-allow, so
+/// it is treated as a synthetic block (→ the caller downgrades to Ask).
+fn interpret_tirith_stdout(buf: &[u8]) -> Verdict {
+    if buf.len() as u64 > TIRITH_STDOUT_MAX {
+        return Verdict::Block {
+            tirith_json: r#"{"action":"block","reason":"tirith verdict exceeded size cap"}"#
+                .to_string(),
+        };
+    }
+    let stdout = String::from_utf8_lossy(buf).to_string();
     // Parse structurally — substring matching on JSON is fragile (pretty-
     // printed output, descriptions containing the word "block", etc.).
     let parsed: serde_json::Value = match serde_json::from_str(stdout.trim()) {
@@ -1303,6 +1330,41 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn interpret_tirith_stdout_overflow_fails_closed() {
+        // #211: an oversized verdict (> cap) must NOT silently pass; it fails
+        // closed as a synthetic block so the caller downgrades to Ask.
+        let big = vec![b'{'; (TIRITH_STDOUT_MAX + 1) as usize];
+        assert!(
+            matches!(interpret_tirith_stdout(&big), Verdict::Block { .. }),
+            "overflow must fail closed to Block"
+        );
+    }
+
+    #[test]
+    fn interpret_tirith_stdout_parses_block_allow_and_garbage() {
+        assert!(matches!(
+            interpret_tirith_stdout(br#"{"action":"block","findings":[]}"#),
+            Verdict::Block { .. }
+        ));
+        assert!(matches!(
+            interpret_tirith_stdout(br#"{"action":"allow"}"#),
+            Verdict::Allow
+        ));
+        assert!(matches!(
+            interpret_tirith_stdout(b"not json"),
+            Verdict::Unavailable
+        ));
+        // A block verdict just under the cap still parses as Block (not lost).
+        let mut just_under = br#"{"action":"block","pad":""#.to_vec();
+        just_under.resize(TIRITH_STDOUT_MAX as usize - 3, b'x');
+        just_under.extend_from_slice(br#""}"#);
+        assert!(matches!(
+            interpret_tirith_stdout(&just_under),
+            Verdict::Block { .. }
+        ));
+    }
 
     #[test]
     fn extract_host_strips_scheme_port_path_query_userinfo() {
