@@ -4,7 +4,9 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use std::borrow::Cow;
 
-use super::lexer::{extract_substitutions, split_on_operators, tokenize, TokenKind};
+use super::lexer::{
+    contains_ansi_c_quote, extract_substitutions, split_on_operators, tokenize, TokenKind,
+};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
@@ -522,6 +524,12 @@ pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
     // We need to return a &str into the original, so compute the offset.
     let prefix_len = trimmed.len() - stripped.len();
     let prefix_part = &trimmed[..prefix_len];
+    if tokenize(prefix_part)
+        .iter()
+        .any(|token| token.kind == TokenKind::Redirect)
+    {
+        return ("", trimmed);
+    }
     let rest = trimmed[prefix_len..].trim();
     (prefix_part, rest)
 }
@@ -742,6 +750,85 @@ fn strip_ctxcrl_shell_builtin_prefix(cmd: &str) -> Option<&str> {
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
 /// else. Matching is literal, not pattern-based: configure the exact concrete
 /// prefix you use.
+fn has_grouped_pipeline_producer(cmd: &str) -> bool {
+    let tokens = tokenize(cmd);
+    tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::Pipe)
+        .any(|pipe| {
+            tokens.iter().any(|token| {
+                token.offset < pipe.offset
+                    && token.kind == TokenKind::Shellism
+                    && matches!(token.value.as_str(), "{" | "}" | "(" | ")")
+            })
+        })
+}
+
+fn has_persistent_exec_redirect(cmd: &str) -> bool {
+    split_on_operators(cmd, false)
+        .into_iter()
+        .any(segment_has_persistent_exec_redirect)
+}
+
+fn segment_has_persistent_exec_redirect(segment: &str) -> bool {
+    let tokens = tokenize(segment);
+    let mut index = 0;
+    while tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Arg && assignment_word(&token.value))
+    {
+        index += 1;
+    }
+    if !tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Arg && token.value == "exec")
+    {
+        return false;
+    }
+    index += 1;
+
+    let mut saw_redirect = false;
+    let mut expect_target = false;
+    let mut saw_command_arg = false;
+    while let Some(token) = tokens.get(index) {
+        if expect_target {
+            if token.kind != TokenKind::Arg {
+                return true;
+            }
+            expect_target = false;
+        } else if token.kind == TokenKind::Redirect {
+            saw_redirect = true;
+            expect_target = redirect_takes_separate_target(&token.value);
+        } else if token.kind == TokenKind::Arg {
+            saw_command_arg = true;
+        } else {
+            return true;
+        }
+        index += 1;
+    }
+
+    saw_redirect && !saw_command_arg
+}
+
+fn assignment_word(word: &str) -> bool {
+    let Some((key, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut characters = key.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn redirect_takes_separate_target(redirect: &str) -> bool {
+    match redirect.find(">&") {
+        Some(position) => redirect[position + 2..].is_empty(),
+        None => true,
+    }
+}
+
 pub fn rewrite_command(
     cmd: &str,
     excluded: &[String],
@@ -755,7 +842,12 @@ pub fn rewrite_command(
         return None;
     }
 
-    if has_heredoc(trimmed) || trimmed.contains("$((") {
+    if has_heredoc(trimmed)
+        || trimmed.contains("$((")
+        || contains_ansi_c_quote(trimmed)
+        || has_grouped_pipeline_producer(trimmed)
+        || has_persistent_exec_redirect(trimmed)
+    {
         return None;
     }
 
@@ -5334,6 +5426,46 @@ mod tests {
         assert_eq!(
             collapse_line_continuations("echo 🚀 \\\nthere"),
             "echo 🚀 there"
+        );
+    }
+
+    // --- #217: grammar ambiguity must preserve the user's raw command ------
+
+    #[test]
+    fn issue_217_pipe_ampersand_pipeline_is_not_corrupted_or_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log |& cargo test", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn issue_217_grouped_pipeline_producer_is_not_partially_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("{ true; git log; } | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn issue_217_ansi_c_quoted_command_is_left_raw() {
+        assert_eq!(
+            rewrite_command_no_prefixes("echo $'x\\''; git log", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn issue_217_redirect_inside_env_assignment_prevents_rewrite() {
+        assert_eq!(rewrite_command_no_prefixes("FOO=x>out git log", &[]), None);
+    }
+
+    #[test]
+    fn issue_217_persistent_exec_redirect_stops_later_rewrites() {
+        assert_eq!(rewrite_command_no_prefixes("exec >out; git log", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("exec 3>out; cargo test", &[]),
+            None
         );
     }
 }

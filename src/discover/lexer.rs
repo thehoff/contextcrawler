@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
     Arg,
@@ -12,6 +14,74 @@ pub struct ParsedToken {
     pub kind: TokenKind,
     pub value: String,
     pub offset: usize,
+}
+
+/// Remove active shell line continuations before security-sensitive parsing.
+///
+/// Bash deletes the backslash + newline pair before tokenisation outside quotes
+/// and inside double quotes. Keeping it would make the gate see a split word
+/// while the shell executes one word (#217). For an unquoted continuation,
+/// surrounding horizontal whitespace is normalised to one token separator.
+/// Single-quoted continuations are literal and remain unchanged.
+pub fn normalise_line_continuations(input: &str) -> Cow<'_, str> {
+    if !input.contains('\\') {
+        return Cow::Borrowed(input);
+    }
+
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut changed = false;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if !in_single && byte == b'\\' {
+            if let Some(skip) = line_continuation_len(&bytes[i..]) {
+                let had_separator = !in_double && matches!(out.last(), Some(b' ') | Some(b'\t'));
+                if had_separator {
+                    while matches!(out.last(), Some(b' ') | Some(b'\t')) {
+                        out.pop();
+                    }
+                    out.push(b' ');
+                }
+                i += skip;
+                if had_separator {
+                    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                        i += 1;
+                    }
+                }
+                changed = true;
+                continue;
+            }
+        }
+
+        match byte {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+        out.push(byte);
+        i += 1;
+    }
+
+    if changed {
+        Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+    } else {
+        Cow::Borrowed(input)
+    }
+}
+
+fn line_continuation_len(bytes: &[u8]) -> Option<usize> {
+    if bytes.first() != Some(&b'\\') {
+        return None;
+    }
+    match bytes.get(1) {
+        Some(b'\r') if bytes.get(2) == Some(&b'\n') => Some(3),
+        Some(b'\n') | Some(b'\r') => Some(2),
+        _ => None,
+    }
 }
 
 pub fn tokenize(input: &str) -> Vec<ParsedToken> {
@@ -112,6 +182,14 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                     tokens.push(ParsedToken {
                         kind: TokenKind::Operator,
                         value: "||".into(),
+                        offset: start,
+                    });
+                } else if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
+                    tokens.push(ParsedToken {
+                        kind: TokenKind::Pipe,
+                        value: "|&".into(),
                         offset: start,
                     });
                 } else {
@@ -351,7 +429,88 @@ pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
 /// tokenises `\n`, `(` and `)` as Shellism control tokens, so this builds on
 /// the shared [`tokenize`] rather than re-tokenising.
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
-    contains_substitution(cmd) || has_file_write_redirect(cmd)
+    contains_substitution(cmd)
+        || has_file_write_redirect(cmd)
+        || contains_ansi_c_quote(cmd)
+        || contains_dynamic_arithmetic(cmd)
+}
+
+/// ANSI-C quoted strings have escape semantics that the small lexer does not
+/// model. Reject the construct as unattestable rather than letting a quote
+/// boundary hide later operators (#217).
+pub fn contains_ansi_c_quote(cmd: &str) -> bool {
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if !in_single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'$' if !in_single && !in_double && bytes.get(i + 1) == Some(&b'\'') => {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Arithmetic expansion can recursively resolve array subscripts and variable
+/// values. An identifier therefore makes the executed shell grammar depend on
+/// runtime state; only a numeric/operator-only expression is attestable
+/// (#217). Malformed arithmetic also fails closed.
+pub fn contains_dynamic_arithmetic(cmd: &str) -> bool {
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < chars.len() {
+        let current = chars[i];
+        if current == '\\' && !in_single {
+            i += 2;
+            continue;
+        }
+        if current == '\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if current == '"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if !in_single
+            && current == '$'
+            && chars.get(i + 1) == Some(&'(')
+            && chars.get(i + 2) == Some(&'(')
+        {
+            let inner_open = i + 2;
+            let Some(close) = find_matching_paren(&chars, inner_open) else {
+                return true;
+            };
+            let expression_end = close.saturating_sub(1);
+            if expression_end <= inner_open
+                || chars[inner_open + 1..expression_end]
+                    .iter()
+                    .any(|ch| ch.is_ascii_alphabetic() || *ch == '_')
+            {
+                return true;
+            }
+            i = close + 1;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// The redirect-only half of [`contains_unattestable_construct`]: a real
@@ -435,15 +594,16 @@ fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
 }
 
 /// Like [`split_on_operators`] but also breaks on subshell parentheses
-/// `( ... )` and truncates each segment at its first redirect, in addition to
+/// `( ... )` and removes redirect operators plus their operands, in addition to
 /// the `&&`/`||`/`;`/`|`/background-`&`/newline separators already handled by
 /// the shared tokeniser (22890aa). Used only by the permission gate so a
 /// deny-ruled command hidden in ANY segment — including inside a subshell — is
 /// still checked. Callers must still gate on
 /// [`contains_unattestable_construct`] first, because substitution and
 /// file-target redirects can hide commands this function can't surface.
-pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
-    let trimmed = cmd.trim();
+pub fn split_for_permissions(cmd: &str) -> Vec<String> {
+    let normalised = normalise_line_continuations(cmd);
+    let trimmed = normalised.trim();
     if trimmed.is_empty() {
         return vec![];
     }
@@ -451,7 +611,6 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
     let tokens = tokenize(trimmed);
     let mut results = Vec::new();
     let mut seg_start: usize = 0;
-    let mut seg_end: Option<usize> = None;
     // Paren stack: `true` = a substitution/arithmetic paren (`$(`, `$((`, `<(`,
     // `>(`) whose `(`/`)` are NOT subshell boundaries; `false` = a real subshell
     // paren that IS a boundary. Substitution commands are already forced to Ask
@@ -482,11 +641,7 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
             }
             paren_stack.push(false);
             // True subshell open — a boundary.
-            let end = seg_end.take().unwrap_or(tok.offset);
-            let segment = trimmed[seg_start..end].trim();
-            if !segment.is_empty() {
-                results.push(segment);
-            }
+            push_permission_segment(&mut results, &trimmed[seg_start..tok.offset]);
             seg_start = tok.offset + tok.value.len();
             continue;
         }
@@ -496,11 +651,7 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
             if paren_stack.pop() == Some(true) {
                 continue;
             }
-            let end = seg_end.take().unwrap_or(tok.offset);
-            let segment = trimmed[seg_start..end].trim();
-            if !segment.is_empty() {
-                results.push(segment);
-            }
+            push_permission_segment(&mut results, &trimmed[seg_start..tok.offset]);
             seg_start = tok.offset + tok.value.len();
             continue;
         }
@@ -513,27 +664,63 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
         };
 
         if is_boundary {
-            // A redirect earlier in this segment ends it before the operator;
-            // the redirect target (a filename) is not part of the command.
-            let end = seg_end.take().unwrap_or(tok.offset);
-            let segment = trimmed[seg_start..end].trim();
-            if !segment.is_empty() {
-                results.push(segment);
-            }
+            push_permission_segment(&mut results, &trimmed[seg_start..tok.offset]);
             seg_start = tok.offset + tok.value.len();
-        } else if tok.kind == TokenKind::Redirect && seg_end.is_none() {
-            seg_end = Some(tok.offset);
         }
     }
 
-    let end = seg_end.unwrap_or(trimmed.len());
-    let tail = trimmed[seg_start..end].trim();
-    if !tail.is_empty() {
-        results.push(tail);
-    }
+    push_permission_segment(&mut results, &trimmed[seg_start..]);
 
     results
 }
+
+fn push_permission_segment(results: &mut Vec<String>, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    results.push(strip_permission_redirects(trimmed));
+}
+
+/// Remove redirect operators and operands while retaining command tokens on
+/// both sides. Truncation erased commands after a leading redirect in #212.
+/// A malformed redirect emits a sentinel that cannot match an allow rule.
+fn strip_permission_redirects(segment: &str) -> String {
+    let tokens = tokenize(segment);
+    let mut words = Vec::with_capacity(tokens.len());
+    let mut expect_redirect_target = false;
+
+    for token in tokens {
+        if expect_redirect_target {
+            if token.kind != TokenKind::Arg {
+                return PERMISSION_REDIRECT_SENTINEL.to_string();
+            }
+            expect_redirect_target = false;
+            continue;
+        }
+        if token.kind == TokenKind::Redirect {
+            expect_redirect_target = redirect_consumes_following_arg(&token.value);
+            continue;
+        }
+        words.push(token.value);
+    }
+
+    if expect_redirect_target {
+        PERMISSION_REDIRECT_SENTINEL.to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn redirect_consumes_following_arg(redirect: &str) -> bool {
+    if let Some(position) = redirect.find(">&") {
+        return redirect[position + 2..].is_empty();
+    }
+    true
+}
+
+const PERMISSION_REDIRECT_SENTINEL: &str =
+    "\u{0}contextcrawler-unparsable-permission-redirect\u{0}";
 
 /// Strip a single layer of matching surrounding quotes from a token.
 ///
@@ -624,6 +811,79 @@ pub struct Substitution {
 /// so double-quoted regions are scanned; only `$(...)`/process-subst
 /// require an unquoted context.
 pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
+    const MAX_INPUT_BYTES: usize = 64 * 1024;
+    const MAX_DEPTH: usize = 64;
+    const MAX_SUBSTITUTIONS: usize = 1024;
+    const MAX_EXTRACTED_BYTES: usize = 256 * 1024;
+
+    fn limit_sentinel() -> Substitution {
+        Substitution {
+            inner: String::new(),
+            malformed: true,
+        }
+    }
+
+    if cmd.len() > MAX_INPUT_BYTES {
+        return vec![limit_sentinel()];
+    }
+
+    enum Work {
+        Scan { input: String, depth: usize },
+        Emit(Substitution),
+    }
+
+    let mut work = vec![Work::Scan {
+        input: cmd.to_string(),
+        depth: 0,
+    }];
+    let mut out = Vec::new();
+    let mut extracted_bytes = 0usize;
+
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Emit(substitution) => {
+                if out.len() >= MAX_SUBSTITUTIONS {
+                    return vec![limit_sentinel()];
+                }
+                out.push(substitution);
+            }
+            Work::Scan { input, depth } => {
+                if depth >= MAX_DEPTH {
+                    if out.len() >= MAX_SUBSTITUTIONS {
+                        return vec![limit_sentinel()];
+                    }
+                    out.push(limit_sentinel());
+                    continue;
+                }
+
+                let immediate = extract_immediate_substitutions(&input);
+                for substitution in immediate.into_iter().rev() {
+                    extracted_bytes = extracted_bytes.saturating_add(substitution.inner.len());
+                    if extracted_bytes > MAX_EXTRACTED_BYTES
+                        || work.len().saturating_add(out.len()) >= MAX_SUBSTITUTIONS
+                    {
+                        return vec![limit_sentinel()];
+                    }
+
+                    if substitution.malformed {
+                        work.push(Work::Emit(substitution));
+                    } else {
+                        let child = substitution.inner.clone();
+                        work.push(Work::Emit(substitution));
+                        work.push(Work::Scan {
+                            input: child,
+                            depth: depth + 1,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn extract_immediate_substitutions(cmd: &str) -> Vec<Substitution> {
     let mut out = Vec::new();
     let chars: Vec<char> = cmd.chars().collect();
     let mut i = 0;
@@ -692,8 +952,6 @@ pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
             match find_matching_paren(&chars, open) {
                 Some(close) => {
                     let inner: String = chars[open..close].iter().collect();
-                    // Recurse first so nested payloads are also captured.
-                    out.extend(extract_substitutions(&inner));
                     out.push(Substitution {
                         inner,
                         malformed: false,
@@ -734,7 +992,6 @@ pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
             } else {
                 chars[start..].iter().collect()
             };
-            out.extend(extract_substitutions(&inner));
             out.push(Substitution {
                 inner,
                 malformed: !found,
@@ -1530,10 +1787,7 @@ mod tests {
 
     #[test]
     fn test_split_on_multiple_newlines() {
-        assert_eq!(
-            split_on_operators("a\nb\nc", false),
-            vec!["a", "b", "c"]
-        );
+        assert_eq!(split_on_operators("a\nb\nc", false), vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -1834,10 +2088,7 @@ mod tests {
             vec!["git push --force"]
         );
         // A deny-ruled command before a redirect is still surfaced.
-        assert_eq!(
-            split_for_permissions("rm -rf / > out"),
-            vec!["rm -rf /"]
-        );
+        assert_eq!(split_for_permissions("rm -rf / > out"), vec!["rm -rf /"]);
     }
 
     #[test]
@@ -1851,5 +2102,89 @@ mod tests {
     fn test_split_perms_empty() {
         assert!(split_for_permissions("").is_empty());
         assert!(split_for_permissions("   ").is_empty());
+    }
+
+    // --- #217: shell grammar must not hide or corrupt gate segments -------
+
+    #[test]
+    fn issue_217_ansi_c_quote_is_unattestable() {
+        assert!(contains_unattestable_construct("echo $'x\\''; rm -rf /"));
+    }
+
+    #[test]
+    fn issue_217_active_line_continuation_is_removed_before_permission_split() {
+        assert_eq!(split_for_permissions("r\\\nm -rf /"), vec!["rm -rf /"]);
+        let double_quoted = split_for_permissions("r\"\\\n\"m -rf /");
+        assert_eq!(double_quoted, vec!["r\"\"m -rf /"]);
+        assert_eq!(shell_split(&double_quoted[0]), vec!["rm", "-rf", "/"]);
+        assert_eq!(
+            split_for_permissions("git \\\n                status"),
+            vec!["git status"]
+        );
+    }
+
+    #[test]
+    fn issue_217_pipe_ampersand_is_one_pipe_token() {
+        let tokens = tokenize("git log |& cargo test");
+        let controls: Vec<_> = tokens
+            .iter()
+            .filter(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::Pipe | TokenKind::Operator | TokenKind::Shellism
+                )
+            })
+            .map(|token| (token.kind.clone(), token.value.as_str()))
+            .collect();
+        assert_eq!(controls, vec![(TokenKind::Pipe, "|&")]);
+        assert_eq!(
+            split_for_permissions("git log |& cargo test"),
+            vec!["git log", "cargo test"]
+        );
+    }
+
+    #[test]
+    fn issue_217_identifier_arithmetic_is_unattestable_but_numeric_is_not() {
+        assert!(contains_unattestable_construct(
+            "x='a[$(touch /tmp/pwn)0]'; echo $((x))"
+        ));
+        assert!(!contains_unattestable_construct("echo $((2 + 2))"));
+    }
+
+    #[test]
+    fn issue_217_leading_redirect_is_parsed_through_to_the_command() {
+        assert_eq!(
+            split_for_permissions("</dev/null rm -rf /tmp/victim"),
+            vec!["rm -rf /tmp/victim"]
+        );
+        assert_eq!(
+            split_for_permissions("echo ok && </dev/null rm -rf /tmp/victim"),
+            vec!["echo ok", "rm -rf /tmp/victim"]
+        );
+    }
+
+    // --- #218: bounded iterative substitution extraction ------------------
+
+    #[test]
+    fn issue_218_deep_substitution_hits_a_depth_limit_without_recursing() {
+        let cmd = format!("{}echo{}", "$(".repeat(80), ")".repeat(80));
+        let substitutions = extract_substitutions(&cmd);
+        assert!(
+            substitutions.iter().any(|sub| sub.malformed),
+            "depth-limit ambiguity must surface a fail-closed sentinel"
+        );
+        assert!(substitutions.len() <= 65, "extraction must stay bounded");
+    }
+
+    #[test]
+    fn issue_218_oversized_substitution_fails_closed_without_copying_payload() {
+        let cmd = format!("$({})", "x".repeat(70 * 1024));
+        let substitutions = extract_substitutions(&cmd);
+        assert_eq!(substitutions.len(), 1);
+        assert!(substitutions[0].malformed);
+        assert!(
+            substitutions[0].inner.len() < 1024,
+            "oversized payload must not be copied into the result"
+        );
     }
 }
