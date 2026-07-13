@@ -242,6 +242,53 @@ fn global_filter_path() -> Option<std::path::PathBuf> {
     dirs::config_dir().map(|d| d.join(RTK_DATA_DIR).join(FILTERS_TOML))
 }
 
+/// Read a file's bytes, refusing to follow a symlink at the final path
+/// component (#221). A committed filter file that is actually a symlink to a
+/// secret (`.ctxcrl/filters.toml -> ~/.ssh/id_rsa`) must never be read — it
+/// would be printed to the terminal, fed into model context, and trusted.
+/// `O_NOFOLLOW` fails the open atomically on unix (Linux + macOS, the
+/// deployment targets), so there is no TOCTOU window there; the regular-file
+/// check rejects fifos/devices.
+///
+/// Non-unix (Windows) has no `O_NOFOLLOW`, so it falls back to a
+/// `symlink_metadata` pre-check with a residual precheck→open race (council
+/// #221, codex MEDIUM). Accepted: Windows symlink creation requires
+/// elevation/developer-mode, and the tool targets Linux/macOS; a Windows
+/// atomic no-reparse open (`FILE_FLAG_OPEN_REPARSE_POINT`) is a documented
+/// follow-up rather than a blocker for the unix-atomic fix.
+fn read_file_nofollow(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    if std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "refusing to read {} — it is a symlink (possible secret exfiltration)",
+            path.display()
+        );
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("cannot open {} (symlink or unreadable)", path.display()))?;
+    let meta = f
+        .metadata()
+        .with_context(|| format!("cannot stat {}", path.display()))?;
+    if !meta.is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(buf)
+}
+
 pub fn run_trust(list: bool, global: bool) -> Result<()> {
     if list {
         // Renamed from `trusted` to defuse CodeQL's name-based
@@ -283,9 +330,11 @@ pub fn run_trust(list: bool, global: bool) -> Result<()> {
         (p, ".ctxcrl/filters.toml".to_string())
     };
 
-    // Read ONCE to prevent TOCTOU: display + hash from same buffer
+    // Read ONCE to prevent TOCTOU: display + hash from same buffer.
+    // #221: no-follow — a committed `.ctxcrl/filters.toml -> ~/.ssh/id_rsa`
+    // symlink must never be read (then printed/trusted). Exfil vector.
     let content_bytes =
-        std::fs::read(&filter_path).with_context(|| format!("Failed to read {}", label))?;
+        read_file_nofollow(&filter_path).with_context(|| format!("Failed to read {}", label))?;
     let content = String::from_utf8_lossy(&content_bytes);
 
     println!("=== {} ===", label);
@@ -386,6 +435,26 @@ fn print_risk_summary(content: &str) {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn read_file_nofollow_rejects_symlink_and_reads_regular() {
+        // #221: a symlinked filter file must be refused (exfil), a regular
+        // file read normally.
+        let temp = TempDir::new().unwrap();
+        let secret = temp.path().join("secret");
+        std::fs::write(&secret, b"TOP SECRET KEY").unwrap();
+        let regular = temp.path().join("filters.toml");
+        std::fs::write(&regular, b"[[rule]]\n").unwrap();
+        assert_eq!(read_file_nofollow(&regular).unwrap(), b"[[rule]]\n");
+
+        #[cfg(unix)]
+        {
+            let link = temp.path().join("evil.toml");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            let err = read_file_nofollow(&link).unwrap_err().to_string();
+            assert!(err.contains("symlink"), "must refuse symlink: {err}");
+        }
+    }
 
     /// Helper: create a temporary trust store in a temp dir.
     /// Overrides the store path via a scoped env var (not possible with
