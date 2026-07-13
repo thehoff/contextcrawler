@@ -833,6 +833,11 @@ impl Tracker {
         fallback_succeeded: bool,
     ) -> Result<()> {
         let raw_command = scrub_secrets(raw_command);
+        // #223: the error message frequently echoes the offending command
+        // (e.g. `unexpected token in "curl --token secret"`), so it must be
+        // scrubbed too — it was persisted verbatim and could resurface via
+        // `gain --history` back into agent context.
+        let error_message = scrub_secrets(error_message);
         self.conn.execute(
             "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
              VALUES (?1, ?2, ?3, ?4)",
@@ -2033,6 +2038,31 @@ pub fn args_display(args: &[OsString]) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn record_parse_failure_scrubs_error_message() {
+        // #223: the error message often echoes the offending command; it must
+        // be scrubbed before persistence, not stored verbatim.
+        let t = Tracker::new_in_memory().unwrap();
+        t.record_parse_failure(
+            "cmd x",
+            r#"parse error near "curl --token supersecret42""#,
+            false,
+        )
+        .unwrap();
+        let msg: String = t
+            .conn
+            .query_row(
+                "SELECT error_message FROM parse_failures LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !msg.contains("supersecret42"),
+            "secret leaked into stored error_message: {msg}"
+        );
+    }
 
     #[test]
     fn test_project_filter_glob_escapes_metachars() {
