@@ -174,6 +174,24 @@ fn current_project_path_string() -> String {
         .unwrap_or_default()
 }
 
+/// Escape SQLite GLOB metacharacters (`*`, `?`, `[`) so a project path is
+/// matched LITERALLY. GLOB has no ESCAPE clause, but a bracket class matches a
+/// single literal char: `[*]`, `[?]`, `[[]` (#224). Without this, a project dir
+/// whose name contains a metachar (e.g. `client[1]`) would act as a wildcard
+/// and select sibling projects' history.
+fn glob_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '*' => out.push_str("[*]"),
+            '?' => out.push_str("[?]"),
+            '[' => out.push_str("[[]"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Build SQL filter params for project-scoped queries.
 /// Returns (exact_match, glob_prefix) for WHERE clause.
 /// Uses GLOB instead of LIKE to avoid `_` and `%` in paths acting as wildcards. // changed: GLOB
@@ -181,7 +199,9 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     match project_path {
         Some(p) => (
             Some(p.to_string()),
-            Some(format!("{}{}*", p, std::path::MAIN_SEPARATOR)), // changed: GLOB pattern with * wildcard
+            // #224: escape metachars in the path; only the trailing `*` is a
+            // real wildcard (match this dir's descendants).
+            Some(format!("{}{}*", glob_escape(p), std::path::MAIN_SEPARATOR)),
         ),
         None => (None, None),
     }
@@ -2013,6 +2033,30 @@ pub fn args_display(args: &[OsString]) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn test_project_filter_glob_escapes_metachars() {
+        // #224: a project path with a GLOB metachar must match LITERALLY, not
+        // act as a wildcard selecting sibling projects. Verify against the real
+        // SQLite GLOB operator with the escaped pattern.
+        let conn = Connection::open_in_memory().unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        // Project literally named "cli*"; a sibling "client-secret" must NOT
+        // match (the `*` would eat "ent-secret" unescaped).
+        let (_exact, glob) = project_filter_params(Some(&format!("{sep}repo{sep}cli*")));
+        let glob = glob.unwrap();
+        let sibling = format!("{sep}repo{sep}client-secret{sep}x"); // matches unescaped `cli*`
+        let child = format!("{sep}repo{sep}cli*{sep}sub"); // real descendant
+        let m = |path: &str| -> bool {
+            conn.query_row("SELECT ?1 GLOB ?2", params![path, glob], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+                != 0
+        };
+        assert!(!m(&sibling), "sibling must NOT match escaped glob: {glob}");
+        assert!(m(&child), "real descendant must still match: {glob}");
+    }
 
     /// Process-wide lock for tests that mutate environment variables
     /// (`RTK_DB_PATH`, `CONTEXTCRAWLER_TEST_MODE`) or otherwise depend on a
