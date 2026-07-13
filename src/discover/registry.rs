@@ -473,6 +473,15 @@ pub fn prefix_contains_ctxcrl_disabled(prefix_part: &str) -> bool {
 /// keeps the quoted value as one word (`FOO=bar RTK_DISABLED=1` → key `FOO`).
 /// Returns owned strings since shlex un-quotes into new allocations.
 fn env_prefix_assignments(prefix_part: &str) -> Vec<(String, String)> {
+    // #229 round 2: shlex is quote-aware but NOT a nested-shell parser, so
+    // `FOO=$(echo RTK_DISABLED=1)` / backticks / `${…}` split at an inner space
+    // and leak a fake standalone assignment. A legitimate disable prefix never
+    // needs a substitution, so refuse to parse (→ no disable honoured, proxy
+    // stays enabled) when one is present. Fail closed against the security
+    // opt-out.
+    if prefix_part.contains("$(") || prefix_part.contains('`') || prefix_part.contains("${") {
+        return Vec::new();
+    }
     let Some(words) = shlex::split(prefix_part) else {
         return Vec::new();
     };
@@ -4127,6 +4136,29 @@ mod tests {
         assert!(
             rewrite_command_no_prefixes(r#"FOO="bar RTK_DISABLED=1" git status"#, &[]).is_some()
         );
+        // Backslash-escaped space stays one word too (shlex).
+        assert!(!cmd_has_ctxcrl_disabled_prefix(
+            r#"FOO=bar\ RTK_DISABLED=1 git status"#
+        ));
+    }
+
+    #[test]
+    fn test_command_substitution_cannot_inject_disable() {
+        // #229 round 2 (codex HIGH): shlex is quote-aware but not a nested-shell
+        // parser, so `FOO=$(echo RTK_DISABLED=1)` split at the inner space and
+        // `RTK_DISABLED=1)` spoofed the disable. A prefix carrying command
+        // substitution / expansion must NOT be honoured (fail closed: proxy
+        // stays enabled).
+        for cmd in [
+            r#"FOO=$(echo RTK_DISABLED=1) git status"#,
+            r#"FOO=`echo RTK_DISABLED=1` git status"#,
+            r#"FOO=${x-RTK_DISABLED=1} git status"#,
+        ] {
+            assert!(
+                !cmd_has_ctxcrl_disabled_prefix(cmd),
+                "substitution in the prefix must not spoof a disable: {cmd}"
+            );
+        }
     }
 
     #[test]
