@@ -13,10 +13,9 @@ use crate::hooks::constants::{
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    LEGACY_CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_AGENT_SUBDIR, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_EXTENSION_FILE,
+    LEGACY_CURSOR_HOOK_COMMAND, PI_AGENT_SUBDIR, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_EXTENSION_FILE,
     PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
@@ -71,18 +70,18 @@ const AGENT_PIDEV: &str = "pidev";
 /// surfaced as a `Result` rather than a panic (CTXCRL no-panic-in-production rule).
 fn agent_guidance(agent: &str) -> Result<String> {
     let title = match agent {
-        AGENT_CLAUDE     => "Claude Code",
-        AGENT_CODEX      => "Codex CLI",
-        AGENT_CURSOR     => "Cursor",
-        AGENT_WINDSURF   => "Windsurf",
-        AGENT_CLINE      => "Cline",
-        AGENT_KILOCODE   => "Kilo Code",
+        AGENT_CLAUDE => "Claude Code",
+        AGENT_CODEX => "Codex CLI",
+        AGENT_CURSOR => "Cursor",
+        AGENT_WINDSURF => "Windsurf",
+        AGENT_CLINE => "Cline",
+        AGENT_KILOCODE => "Kilo Code",
         AGENT_ANTIGRAVITY => "Google Antigravity",
-        AGENT_HERMES     => "Hermes",
-        AGENT_GEMINI     => "Gemini CLI",
-        AGENT_COPILOT    => "GitHub Copilot",
-        AGENT_OPENCODE   => "OpenCode",
-        AGENT_PIDEV      => "Pi",
+        AGENT_HERMES => "Hermes",
+        AGENT_GEMINI => "Gemini CLI",
+        AGENT_COPILOT => "GitHub Copilot",
+        AGENT_OPENCODE => "OpenCode",
+        AGENT_PIDEV => "Pi",
         other => anyhow::bail!("agent_guidance: unknown agent key '{other}'"),
     };
 
@@ -135,15 +134,15 @@ fn agent_guidance(agent: &str) -> Result<String> {
         // HOOKED agents: all others have a PreToolUse / BeforeTool hook.
         _ => {
             let agent_name = match agent {
-                AGENT_CLAUDE     => "Claude Code",
-                AGENT_CURSOR     => "Cursor",
-                AGENT_WINDSURF   => "Windsurf",
-                AGENT_CLINE      => "Cline",
-                AGENT_KILOCODE   => "Kilo Code",
+                AGENT_CLAUDE => "Claude Code",
+                AGENT_CURSOR => "Cursor",
+                AGENT_WINDSURF => "Windsurf",
+                AGENT_CLINE => "Cline",
+                AGENT_KILOCODE => "Kilo Code",
                 AGENT_ANTIGRAVITY => "Google Antigravity",
-                AGENT_GEMINI     => "Gemini CLI",
-                AGENT_COPILOT    => "GitHub Copilot",
-                _                => title,
+                AGENT_GEMINI => "Gemini CLI",
+                AGENT_COPILOT => "GitHub Copilot",
+                _ => title,
             };
             // Build owned string for hooked agents — returned from match arm.
             return Ok(format!(
@@ -493,11 +492,15 @@ pub fn run(
         }
 
         if install_cursor && !global {
-            anyhow::bail!("Cursor hooks are global-only. Use: contextcrawler init -g --agent cursor");
+            anyhow::bail!(
+                "Cursor hooks are global-only. Use: contextcrawler init -g --agent cursor"
+            );
         }
 
         if install_windsurf && !global {
-            anyhow::bail!("Windsurf support is global-only. Use: contextcrawler init -g --agent windsurf");
+            anyhow::bail!(
+                "Windsurf support is global-only. Use: contextcrawler init -g --agent windsurf"
+            );
         }
 
         if install_windsurf {
@@ -788,9 +791,7 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
                     // Match both legacy script path and new binary command
-                    if command_is_legacy_rewrite_hook(command)
-                        || command == CLAUDE_HOOK_COMMAND
-                    {
+                    if command_is_legacy_rewrite_hook(command) || command == CLAUDE_HOOK_COMMAND {
                         return false;
                     }
                 }
@@ -967,10 +968,17 @@ pub fn uninstall(
     let ctxcrl_md_path = claude_dir.join(CTXCRL_MD);
     if ctxcrl_md_path.exists() {
         if dry_run {
-            println!("[dry-run] would remove CONTEXTCRAWLER.md: {}", ctxcrl_md_path.display());
+            println!(
+                "[dry-run] would remove CONTEXTCRAWLER.md: {}",
+                ctxcrl_md_path.display()
+            );
         } else {
-            fs::remove_file(&ctxcrl_md_path)
-                .with_context(|| format!("Failed to remove CONTEXTCRAWLER.md: {}", ctxcrl_md_path.display()))?;
+            fs::remove_file(&ctxcrl_md_path).with_context(|| {
+                format!(
+                    "Failed to remove CONTEXTCRAWLER.md: {}",
+                    ctxcrl_md_path.display()
+                )
+            })?;
         }
         removed.push(format!("CONTEXTCRAWLER.md: {}", ctxcrl_md_path.display()));
     }
@@ -1043,6 +1051,16 @@ pub fn uninstall(
     // 4. Remove hook entry from settings.json
     if remove_hook_from_settings(ctx)? {
         removed.push("settings.json: removed ContextCrawler hook entry".to_string());
+    }
+    if !dry_run {
+        match integrity::remove_binary_hook_identity() {
+            Ok(true) => removed.push("Hook registration identity: removed".to_string()),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "Warning: could not remove hook registration identity; continuing uninstall: {:#}",
+                error
+            ),
+        }
     }
 
     // 5. Remove OpenCode plugin
@@ -1134,10 +1152,8 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
     // intermediate state between the two operations.
 
     let agents_md_path = codex_dir.join(AGENTS_MD);
-    let mut refs_to_strip: Vec<String> = vec![
-        CTXCRL_MD_REF.to_string(),
-        absolute_ctxcrl_md_ref.clone(),
-    ];
+    let mut refs_to_strip: Vec<String> =
+        vec![CTXCRL_MD_REF.to_string(), absolute_ctxcrl_md_ref.clone()];
     for legacy in LEGACY_CTXCRL_MD_FILES {
         refs_to_strip.push(format!("@{}", legacy));
         refs_to_strip.push(format!("@{}", codex_dir.join(legacy).display()));
@@ -1210,7 +1226,11 @@ fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
         let file_path = codex_dir.join(filename);
         if file_path.exists() {
             if dry_run {
-                println!("[dry-run] would remove {}: {}", filename, file_path.display());
+                println!(
+                    "[dry-run] would remove {}: {}",
+                    filename,
+                    file_path.display()
+                );
             } else {
                 fs::remove_file(&file_path).with_context(|| {
                     format!("Failed to remove {}: {}", filename, file_path.display())
@@ -1255,6 +1275,14 @@ fn patch_settings_json_command(
 
     // Check idempotency
     if hook_already_present(&root, hook_command) {
+        if !dry_run {
+            integrity::store_binary_hook_identity(&settings_path).with_context(|| {
+                format!(
+                    "Failed to store hook registration identity for {}",
+                    settings_path.display()
+                )
+            })?;
+        }
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -1312,6 +1340,12 @@ fn patch_settings_json_command(
 
     // Atomic write
     atomic_write(&settings_path, &serialized)?;
+    integrity::store_binary_hook_identity(&settings_path).with_context(|| {
+        format!(
+            "Failed to store hook registration identity for {}",
+            settings_path.display()
+        )
+    })?;
 
     println!("\n  settings.json: hook added");
     if settings_path.with_extension("json.bak").exists() {
@@ -1410,9 +1444,7 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            cmd == hook_command
-                || cmd == CLAUDE_HOOK_COMMAND
-                || command_is_legacy_rewrite_hook(cmd)
+            cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || command_is_legacy_rewrite_hook(cmd)
         })
 }
 
@@ -1439,7 +1471,12 @@ fn run_default_mode(
     migrate_old_hook_script(ctx);
 
     // 2. Write CONTEXTCRAWLER.md
-    write_if_changed(&ctxcrl_md_path, &agent_guidance(AGENT_CLAUDE)?, CTXCRL_MD, ctx)?;
+    write_if_changed(
+        &ctxcrl_md_path,
+        &agent_guidance(AGENT_CLAUDE)?,
+        CTXCRL_MD,
+        ctx,
+    )?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1456,7 +1493,10 @@ fn run_default_mode(
     if !dry_run {
         println!("\nContextCrawler hook registered (global).\n");
         println!("  Command:   {}", CLAUDE_HOOK_COMMAND);
-        println!("  CONTEXTCRAWLER.md:    {} (10 lines)", ctxcrl_md_path.display());
+        println!(
+            "  CONTEXTCRAWLER.md:    {} (10 lines)",
+            ctxcrl_md_path.display()
+        );
         if let Some(path) = &opencode_plugin_path {
             println!("  OpenCode:  {}", path.display());
         }
@@ -2616,7 +2656,12 @@ fn run_codex_mode_with_paths(
         CTXCRL_MD_REF.to_string()
     };
 
-    write_if_changed(&ctxcrl_md_path, &agent_guidance(AGENT_CODEX)?, CTXCRL_MD, ctx)?;
+    write_if_changed(
+        &ctxcrl_md_path,
+        &agent_guidance(AGENT_CODEX)?,
+        CTXCRL_MD,
+        ctx,
+    )?;
     let added_ref = patch_agents_md(&agents_md_path, &ctxcrl_md_ref, ctx)?;
 
     // Clean up legacy filenames (e.g. RTK.md left behind by the regressed // branding-lint: allow legacy
@@ -2679,8 +2724,8 @@ fn upsert_ctxcrl_block(content: &str, block: &str) -> (String, CtxcrlBlockUpsert
     // Recognise an existing block under either the canonical or the legacy
     // markers; we always WRITE the canonical block (`block` carries the new
     // markers), so a legacy block is replaced in place on upgrade.
-    let (start_marker, end_marker) = block_markers_in(content)
-        .unwrap_or((CTXCRL_BLOCK_START, CTXCRL_BLOCK_END));
+    let (start_marker, end_marker) =
+        block_markers_in(content).unwrap_or((CTXCRL_BLOCK_START, CTXCRL_BLOCK_END));
 
     if let Some(start) = content.find(start_marker) {
         if let Some(relative_end) = content[start..].find(end_marker) {
@@ -2791,7 +2836,11 @@ fn write_ctxcrl_block(
             }
             eprintln!("    Action: Manually remove the incomplete block, then re-run:");
             eprintln!("            {recovery_cmd}");
-            anyhow::bail!("Refusing to modify malformed {} at {}", label, path.display());
+            anyhow::bail!(
+                "Refusing to modify malformed {} at {}",
+                label,
+                path.display()
+            );
         }
     }
 
@@ -2849,10 +2898,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
                 content = migrated_content;
                 migrated = true;
                 if verbose > 0 {
-                    eprintln!(
-                        "Migrated: {} -> {} in CLAUDE.md",
-                        legacy_ref, CTXCRL_MD_REF
-                    );
+                    eprintln!("Migrated: {} -> {} in CLAUDE.md", legacy_ref, CTXCRL_MD_REF);
                 }
             }
         }
@@ -2931,7 +2977,9 @@ fn patch_agents_md(path: &Path, ctxcrl_md_ref: &str, ctx: InitContext) -> Result
             eprintln!("{} reference already present in AGENTS.md", ctxcrl_md_ref);
         }
         // ISSUE #892: Migrate old relative @CONTEXTCRAWLER.md to absolute path if needed
-        if ctxcrl_md_ref != CTXCRL_MD_REF && content.contains(CTXCRL_MD_REF) && !content.contains(ctxcrl_md_ref)
+        if ctxcrl_md_ref != CTXCRL_MD_REF
+            && content.contains(CTXCRL_MD_REF)
+            && !content.contains(ctxcrl_md_ref)
         {
             content = content.replace(CTXCRL_MD_REF, ctxcrl_md_ref);
             if dry_run {
@@ -3105,7 +3153,11 @@ fn strip_ctxcrl_block_from_file(
         atomic_write(path, &stripped)
             .with_context(|| format!("Failed to write {}: {}", label, path.display()))?;
         if verbose > 0 {
-            eprintln!("Removed ContextCrawler guidance block from {}: {}", label, path.display());
+            eprintln!(
+                "Removed ContextCrawler guidance block from {}: {}",
+                label,
+                path.display()
+            );
         }
     }
 
@@ -3135,9 +3187,8 @@ const ALLOW_NONHOME_ROOT_ENV: &str = "CONTEXTCRAWLER_ALLOW_NONHOME_ROOT";
 static NONHOME_ROOT_ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn nonhome_root_allowed() -> bool {
-    *NONHOME_ROOT_ALLOWED.get_or_init(|| {
-        std::env::var_os(ALLOW_NONHOME_ROOT_ENV).is_some_and(|v| !v.is_empty())
-    })
+    *NONHOME_ROOT_ALLOWED
+        .get_or_init(|| std::env::var_os(ALLOW_NONHOME_ROOT_ENV).is_some_and(|v| !v.is_empty()))
 }
 
 /// `true` if `root`, after best-effort canonicalisation, does not start with
@@ -3296,9 +3347,8 @@ fn cleanup_legacy_codex_files(
     // Strip stale `@<legacy>` reference lines from AGENTS.md so the agent
     // doesn't keep loading both the old and new files.
     if agents_md_path.exists() {
-        let content = fs::read_to_string(agents_md_path).with_context(|| {
-            format!("Failed to read AGENTS.md: {}", agents_md_path.display())
-        })?;
+        let content = fs::read_to_string(agents_md_path)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
         let mut new_content = content.clone();
         for legacy in LEGACY_CTXCRL_MD_FILES {
             // Match both relative `@CONTEXTCRAWLER.md` and absolute `@/path/to/CONTEXTCRAWLER.md`.
@@ -4049,7 +4099,10 @@ fn show_claude_config() -> Result<()> {
 
     // Check CONTEXTCRAWLER.md
     if ctxcrl_md_path.exists() {
-        println!("[ok] CONTEXTCRAWLER.md: {} (slim mode)", ctxcrl_md_path.display());
+        println!(
+            "[ok] CONTEXTCRAWLER.md: {} (slim mode)",
+            ctxcrl_md_path.display()
+        );
     } else {
         println!("[--] CONTEXTCRAWLER.md: not found");
     }
@@ -4064,7 +4117,9 @@ fn show_claude_config() -> Result<()> {
                 println!("[FAIL] Integrity: hook modified outside contextcrawler init (run: contextcrawler verify)");
             }
             Ok(integrity::IntegrityStatus::NoBaseline) => {
-                println!("[warn] Integrity: no baseline hash (run: contextcrawler init -g to establish)");
+                println!(
+                    "[warn] Integrity: no baseline hash (run: contextcrawler init -g to establish)"
+                );
             }
             Ok(integrity::IntegrityStatus::NotInstalled)
             | Ok(integrity::IntegrityStatus::OrphanedHash) => {
@@ -4226,7 +4281,10 @@ fn show_codex_config() -> Result<()> {
     println!("ContextCrawler Configuration (Codex CLI):\n");
 
     if global_ctxcrl_md.exists() {
-        println!("[ok] Global CONTEXTCRAWLER.md: {}", global_ctxcrl_md.display());
+        println!(
+            "[ok] Global CONTEXTCRAWLER.md: {}",
+            global_ctxcrl_md.display()
+        );
     } else {
         println!("[--] Global CONTEXTCRAWLER.md: not found");
     }
@@ -4248,10 +4306,8 @@ fn show_codex_config() -> Result<()> {
         let content = fs::read_to_string(&global_agents_md)?;
         // Build the full reference set (canonical + every legacy form) so a
         // regressed install isn't reported as "not configured".
-        let mut all_refs: Vec<String> = vec![
-            CTXCRL_MD_REF.to_string(),
-            global_ctxcrl_md_ref.clone(),
-        ];
+        let mut all_refs: Vec<String> =
+            vec![CTXCRL_MD_REF.to_string(), global_ctxcrl_md_ref.clone()];
         for legacy in LEGACY_CTXCRL_MD_FILES {
             all_refs.push(format!("@{}", legacy));
             all_refs.push(format!("@{}", codex_dir.join(legacy).display()));
@@ -4269,7 +4325,10 @@ fn show_codex_config() -> Result<()> {
     }
 
     if local_ctxcrl_md.exists() {
-        println!("[ok] Local CONTEXTCRAWLER.md: {}", local_ctxcrl_md.display());
+        println!(
+            "[ok] Local CONTEXTCRAWLER.md: {}",
+            local_ctxcrl_md.display()
+        );
     } else {
         println!("[--] Local CONTEXTCRAWLER.md: not found");
     }
@@ -4405,7 +4464,12 @@ pub fn run_gemini(
     // 2. Install GEMINI.md (ContextCrawler awareness for Gemini)
     if !hook_only {
         let gemini_md_path = gemini_dir.join(GEMINI_MD);
-        write_if_changed(&gemini_md_path, &agent_guidance(AGENT_GEMINI)?, GEMINI_MD, ctx)?;
+        write_if_changed(
+            &gemini_md_path,
+            &agent_guidance(AGENT_GEMINI)?,
+            GEMINI_MD,
+            ctx,
+        )?;
     }
 
     // 3. Patch ~/.gemini/settings.json
@@ -4488,7 +4552,10 @@ fn patch_gemini_settings(
                 settings_path.display()
             );
         } else {
-            print!("Patch {} with ContextCrawler hook? [y/N] ", settings_path.display());
+            print!(
+                "Patch {} with ContextCrawler hook? [y/N] ",
+                settings_path.display()
+            );
             std::io::Write::flush(&mut std::io::stdout())?;
             let mut answer = String::new();
             std::io::stdin().read_line(&mut answer)?;
@@ -4614,7 +4681,9 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
                         let new_content = serde_json::to_string_pretty(&settings)?;
                         fs::write(&settings_path, new_content)?;
                     }
-                    removed.push("Gemini settings.json: removed ContextCrawler hook entry".to_string());
+                    removed.push(
+                        "Gemini settings.json: removed ContextCrawler hook entry".to_string(),
+                    );
                 }
             }
         }
@@ -4764,7 +4833,11 @@ mod tests {
             "agent_guidance({agent}): expected '# ContextCrawler (<title>)' heading, got: {first_line}"
         );
         // Core markers
-        for marker in &["## Meta commands", "## Security gate", "contextcrawler gain"] {
+        for marker in &[
+            "## Meta commands",
+            "## Security gate",
+            "contextcrawler gain",
+        ] {
             assert!(
                 guidance.contains(marker),
                 "agent_guidance({agent}): missing core marker '{marker}'"
@@ -4894,9 +4967,18 @@ mod tests {
     fn test_guidance_all_harnesses_unique_titles() {
         // Every harness must have a distinct title line.
         let agents = [
-            AGENT_CLAUDE, AGENT_CODEX, AGENT_CURSOR, AGENT_WINDSURF, AGENT_CLINE,
-            AGENT_KILOCODE, AGENT_ANTIGRAVITY, AGENT_HERMES, AGENT_GEMINI,
-            AGENT_COPILOT, AGENT_OPENCODE, AGENT_PIDEV,
+            AGENT_CLAUDE,
+            AGENT_CODEX,
+            AGENT_CURSOR,
+            AGENT_WINDSURF,
+            AGENT_CLINE,
+            AGENT_KILOCODE,
+            AGENT_ANTIGRAVITY,
+            AGENT_HERMES,
+            AGENT_GEMINI,
+            AGENT_COPILOT,
+            AGENT_OPENCODE,
+            AGENT_PIDEV,
         ];
         let titles: Vec<String> = agents
             .iter()
@@ -5076,22 +5158,38 @@ mod tests {
         let block = agent_guidance_block(AGENT_OPENCODE).expect("opencode block");
 
         // Install: upsert.
-        write_ctxcrl_block(&agents_md, &block, "OpenCode guidance", "x", InitContext::default())
-            .unwrap();
+        write_ctxcrl_block(
+            &agents_md,
+            &block,
+            "OpenCode guidance",
+            "x",
+            InitContext::default(),
+        )
+        .unwrap();
         let first = fs::read_to_string(&agents_md).unwrap();
         // Re-install: idempotent.
-        write_ctxcrl_block(&agents_md, &block, "OpenCode guidance", "x", InitContext::default())
-            .unwrap();
+        write_ctxcrl_block(
+            &agents_md,
+            &block,
+            "OpenCode guidance",
+            "x",
+            InitContext::default(),
+        )
+        .unwrap();
         let second = fs::read_to_string(&agents_md).unwrap();
-        assert_eq!(first, second, "OpenCode AGENTS.md upsert must be idempotent");
+        assert_eq!(
+            first, second,
+            "OpenCode AGENTS.md upsert must be idempotent"
+        );
         assert!(first.contains("# Project notes"));
         assert!(first.contains("User text."));
         assert!(first.contains("# ContextCrawler (OpenCode)"));
         assert_eq!(first.matches(CTXCRL_BLOCK_START).count(), 1);
 
         // Uninstall stripping must keep user content.
-        let desc = strip_ctxcrl_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
-            .unwrap();
+        let desc =
+            strip_ctxcrl_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
+                .unwrap();
         assert!(desc.is_some(), "strip must report removal");
         let after = fs::read_to_string(&agents_md).unwrap();
         assert!(after.contains("# Project notes"));
@@ -5127,9 +5225,15 @@ mod tests {
 
         let agents_md_path = pidev_agents_md_path(&agent_dir);
         let first = fs::read_to_string(&agents_md_path).unwrap();
-        assert!(first.contains("# My Pi project notes"), "user content preserved");
+        assert!(
+            first.contains("# My Pi project notes"),
+            "user content preserved"
+        );
         assert!(first.contains("User text."), "user content preserved");
-        assert!(first.contains("# ContextCrawler (Pi)"), "block has Pi title");
+        assert!(
+            first.contains("# ContextCrawler (Pi)"),
+            "block has Pi title"
+        );
         assert_eq!(
             first.matches(CTXCRL_BLOCK_START).count(),
             1,
@@ -5202,8 +5306,9 @@ mod tests {
         let block = agent_guidance_block(AGENT_OPENCODE).expect("opencode block");
         fs::write(&agents_md, &block).unwrap();
 
-        let desc = strip_ctxcrl_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
-            .unwrap();
+        let desc =
+            strip_ctxcrl_block_from_file(&agents_md, "OpenCode guidance", InitContext::default())
+                .unwrap();
         assert!(desc.is_some());
         assert!(
             !agents_md.exists(),
@@ -5217,8 +5322,8 @@ mod tests {
         let agents_md = temp.path().join("AGENTS.md");
         fs::write(&agents_md, "# Just user content\n").unwrap();
 
-        let desc = strip_ctxcrl_block_from_file(&agents_md, "guidance", InitContext::default())
-            .unwrap();
+        let desc =
+            strip_ctxcrl_block_from_file(&agents_md, "guidance", InitContext::default()).unwrap();
         assert!(desc.is_none(), "no block present — strip is a no-op");
         assert_eq!(
             fs::read_to_string(&agents_md).unwrap(),
@@ -5231,8 +5336,8 @@ mod tests {
     fn test_strip_ctxcrl_block_missing_file_is_noop() {
         let temp = TempDir::new().unwrap();
         let missing = temp.path().join("AGENTS.md");
-        let desc = strip_ctxcrl_block_from_file(&missing, "guidance", InitContext::default())
-            .unwrap();
+        let desc =
+            strip_ctxcrl_block_from_file(&missing, "guidance", InitContext::default()).unwrap();
         assert!(desc.is_none());
         assert!(!missing.exists());
     }
@@ -5245,7 +5350,10 @@ mod tests {
         write_cursor_guidance(temp.path(), InitContext::default()).unwrap();
 
         let mdc = temp.path().join(".cursor/rules/contextcrawler.mdc");
-        assert!(mdc.exists(), "Cursor .mdc must be written under project root");
+        assert!(
+            mdc.exists(),
+            "Cursor .mdc must be written under project root"
+        );
         let content = fs::read_to_string(&mdc).unwrap();
         assert!(content.starts_with("---\n"), "must have YAML frontmatter");
         assert!(content.contains("alwaysApply: true"));
@@ -5356,8 +5464,14 @@ mod tests {
         assert_eq!(action, CtxcrlBlockUpsert::Updated);
         // Legacy block gone — both the body and the legacy markers.
         assert!(!content.contains("OLD RTK CONTENT"));
-        assert!(!content.contains(LEGACY_BLOCK_START), "legacy start marker left behind");
-        assert!(!content.contains(LEGACY_BLOCK_END), "legacy end marker left behind");
+        assert!(
+            !content.contains(LEGACY_BLOCK_START),
+            "legacy start marker left behind"
+        );
+        assert!(
+            !content.contains(LEGACY_BLOCK_END),
+            "legacy end marker left behind"
+        );
         // Exactly ONE canonical block now present.
         assert_eq!(
             content.matches(CTXCRL_BLOCK_START).count(),
@@ -5380,12 +5494,18 @@ mod tests {
         );
         fs::write(&agents_md, &body).unwrap();
 
-        let desc = strip_ctxcrl_block_from_file(&agents_md, "guidance", InitContext::default())
-            .unwrap();
-        assert!(desc.is_some(), "strip should report removal of a legacy block");
+        let desc =
+            strip_ctxcrl_block_from_file(&agents_md, "guidance", InitContext::default()).unwrap();
+        assert!(
+            desc.is_some(),
+            "strip should report removal of a legacy block"
+        );
 
         let after = fs::read_to_string(&agents_md).unwrap();
-        assert!(!after.contains(LEGACY_BLOCK_START), "legacy block not stripped");
+        assert!(
+            !after.contains(LEGACY_BLOCK_START),
+            "legacy block not stripped"
+        );
         assert!(!after.contains("LEGACY BODY"));
         assert!(after.contains("# Notes"));
         assert!(after.contains("keep me"));
@@ -5409,8 +5529,10 @@ mod tests {
         let agents_md = temp.path().join("AGENTS.md");
 
         fs::write(&agents_md, "# Team rules\n").unwrap();
-        let first_added = patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
-        let second_added = patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
+        let first_added =
+            patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
+        let second_added =
+            patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
 
         assert!(first_added);
         assert!(!second_added);
@@ -5581,11 +5703,23 @@ mod tests {
         // Guidance must be upserted as a MARKED BLOCK into AGENTS.md
         // (Hermes auto-loads AGENTS.md, not a standalone CONTEXTCRAWLER.md).
         let agents_md = temp.path().join("AGENTS.md");
-        assert!(agents_md.exists(), "Hermes guidance AGENTS.md should be created");
+        assert!(
+            agents_md.exists(),
+            "Hermes guidance AGENTS.md should be created"
+        );
         let agents = fs::read_to_string(&agents_md).unwrap();
-        assert!(agents.contains(CTXCRL_BLOCK_START), "AGENTS.md must hold the CTXCRL block start marker");
-        assert!(agents.contains(CTXCRL_BLOCK_END), "AGENTS.md must hold the CTXCRL block end marker");
-        assert!(agents.contains("# ContextCrawler (Hermes)"), "AGENTS.md must hold Hermes guidance");
+        assert!(
+            agents.contains(CTXCRL_BLOCK_START),
+            "AGENTS.md must hold the CTXCRL block start marker"
+        );
+        assert!(
+            agents.contains(CTXCRL_BLOCK_END),
+            "AGENTS.md must hold the CTXCRL block end marker"
+        );
+        assert!(
+            agents.contains("# ContextCrawler (Hermes)"),
+            "AGENTS.md must hold Hermes guidance"
+        );
         // No standalone CONTEXTCRAWLER.md should be written.
         assert!(
             !temp.path().join(CTXCRL_MD).exists(),
@@ -5605,8 +5739,14 @@ mod tests {
         let second = fs::read_to_string(&agents_md).unwrap();
 
         assert_eq!(first, second, "Hermes AGENTS.md upsert must be idempotent");
-        assert!(first.contains("# Team rules"), "user content must be preserved");
-        assert!(first.contains("Do the thing."), "user content must be preserved");
+        assert!(
+            first.contains("# Team rules"),
+            "user content must be preserved"
+        );
+        assert!(
+            first.contains("Do the thing."),
+            "user content must be preserved"
+        );
         assert!(first.contains("# ContextCrawler (Hermes)"));
         assert_eq!(
             first.matches(CTXCRL_BLOCK_START).count(),
@@ -5623,7 +5763,9 @@ mod tests {
         fs::write(&agents_md, "# Team rules\n\nKeep me.\n").unwrap();
 
         run_hermes_mode_at(hermes_home, InitContext::default()).unwrap();
-        assert!(fs::read_to_string(&agents_md).unwrap().contains("# ContextCrawler (Hermes)"));
+        assert!(fs::read_to_string(&agents_md)
+            .unwrap()
+            .contains("# ContextCrawler (Hermes)"));
 
         let removed = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
         assert!(
@@ -5633,10 +5775,22 @@ mod tests {
 
         // AGENTS.md must survive with user content intact, block gone.
         let after = fs::read_to_string(&agents_md).unwrap();
-        assert!(after.contains("# Team rules"), "user content must survive uninstall");
-        assert!(after.contains("Keep me."), "user content must survive uninstall");
-        assert!(!after.contains(CTXCRL_BLOCK_START), "CTXCRL block must be removed");
-        assert!(!after.contains("# ContextCrawler (Hermes)"), "guidance must be removed");
+        assert!(
+            after.contains("# Team rules"),
+            "user content must survive uninstall"
+        );
+        assert!(
+            after.contains("Keep me."),
+            "user content must survive uninstall"
+        );
+        assert!(
+            !after.contains(CTXCRL_BLOCK_START),
+            "CTXCRL block must be removed"
+        );
+        assert!(
+            !after.contains("# ContextCrawler (Hermes)"),
+            "guidance must be removed"
+        );
     }
 
     #[test]
@@ -6154,13 +6308,11 @@ mod tests {
         // leaving orphan files behind. If you're changing this assertion,
         // you're probably re-introducing the regression — read #19 first.
         assert_eq!(
-            CTXCRL_MD,
-            "CONTEXTCRAWLER.md",
+            CTXCRL_MD, "CONTEXTCRAWLER.md",
             "filename regression: see issue #19"
         );
         assert_eq!(
-            CTXCRL_MD_REF,
-            "@CONTEXTCRAWLER.md",
+            CTXCRL_MD_REF, "@CONTEXTCRAWLER.md",
             "filename regression: see issue #19"
         );
     }
@@ -6204,14 +6356,13 @@ mod tests {
         )
         .unwrap();
 
-        let notes = cleanup_legacy_codex_files(
-            &agents_md,
-            temp.path(),
-            InitContext::default(),
-        )
-        .unwrap();
+        let notes =
+            cleanup_legacy_codex_files(&agents_md, temp.path(), InitContext::default()).unwrap();
 
-        assert!(!legacy_ctxcrl_md.exists(), "legacy RTK.md should be removed");
+        assert!(
+            !legacy_ctxcrl_md.exists(),
+            "legacy RTK.md should be removed"
+        );
         let after = fs::read_to_string(&agents_md).unwrap();
         assert!(
             !after.contains(&format!("@{}", legacy_ctxcrl_md.display())),
@@ -6219,7 +6370,10 @@ mod tests {
             after
         );
         assert!(
-            after.contains(&format!("@{}", temp.path().join("CONTEXTCRAWLER.md").display())),
+            after.contains(&format!(
+                "@{}",
+                temp.path().join("CONTEXTCRAWLER.md").display()
+            )),
             "canonical @CONTEXTCRAWLER.md reference should be preserved"
         );
         assert!(notes.iter().any(|n| n.contains("removed orphan")));
@@ -6232,12 +6386,8 @@ mod tests {
         let agents_md = temp.path().join("AGENTS.md");
         fs::write(&agents_md, "# header\n").unwrap();
 
-        let notes = cleanup_legacy_codex_files(
-            &agents_md,
-            temp.path(),
-            InitContext::default(),
-        )
-        .unwrap();
+        let notes =
+            cleanup_legacy_codex_files(&agents_md, temp.path(), InitContext::default()).unwrap();
 
         assert!(notes.is_empty(), "no-op cleanup should report nothing");
         assert_eq!(fs::read_to_string(&agents_md).unwrap(), "# header\n");
@@ -6251,15 +6401,14 @@ mod tests {
         // absolute path. Both forms must be stripped.
         fs::write(&agents_md, "# header\n\n@RTK.md\n").unwrap();
 
-        let _ = cleanup_legacy_codex_files(
-            &agents_md,
-            temp.path(),
-            InitContext::default(),
-        )
-        .unwrap();
+        let _ =
+            cleanup_legacy_codex_files(&agents_md, temp.path(), InitContext::default()).unwrap();
 
         let after = fs::read_to_string(&agents_md).unwrap();
-        assert!(!after.contains("@RTK.md"), "relative @RTK.md must be stripped");
+        assert!(
+            !after.contains("@RTK.md"),
+            "relative @RTK.md must be stripped"
+        );
     }
 
     #[test]
@@ -6393,8 +6542,7 @@ mod tests {
         assert!(result.is_err(), "escaping CODEX_HOME must be rejected");
 
         // With the explicit opt-in, the escaping path is honoured.
-        let allowed =
-            resolve_codex_dir_from(Some(escapes.clone()), Some(home), true).unwrap();
+        let allowed = resolve_codex_dir_from(Some(escapes.clone()), Some(home), true).unwrap();
         assert_eq!(allowed, escapes);
     }
 
@@ -6405,8 +6553,7 @@ mod tests {
         let hermes_home = OsString::from("/tmp/home/custom hermes home");
 
         let resolved =
-            resolve_hermes_home_from_env(Some(home_dir), Some(hermes_home.clone()), false)
-                .unwrap();
+            resolve_hermes_home_from_env(Some(home_dir), Some(hermes_home.clone()), false).unwrap();
 
         assert_eq!(resolved, PathBuf::from(hermes_home));
     }
@@ -6418,11 +6565,8 @@ mod tests {
         let home_dir = PathBuf::from("/Users/test");
         let escapes = OsString::from("/etc/hermes-fake");
 
-        let rejected = resolve_hermes_home_from_env(
-            Some(home_dir.clone()),
-            Some(escapes.clone()),
-            false,
-        );
+        let rejected =
+            resolve_hermes_home_from_env(Some(home_dir.clone()), Some(escapes.clone()), false);
         assert!(rejected.is_err(), "escaping HERMES_HOME must be rejected");
 
         let allowed =
@@ -6452,7 +6596,10 @@ mod tests {
         assert!(result.is_err(), "malformed settings.json must error");
         // Critically — the original (malformed) file must be untouched.
         let after = fs::read_to_string(&settings_path).unwrap();
-        assert_eq!(after, original, "user's settings.json must NOT be clobbered");
+        assert_eq!(
+            after, original,
+            "user's settings.json must NOT be clobbered"
+        );
     }
 
     #[test]
@@ -6614,7 +6761,9 @@ mod tests {
         assert!(!content.contains("OLD CTXCRL STUFF"));
         assert!(content.contains("# Team rules"));
         assert!(content.contains("More content"));
-        assert!(removed.iter().any(|r| r.contains("ctxcrl-instructions block")));
+        assert!(removed
+            .iter()
+            .any(|r| r.contains("ctxcrl-instructions block")));
     }
 
     #[test]
@@ -6661,12 +6810,16 @@ mod tests {
 
         // 3. The removed list reports both mutations + the file.
         assert!(
-            removed.iter().any(|r| r.contains("ctxcrl-instructions block")),
+            removed
+                .iter()
+                .any(|r| r.contains("ctxcrl-instructions block")),
             "missing block-removal entry: {:?}",
             removed
         );
         assert!(
-            removed.iter().any(|r| r.contains("@CONTEXTCRAWLER.md reference")),
+            removed
+                .iter()
+                .any(|r| r.contains("@CONTEXTCRAWLER.md reference")),
             "missing @-ref removal entry: {:?}",
             removed
         );
@@ -7051,7 +7204,9 @@ mod tests {
         assert!(!command_is_legacy_rewrite_hook(
             "my-tool --note rtk-rewrite.sh-backup"
         ));
-        assert!(!command_is_legacy_rewrite_hook("contextcrawler hook claude"));
+        assert!(!command_is_legacy_rewrite_hook(
+            "contextcrawler hook claude"
+        ));
     }
 
     #[test]
@@ -7367,12 +7522,14 @@ mod tests {
         fs::create_dir_all(&claude_dir).unwrap();
 
         let orig = std::env::var_os("RTK_CLAUDE_DIR");
+        let orig_data_home = std::env::var_os("XDG_DATA_HOME");
         // Tests point RTK_CLAUDE_DIR at a tempdir outside $HOME; opt in to
         // the non-home root so `validate_env_root` (#100 G2 IMPORTANT 5)
         // doesn't reject it.
         let orig_allow = std::env::var_os(ALLOW_NONHOME_ROOT_ENV);
         std::env::set_var(ALLOW_NONHOME_ROOT_ENV, "1");
         std::env::set_var("RTK_CLAUDE_DIR", &claude_dir);
+        std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
         f(&claude_dir);
         match orig {
             Some(v) => std::env::set_var("RTK_CLAUDE_DIR", v),
@@ -7382,6 +7539,10 @@ mod tests {
             Some(v) => std::env::set_var(ALLOW_NONHOME_ROOT_ENV, v),
             None => std::env::remove_var(ALLOW_NONHOME_ROOT_ENV),
         }
+        match orig_data_home {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
     }
 
     #[test]
@@ -7390,7 +7551,10 @@ mod tests {
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
-            assert!(claude_dir.join(CTXCRL_MD).exists(), "CONTEXTCRAWLER.md must be created");
+            assert!(
+                claude_dir.join(CTXCRL_MD).exists(),
+                "CONTEXTCRAWLER.md must be created"
+            );
             assert!(
                 claude_dir.join(CLAUDE_MD).exists(),
                 "CLAUDE.md must be created"
@@ -7403,6 +7567,11 @@ mod tests {
                 content.contains(CLAUDE_HOOK_COMMAND),
                 "settings.json must contain hook command"
             );
+            assert_eq!(
+                integrity::verify_binary_hook_at(&settings),
+                integrity::BinaryHookStatus::Registered,
+                "init must persist an independently verifiable registration identity"
+            );
         });
     }
 
@@ -7413,13 +7582,50 @@ mod tests {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             uninstall(true, false, false, false, InitContext::default()).unwrap();
 
-            assert!(!claude_dir.join(CTXCRL_MD).exists(), "CONTEXTCRAWLER.md must be removed");
+            assert!(
+                !claude_dir.join(CTXCRL_MD).exists(),
+                "CONTEXTCRAWLER.md must be removed"
+            );
             let settings_content =
                 fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap_or_default();
             assert!(
                 !settings_content.contains(CLAUDE_HOOK_COMMAND),
                 "hook entry must be removed from settings.json"
             );
+            assert_eq!(
+                integrity::verify_binary_hook_at(&claude_dir.join(SETTINGS_JSON)),
+                integrity::BinaryHookStatus::NotRegistered,
+                "uninstall must remove the persisted registration identity"
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_global_uninstall_completes_when_identity_removal_fails() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(claude_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
+
+            let identity = tmp
+                .path()
+                .join("data")
+                .join(crate::core::constants::RTK_DATA_DIR)
+                .join("claude-hook-registration.sha256");
+            let victim = tmp.path().join("identity-victim");
+            fs::write(&victim, "keep").unwrap();
+            fs::remove_file(&identity).unwrap();
+            std::os::unix::fs::symlink(&victim, &identity).unwrap();
+
+            uninstall(true, false, false, false, InitContext::default())
+                .expect("identity teardown errors must not abort uninstall");
+
+            assert!(!claude_dir.join(CTXCRL_MD).exists());
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap_or_default();
+            assert!(!settings.contains(CLAUDE_HOOK_COMMAND));
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
         });
     }
 
@@ -7449,7 +7655,10 @@ mod tests {
 
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
-            assert!(claude_dir.join(CTXCRL_MD).exists(), "CONTEXTCRAWLER.md must be created");
+            assert!(
+                claude_dir.join(CTXCRL_MD).exists(),
+                "CONTEXTCRAWLER.md must be created"
+            );
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
             assert!(
                 settings.contains(CLAUDE_HOOK_COMMAND),
@@ -7598,7 +7807,10 @@ mod tests {
 
     #[test]
     fn test_uninstall_handles_both_artifacts() {
-        let content = format!("# Config\n\n@CONTEXTCRAWLER.md\n\n{}\n\nMore stuff", CTXCRL_INSTRUCTIONS);
+        let content = format!(
+            "# Config\n\n@CONTEXTCRAWLER.md\n\n{}\n\nMore stuff",
+            CTXCRL_INSTRUCTIONS
+        );
 
         let after_at_removal: String = content
             .lines()
@@ -7619,7 +7831,10 @@ mod tests {
     #[test]
     fn test_uninstall_integration_claude_md_only() {
         let (cleaned, did_remove) = remove_ctxcrl_block(CTXCRL_INSTRUCTIONS);
-        assert!(did_remove, "remove_ctxcrl_block must succeed for valid block");
+        assert!(
+            did_remove,
+            "remove_ctxcrl_block must succeed for valid block"
+        );
         assert!(
             cleaned.trim().is_empty(),
             "CLAUDE.md with only CTXCRL content should be empty after removal"
@@ -7713,7 +7928,10 @@ mod tests {
             count_start, 1,
             "CTXCRL_BLOCK_START must appear once, got {count_start}"
         );
-        assert_eq!(count_end, 1, "CTXCRL_BLOCK_END must appear once, got {count_end}");
+        assert_eq!(
+            count_end, 1,
+            "CTXCRL_BLOCK_END must appear once, got {count_end}"
+        );
     }
 
     #[test]
@@ -7792,7 +8010,10 @@ mod tests {
         fs::create_dir_all(&github_dir).unwrap();
 
         let instructions_path = github_dir.join("copilot-instructions.md");
-        let malformed = format!("# My rules\n\n{}\nincomplete CTXCRL block\n", CTXCRL_BLOCK_START);
+        let malformed = format!(
+            "# My rules\n\n{}\nincomplete CTXCRL block\n",
+            CTXCRL_BLOCK_START
+        );
         fs::write(&instructions_path, &malformed).unwrap();
 
         let result = run_copilot_at(temp.path(), InitContext::default());
@@ -7815,7 +8036,10 @@ mod tests {
         fs::create_dir_all(&github_dir).unwrap();
 
         let instructions_path = github_dir.join("copilot-instructions.md");
-        let malformed = format!("# My rules\n\n{}\nincomplete CTXCRL block\n", CTXCRL_BLOCK_START);
+        let malformed = format!(
+            "# My rules\n\n{}\nincomplete CTXCRL block\n",
+            CTXCRL_BLOCK_START
+        );
         fs::write(&instructions_path, &malformed).unwrap();
 
         let hook_path = github_dir.join("hooks").join("rtk-rewrite.json");
