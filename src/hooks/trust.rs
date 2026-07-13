@@ -11,12 +11,14 @@
 //! - Content changes invalidate trust (re-review required)
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
-use super::integrity;
 use crate::core::constants::{RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,26 +53,499 @@ fn store_path() -> Result<PathBuf> {
     Ok(data_dir.join(RTK_DATA_DIR).join(TRUSTED_FILTERS_JSON))
 }
 
-fn read_store() -> Result<TrustStore> {
-    let path = store_path()?;
-    if !path.exists() {
+fn path_present_nofollow(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("Failed to inspect {}", path.display())),
+    }
+}
+
+fn metadata_error(
+    path: &Path,
+    metadata: &fs::Metadata,
+    require_private: bool,
+    allow_root: bool,
+) -> Option<String> {
+    #[cfg(not(unix))]
+    let _ = (require_private, allow_root);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let forbidden = if require_private { 0o077 } else { 0o022 };
+        if metadata.mode() & forbidden != 0 {
+            return Some(format!(
+                "{} has unsafe mode {:o}",
+                path.display(),
+                metadata.mode() & 0o777
+            ));
+        }
+        let our_uid = unsafe { libc::geteuid() };
+        let owner = metadata.uid();
+        if owner != our_uid && !(allow_root && owner == 0) {
+            return Some(format!(
+                "{} is owned by uid {} (expected {}{})",
+                path.display(),
+                owner,
+                our_uid,
+                if allow_root { " or root" } else { "" }
+            ));
+        }
+    }
+
+    None
+}
+
+struct ValidatedDirectory {
+    requested_path: PathBuf,
+    canonical_path: PathBuf,
+    #[cfg(unix)]
+    file: File,
+    #[cfg(not(unix))]
+    metadata: fs::Metadata,
+}
+
+impl ValidatedDirectory {
+    fn revalidate(&self) -> Result<()> {
+        let resolved = fs::canonicalize(&self.requested_path).with_context(|| {
+            format!(
+                "Failed to re-resolve directory {}",
+                self.requested_path.display()
+            )
+        })?;
+        if resolved != self.canonical_path {
+            anyhow::bail!(
+                "Directory {} changed while it was being validated",
+                self.requested_path.display()
+            );
+        }
+        let current = fs::symlink_metadata(&self.canonical_path).with_context(|| {
+            format!(
+                "Failed to revalidate directory {}",
+                self.canonical_path.display()
+            )
+        })?;
+        if current.file_type().is_symlink() || !current.is_dir() {
+            anyhow::bail!("{} is not a real directory", self.canonical_path.display());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let opened = self.file.metadata().with_context(|| {
+                format!(
+                    "Failed to stat open directory {}",
+                    self.canonical_path.display()
+                )
+            })?;
+            if opened.dev() != current.dev() || opened.ino() != current.ino() {
+                anyhow::bail!(
+                    "Directory {} was replaced while it was being validated",
+                    self.canonical_path.display()
+                );
+            }
+        }
+
+        #[cfg(not(unix))]
+        if !self.metadata.is_dir() {
+            anyhow::bail!("{} is not a directory", self.canonical_path.display());
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.file.as_raw_fd()
+    }
+}
+
+fn open_validated_directory(
+    path: &Path,
+    require_private: bool,
+    allow_root: bool,
+) -> Result<ValidatedDirectory> {
+    let canonical_path = fs::canonicalize(path)
+        .with_context(|| format!("Failed to resolve directory {}", path.display()))?;
+
+    #[cfg(unix)]
+    let directory = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let file = options.open(&canonical_path).with_context(|| {
+            format!(
+                "Failed to open directory {} without following symlinks",
+                canonical_path.display()
+            )
+        })?;
+        let metadata = file.metadata().with_context(|| {
+            format!("Failed to stat open directory {}", canonical_path.display())
+        })?;
+        if !metadata.is_dir() {
+            anyhow::bail!("{} is not a directory", canonical_path.display());
+        }
+        if let Some(error) = metadata_error(&canonical_path, &metadata, require_private, allow_root)
+        {
+            anyhow::bail!(error);
+        }
+        ValidatedDirectory {
+            requested_path: path.to_path_buf(),
+            canonical_path,
+            file,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let directory = {
+        let metadata = fs::symlink_metadata(&canonical_path)
+            .with_context(|| format!("Failed to inspect directory {}", canonical_path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!("{} is not a real directory", canonical_path.display());
+        }
+        if let Some(error) = metadata_error(&canonical_path, &metadata, require_private, allow_root)
+        {
+            anyhow::bail!(error);
+        }
+        ValidatedDirectory {
+            requested_path: path.to_path_buf(),
+            canonical_path,
+            metadata,
+        }
+    };
+
+    directory.revalidate()?;
+    Ok(directory)
+}
+
+fn try_open_regular_at_nofollow(
+    directory: &ValidatedDirectory,
+    file_name: &std::ffi::OsStr,
+    label: &Path,
+) -> Result<Option<File>> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = CString::new(file_name.as_bytes())
+            .with_context(|| format!("{} contains an invalid NUL byte", label.display()))?;
+        let fd = unsafe {
+            // SAFETY: the directory descriptor and single-component C string
+            // remain valid for the call; a successful fd is transferred to File.
+            libc::openat(
+                directory.raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| {
+                format!("Cannot open {} without following symlinks", label.display())
+            });
+        }
+        let file = unsafe {
+            // SAFETY: `openat` returned a new owned descriptor above.
+            File::from_raw_fd(fd)
+        };
+        if !file
+            .metadata()
+            .with_context(|| format!("Cannot stat open file {}", label.display()))?
+            .is_file()
+        {
+            anyhow::bail!("{} is not a regular file", label.display());
+        }
+        Ok(Some(file))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let path = directory.canonical_path.join(file_name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    anyhow::bail!("{} is not a real regular file", label.display());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("Cannot inspect {}", label.display()));
+            }
+        }
+        Ok(Some(
+            OpenOptions::new()
+                .read(true)
+                .open(path)
+                .with_context(|| format!("Cannot open {}", label.display()))?,
+        ))
+    }
+}
+
+// `libc::dev_t`/`ino_t` widths vary across Unix targets; the checked u64
+// conversion is a no-op on Linux but is required for portable comparisons.
+#[allow(clippy::useless_conversion)]
+fn directory_entry_matches_file(
+    directory: &ValidatedDirectory,
+    file_name: &std::ffi::OsStr,
+    file: &File,
+    label: &Path,
+) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::mem::MaybeUninit;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+
+        let name = CString::new(file_name.as_bytes())
+            .with_context(|| format!("{} contains an invalid NUL byte", label.display()))?;
+        let mut entry = MaybeUninit::<libc::stat>::uninit();
+        let result = unsafe {
+            // SAFETY: `entry` is writable stat storage and all call arguments
+            // remain valid for the duration of `fstatat`.
+            libc::fstatat(
+                directory.raw_fd(),
+                name.as_ptr(),
+                entry.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("Cannot revalidate {}", label.display()));
+        }
+        let entry = unsafe {
+            // SAFETY: successful `fstatat` initialized `entry` above.
+            entry.assume_init()
+        };
+        let opened = file
+            .metadata()
+            .with_context(|| format!("Cannot stat open file {}", label.display()))?;
+        Ok((entry.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && u64::try_from(entry.st_dev).ok() == Some(opened.dev())
+            && u64::try_from(entry.st_ino).ok() == Some(opened.ino()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let metadata = fs::symlink_metadata(directory.canonical_path.join(file_name))
+            .with_context(|| format!("Cannot revalidate {}", label.display()))?;
+        let _ = file;
+        Ok(!metadata.file_type().is_symlink() && metadata.is_file())
+    }
+}
+
+fn validate_real_directory(path: &Path, require_private: bool, allow_root: bool) -> Result<()> {
+    open_validated_directory(path, require_private, allow_root)?;
+    Ok(())
+}
+
+fn ensure_private_store_directory(path: &Path) -> Result<()> {
+    if !path_present_nofollow(path)? {
+        // Directory creation cannot be made descriptor-relative with std.
+        // Resolve and validate immediately afterwards; detectable replacement
+        // fails closed, and exploiting the residual requires ancestor writes.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder
+                .create(path)
+                .with_context(|| format!("Failed to create directory {}", path.display()))?;
+        }
+        #[cfg(not(unix))]
+        fs::create_dir_all(path)
+            .with_context(|| format!("Failed to create directory {}", path.display()))?;
+    }
+
+    let directory = open_validated_directory(path, false, true)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = directory
+            .file
+            .metadata()
+            .with_context(|| format!("Failed to stat open directory {}", path.display()))?;
+        let our_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != our_uid {
+            anyhow::bail!(
+                "{} is owned by uid {} (expected {})",
+                path.display(),
+                metadata.uid(),
+                our_uid
+            );
+        }
+        fs::set_permissions(&directory.canonical_path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to make {} private", path.display()))?;
+    }
+    validate_real_directory(path, true, false)
+}
+
+fn open_regular_nofollow(path: &Path) -> Result<File> {
+    #[cfg(not(unix))]
+    {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("Failed to inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("{} is a symlink", path.display());
+        }
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("cannot open {} without following symlinks", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("cannot stat open file {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    Ok(file)
+}
+
+fn atomic_write_private(
+    directory: &ValidatedDirectory,
+    file_name: &std::ffi::OsStr,
+    label: &Path,
+    content: &[u8],
+) -> Result<()> {
+    directory.revalidate()?;
+    let mut temporary = NamedTempFile::new_in(&directory.canonical_path).with_context(|| {
+        format!(
+            "Failed to create temporary file in {}",
+            directory.canonical_path.display()
+        )
+    })?;
+    temporary.write_all(content).with_context(|| {
+        format!(
+            "Failed to write temporary trust store for {}",
+            label.display()
+        )
+    })?;
+    temporary.flush().with_context(|| {
+        format!(
+            "Failed to flush temporary trust store for {}",
+            label.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", label.display()))?;
+    }
+    temporary.as_file().sync_all().with_context(|| {
+        format!(
+            "Failed to sync temporary trust store for {}",
+            label.display()
+        )
+    })?;
+    // `NamedTempFile::persist` is path-based because tempfile exposes no
+    // portable renameat API. We persist through the already-canonical parent,
+    // then revalidate both the directory descriptor and resulting entry. A
+    // concurrent ambiguity fails closed; exploiting the residual rename
+    // interval requires write access to the private store directory.
+    let target = directory.canonical_path.join(file_name);
+    let file = temporary
+        .persist(&target)
+        .map_err(|error| error.error)
+        .with_context(|| format!("Failed to atomically replace {}", label.display()))?;
+    directory.revalidate()?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("Failed to validate {}", label.display()))?;
+    if let Some(error) = metadata_error(label, &metadata, true, false) {
+        anyhow::bail!(error);
+    }
+    if !directory_entry_matches_file(directory, file_name, &file, label)? {
+        anyhow::bail!("{} changed during atomic replacement", label.display());
+    }
+    Ok(())
+}
+
+fn read_store_at(path: &Path) -> Result<TrustStore> {
+    if !path_present_nofollow(path)? {
         return Ok(TrustStore::default());
     }
-    let content = std::fs::read_to_string(&path)
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let directory = open_validated_directory(parent, true, false)?;
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    let Some(file) = try_open_regular_at_nofollow(&directory, file_name, path)? else {
+        // A concurrent deletion removes trust rather than granting it.
+        return Ok(TrustStore::default());
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("Failed to inspect open trust store {}", path.display()))?;
+    if let Some(error) = metadata_error(path, &metadata, true, false) {
+        anyhow::bail!(error);
+    }
+    let mut content = String::new();
+    let mut file = file;
+    file.read_to_string(&mut content)
         .with_context(|| format!("Failed to read trust store: {}", path.display()))?;
+    directory.revalidate()?;
+    if !directory_entry_matches_file(&directory, file_name, &file, path)? {
+        anyhow::bail!("Trust store {} changed while being read", path.display());
+    }
     serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse trust store: {}", path.display()))
 }
 
-fn write_store(store: &TrustStore) -> Result<()> {
-    let path = store_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+fn read_store() -> Result<TrustStore> {
+    read_store_at(&store_path()?)
+}
+
+fn write_store_at(path: &Path, store: &TrustStore) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    ensure_private_store_directory(parent)?;
+    let directory = open_validated_directory(parent, true, false)?;
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?;
+    if let Some(file) = try_open_regular_at_nofollow(&directory, file_name, path)? {
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("Failed to inspect trust store {}", path.display()))?;
+        if let Some(error) = metadata_error(path, &metadata, false, false) {
+            anyhow::bail!(error);
+        }
+        if !directory_entry_matches_file(&directory, file_name, &file, path)? {
+            anyhow::bail!("Trust store {} changed during validation", path.display());
+        }
     }
-    let content = serde_json::to_string_pretty(store).context("Failed to serialize trust store")?;
-    std::fs::write(&path, content)
-        .with_context(|| format!("Failed to write trust store: {}", path.display()))
+    let content = serde_json::to_vec_pretty(store).context("Failed to serialize trust store")?;
+    atomic_write_private(&directory, file_name, path, &content)
+}
+
+fn write_store(store: &TrustStore) -> Result<()> {
+    write_store_at(&store_path()?, store)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,44 +631,18 @@ pub fn check_trust_bytes(filter_path: &Path, bytes: &[u8]) -> Result<TrustStatus
     }
 }
 
-/// Check if a filter file is trusted by path (two-open form).
+/// Check if a filter file is trusted by path.
 ///
-/// **Prefer `check_trust_bytes` for new load paths** — this form has a
-/// TOCTOU window between the hash and any subsequent parse. Retained
-/// for callers that don't need to parse the file (e.g. `contextcrawler verify`).
+/// The file is opened once with no-follow semantics, fstat'd, and hashed from
+/// that descriptor. Callers that also parse should still use
+/// `check_trust_bytes` with their already-read buffer.
 pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
     if let Some(s) = env_override_status() {
         return Ok(s);
     }
-
-    let key = canonical_key(filter_path)?;
-    let store = match read_store() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "[contextcrawler] WARNING: trust store unreadable ({}), treating all filters as untrusted",
-                e
-            );
-            TrustStore::default()
-        }
-    };
-
-    let entry = match store.trusted.get(&key) {
-        Some(e) => e,
-        None => return Ok(TrustStatus::Untrusted),
-    };
-
-    let actual_hash = integrity::compute_hash(filter_path)
-        .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
-
-    if actual_hash == entry.sha256 {
-        Ok(TrustStatus::Trusted)
-    } else {
-        Ok(TrustStatus::ContentChanged {
-            expected: entry.sha256.clone(),
-            actual: actual_hash,
-        })
-    }
+    let bytes = read_file_nofollow(filter_path)
+        .with_context(|| format!("Failed to read {}", filter_path.display()))?;
+    check_trust_bytes(filter_path, &bytes)
 }
 
 /// Store a pre-computed SHA-256 hash as trusted (avoids TOCTOU re-read).
@@ -257,34 +706,9 @@ fn global_filter_path() -> Option<std::path::PathBuf> {
 /// atomic no-reparse open (`FILE_FLAG_OPEN_REPARSE_POINT`) is a documented
 /// follow-up rather than a blocker for the unix-atomic fix.
 fn read_file_nofollow(path: &Path) -> Result<Vec<u8>> {
-    use std::io::Read;
-    if std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        anyhow::bail!(
-            "refusing to read {} — it is a symlink (possible secret exfiltration)",
-            path.display()
-        );
-    }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut f = opts
-        .open(path)
-        .with_context(|| format!("cannot open {} (symlink or unreadable)", path.display()))?;
-    let meta = f
-        .metadata()
-        .with_context(|| format!("cannot stat {}", path.display()))?;
-    if !meta.is_file() {
-        anyhow::bail!("{} is not a regular file", path.display());
-    }
+    let mut file = open_regular_nofollow(path)?;
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf)
+    file.read_to_end(&mut buf)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     Ok(buf)
 }
@@ -434,7 +858,20 @@ fn print_risk_summary(content: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::integrity;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static TRUST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn private_dir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
 
     #[test]
     fn read_file_nofollow_rejects_symlink_and_reads_regular() {
@@ -454,6 +891,93 @@ mod tests {
             let err = read_file_nofollow(&link).unwrap_err().to_string();
             assert!(err.contains("symlink"), "must refuse symlink: {err}");
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_store_at_rejects_symlink_without_touching_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        private_dir(temp.path());
+        let dir = temp.path().join("ctxcrl");
+        private_dir(&dir);
+        let victim = temp.path().join("victim.json");
+        std::fs::write(&victim, "keep").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store_file = dir.join("trusted_filters.json");
+        std::os::unix::fs::symlink(&victim, &store_file).unwrap();
+
+        assert!(write_store_at(&store_file, &TrustStore::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_store_at_uses_private_modes_and_atomic_regular_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        private_dir(temp.path());
+        let store_file = temp.path().join("ctxcrl").join("trusted_filters.json");
+        write_store_at(&store_file, &TrustStore::default()).unwrap();
+
+        let dir_mode = std::fs::metadata(store_file.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = std::fs::metadata(&store_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        assert!(std::fs::symlink_metadata(&store_file)
+            .unwrap()
+            .file_type()
+            .is_file());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_store_at_accepts_symlinked_private_directory_with_safe_target() {
+        let temp = TempDir::new().unwrap();
+        private_dir(temp.path());
+        let real = temp.path().join("real");
+        private_dir(&real);
+        let linked = temp.path().join("ctxcrl");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+        let store = linked.join("trusted_filters.json");
+        write_store_at(&store, &TrustStore::default()).unwrap();
+        assert!(real.join("trusted_filters.json").is_file());
+        assert!(read_store_at(&store).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn read_store_at_rejects_symlink() {
+        let temp = TempDir::new().unwrap();
+        private_dir(temp.path());
+        let dir = temp.path().join("ctxcrl");
+        private_dir(&dir);
+        let victim = temp.path().join("victim.json");
+        std::fs::write(&victim, r#"{"version":1,"trusted":{}}"#).unwrap();
+        let store_file = dir.join("trusted_filters.json");
+        std::os::unix::fs::symlink(&victim, &store_file).unwrap();
+
+        assert!(read_store_at(&store_file).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn check_trust_rejects_symlinked_filter() {
+        let _guard = TRUST_ENV_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("filters-real.toml");
+        let link = temp.path().join("filters.toml");
+        std::fs::write(&target, "[filters.test]").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(check_trust(&link).is_err());
     }
 
     /// Helper: create a temporary trust store in a temp dir.
@@ -606,6 +1130,7 @@ mod tests {
 
     #[test]
     fn test_env_override_with_ci() {
+        let _guard = TRUST_ENV_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
         std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
