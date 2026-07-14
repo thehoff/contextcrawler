@@ -3639,7 +3639,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("debug")
-            .join("ctxcrl");
+            .join("contextcrawler");
         assert!(
             bin_path.exists(),
             "Debug binary not found at {:?} — run `cargo build` first",

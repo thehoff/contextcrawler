@@ -986,7 +986,15 @@ mod sigpipe_regression {
 
         // Seed a temp DB so gain produces real stdout output (not "No tracking
         // data yet."). This guarantees the write-to-broken-pipe is exercised.
-        let db_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        // The DB must live UNDER $HOME: the tracking DB path is confined to
+        // $HOME (#111), so a /tmp path is refused before any output is written
+        // (which is what made this test spuriously see exit 1 instead of the
+        // broken-pipe outcome).
+        let home = dirs::home_dir().expect("resolve home dir");
+        let db_dir = tempfile::Builder::new()
+            .prefix(".ctxcrl-sigpipe-test-")
+            .tempdir_in(&home)
+            .expect("Failed to create temp dir under $HOME");
         let db_path = db_dir.path().join("tracking.db");
         {
             let conn = rusqlite::Connection::open(&db_path).expect("Failed to open temp DB");

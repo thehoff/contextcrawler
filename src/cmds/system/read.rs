@@ -753,7 +753,7 @@ fn main() {{
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("debug")
-            .join("ctxcrl")
+            .join("contextcrawler")
     }
 
     #[test]

@@ -51,8 +51,12 @@ fn cargo_bin_absolute_hook_registration_is_accepted() {
     .expect("write settings fixture");
     set_mode(&settings, 0o600);
 
-    let surface =
-        serde_json::to_vec(&root["hooks"]["PreToolUse"]).expect("serialize registration surface");
+    // The registration identity hashes only the OWNED (matcher, command)
+    // tuples for `type == "command"` hooks, sorted and serialised as JSON
+    // (#234 round-2) — not the whole PreToolUse surface. Mirror that here.
+    let command = format!("{} hook claude", installed.display());
+    let bindings: Vec<(&str, &str)> = vec![("Bash", command.as_str())];
+    let surface = serde_json::to_vec(&bindings).expect("serialize registration identity material");
     let hash = format!("{:x}", Sha256::digest(surface));
     let identity_dir = temp.path().join("data").join("ctxcrl");
     fs::create_dir_all(&identity_dir).expect("create identity directory");

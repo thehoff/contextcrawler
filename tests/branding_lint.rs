@@ -451,6 +451,10 @@ lazy_static! {
         Regex::new(r#"\brtk_(?:cmd|equivalent)\s*:\s*"rtk[ "]"#).unwrap(),
         // comparison: `== "rtk ..."` / `!= "rtk ..."`
         Regex::new(r#"[!=]=\s*"rtk[ "]"#).unwrap(),
+        // match-arm binary-name alternation: `Some("contextcrawler" | "rtk")`
+        // — the legacy binary name accepted alongside the canonical one in the
+        // install-path / hook-command validation logic.
+        Regex::new(r#"\|\s*"rtk"\s*\)"#).unwrap(),
         // method-call detection: `.starts_with("rtk")` / `.strip_prefix("rtk")` /
         // `.contains("rtk")` / `.ends_with("rtk")` — these all check the
         // command stream for rtk-prefixed commands.
