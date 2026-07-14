@@ -922,6 +922,49 @@ pub fn scrub_logs_in(log_dir: &std::path::Path, dry_run: bool) -> anyhow::Result
         }
     }
 
+    fn open_regular_nofollow(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            anyhow::bail!("{} is not a regular file", path.display());
+        }
+        Ok(file)
+    }
+
+    fn make_private(file: &std::fs::File) -> anyhow::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
+    fn private_backup(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("{} has no parent", destination.display()))?;
+        let mut input = open_regular_nofollow(source)?;
+        let mut backup = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::copy(&mut input, &mut backup)?;
+        backup.flush()?;
+        make_private(backup.as_file())?;
+        backup.as_file().sync_all()?;
+        backup
+            .persist_noclobber(destination)
+            .map_err(|error| error.error)?;
+        Ok(())
+    }
+
     let targets = ["downgrades.jsonl", "supply_chain.jsonl"];
     let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let mut report = ScrubReport::default();
@@ -937,9 +980,8 @@ pub fn scrub_logs_in(log_dir: &std::path::Path, dry_run: bool) -> anyhow::Result
             report.files.push(entry);
             continue;
         }
-        let src = std::fs::File::open(&path)?;
+        let src = open_regular_nofollow(&path)?;
         let reader = BufReader::new(src);
-        let tmp_path = path.with_extension("jsonl.scrub-tmp");
         let mut out_buf: Vec<u8> = Vec::new();
         for line in reader.lines() {
             let line = line?;
@@ -973,14 +1015,14 @@ pub fn scrub_logs_in(log_dir: &std::path::Path, dry_run: bool) -> anyhow::Result
         report.grand_total += entry.total;
         report.grand_changed += entry.changed;
         if !dry_run {
-            {
-                let mut tmp = std::fs::File::create(&tmp_path)?;
-                tmp.write_all(&out_buf)?;
-                tmp.sync_all()?;
-            }
+            let mut replacement = tempfile::NamedTempFile::new_in(log_dir)?;
+            replacement.write_all(&out_buf)?;
+            replacement.flush()?;
+            make_private(replacement.as_file())?;
+            replacement.as_file().sync_all()?;
             let bak = path.with_file_name(format!("{}.bak-{}", name, stamp));
-            std::fs::copy(&path, &bak)?;
-            std::fs::rename(&tmp_path, &path)?;
+            private_backup(&path, &bak)?;
+            replacement.persist(&path).map_err(|error| error.error)?;
             entry.backup_path = Some(bak);
         }
         report.files.push(entry);
@@ -2077,6 +2119,65 @@ mod tests {
         assert_eq!(before, after, "dry-run must not mutate the file");
         assert_eq!(report.grand_changed, 1, "dry-run still reports counts");
         assert!(report.files.iter().all(|f| f.backup_path.is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scrub_logs_in_does_not_follow_precreated_temp_symlink_228() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let supply = dir.path().join("supply_chain.jsonl");
+        std::fs::write(
+            &supply,
+            concat!(
+                r#"{"ts":"x","verdict":"ask","cmd":"TOKEN=secret","findings":[]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"do not truncate").unwrap();
+        let predictable_tmp = supply.with_extension("jsonl.scrub-tmp");
+        symlink(&victim, &predictable_tmp).unwrap();
+
+        scrub_logs_in(dir.path(), false).unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not truncate");
+        assert!(!std::fs::symlink_metadata(&supply)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scrub_logs_in_replacement_and_backup_are_private_228() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let supply = dir.path().join("supply_chain.jsonl");
+        std::fs::write(
+            &supply,
+            concat!(
+                r#"{"ts":"x","verdict":"ask","cmd":"TOKEN=secret","findings":[]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&supply, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let report = scrub_logs_in(dir.path(), false).unwrap();
+        let target_mode = std::fs::metadata(&supply).unwrap().permissions().mode() & 0o777;
+        assert_eq!(target_mode, 0o600);
+        let backup = report
+            .files
+            .iter()
+            .find(|entry| entry.name == "supply_chain.jsonl")
+            .and_then(|entry| entry.backup_path.as_ref())
+            .expect("backup path");
+        let backup_mode = std::fs::metadata(backup).unwrap().permissions().mode() & 0o777;
+        assert_eq!(backup_mode, 0o600);
     }
 
     #[test]

