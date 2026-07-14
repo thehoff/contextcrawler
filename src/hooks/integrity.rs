@@ -119,12 +119,15 @@ pub enum IntegrityStatus {
 #[derive(Debug, PartialEq)]
 pub enum BinaryHookStatus {
     /// A `PreToolUse` entry registers the expected `contextcrawler hook ...`
-    /// command (current or legacy form). settings.json owner/mode are sane.
+    /// command (current or legacy form), and its binding matches the stored
+    /// install identity. settings.json owner/mode are sane.
     Registered,
-    /// The expected command is present, but no independently stored install
-    /// identity exists. The registration cannot be distinguished from one an
-    /// attacker created, so runtime enforcement must fail closed.
-    NoBaseline,
+    /// A valid, non-masquerading registration exists but no install identity
+    /// has been recorded yet. NON-FATAL (#234 round-2): the caller runs AND
+    /// records the identity (trust-on-first-use), so a later swap of our own
+    /// entry — to any other form or matcher — is then caught as `Tampered`.
+    /// Distinct from the old fatal `NoBaseline`, which bricked every upgrade.
+    RegisteredNoBaseline,
     /// No `settings.json`, or it has no ContextCrawler `PreToolUse` entry.
     /// The hook is legitimately not installed — not a tamper signal.
     NotRegistered,
@@ -146,9 +149,8 @@ pub enum BinaryHookStatus {
 /// (e.g. `/tmp/evil/contextcrawler`) is a tamper signal, not a clean install.
 /// `~` is expanded against `$HOME` at call time.
 ///
-/// Compatibility boundary: an existing absolute registration outside these
-/// prefixes cannot be given a trusted identity. Runtime verification fails
-/// closed (`Tampered`, or `NoBaseline` for a pre-identity registration) until
+/// Compatibility boundary: an absolute registration outside these prefixes is
+/// treated as a repoint — runtime verification fails closed (`Tampered`) until
 /// the user reinstalls under a trusted prefix or runs init with the bare
 /// `contextcrawler hook claude` command.
 const TRUSTED_INSTALL_PREFIXES: &[&str] = &[
@@ -976,12 +978,50 @@ fn registration_surface(root: &serde_json::Value) -> Option<&serde_json::Value> 
         .and_then(|hooks| hooks.get(PRE_TOOL_USE_KEY))
 }
 
+/// True if `cmd` is *shaped* like a ContextCrawler/rtk hook registration —
+/// its executable basename is exactly `contextcrawler`/`rtk` AND it names the
+/// `hook` subcommand. This is the trigger for treating a *failed* validation as
+/// a tamper/repoint signal, versus an unrelated third-party hook we ignore
+/// (#234).
+///
+/// Parsed, not substring (#234 round-2): a substring test false-positives
+/// unrelated hooks — e.g. `~/.claude/hooks/smartkit.sh` contains both `rtk`
+/// (sma-rtk-it) and `hook` (the path), and would be mis-flagged as tampering,
+/// re-bricking the gate. A genuine repoint that keeps our binary name but adds
+/// junk (`/tmp/evil/contextcrawler hook claude --steal`, `rtk hook claude;
+/// curl evil`) still trips this and is then rejected by
+/// `is_expected_hook_command`. An unparseable command is not treated as ours;
+/// a genuine repoint of our own entry is still caught as a removal via the
+/// baseline once one exists.
+fn command_targets_ctxcrl_hook(cmd: &str) -> bool {
+    let Some(argv) = shlex::split(cmd.trim()) else {
+        return false;
+    };
+    let Some(executable) = argv.first() else {
+        return false;
+    };
+    let basename = Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(executable);
+    (basename == "contextcrawler" || basename == "rtk")
+        && argv.iter().skip(1).any(|arg| arg == "hook")
+}
+
 #[derive(Debug)]
 struct RegistrationInspection {
     has_expected: bool,
     unexpected: Option<String>,
 }
 
+/// Inspect the PreToolUse surface for ContextCrawler's own registration.
+///
+/// Scope is deliberately narrow (#234): we validate OUR entry and flag entries
+/// that masquerade as ours, but we IGNORE unrelated third-party hooks
+/// (git-hygiene, lab-repo-guard, council-review-gate, ...). Policing every
+/// other tool's PreToolUse hook is Claude Code's settings-trust boundary, not
+/// ContextCrawler's; treating a coexisting sibling hook as tampering disabled
+/// the gate for everyone with a real multi-hook setup.
 fn inspect_registration_surface(surface: Option<&serde_json::Value>) -> RegistrationInspection {
     let entries = match surface.and_then(serde_json::Value::as_array) {
         Some(entries) => entries,
@@ -998,10 +1038,9 @@ fn inspect_registration_surface(surface: Option<&serde_json::Value>) -> Registra
     for entry in entries {
         let hooks = match entry.get("hooks").and_then(serde_json::Value::as_array) {
             Some(hooks) if !hooks.is_empty() => hooks,
-            _ => {
-                unexpected.get_or_insert_with(|| "<malformed PreToolUse entry>".to_string());
-                continue;
-            }
+            // An entry with no/empty/malformed hooks array is not ours to
+            // police — a foreign or malformed sibling entry must not brick us.
+            _ => continue,
         };
         for hook in hooks {
             let hook_type = hook.get("type").and_then(serde_json::Value::as_str);
@@ -1010,12 +1049,14 @@ fn inspect_registration_surface(surface: Option<&serde_json::Value>) -> Registra
                 (Some("command"), Some(command)) if is_expected_hook_command(command) => {
                     has_expected = true;
                 }
-                (Some("command"), Some(command)) => {
+                // A command that tries to pass for ours but fails validation is
+                // a repoint/masquerade — fail closed on it.
+                (Some("command"), Some(command)) if command_targets_ctxcrl_hook(command) => {
                     unexpected.get_or_insert_with(|| command.to_string());
                 }
-                _ => {
-                    unexpected.get_or_insert_with(|| "<malformed PreToolUse command>".to_string());
-                }
+                // Anything else (a third-party hook, or a malformed sibling
+                // entry) is not ContextCrawler's registration — ignore it.
+                _ => {}
             }
         }
     }
@@ -1026,9 +1067,53 @@ fn inspect_registration_surface(surface: Option<&serde_json::Value>) -> Registra
     }
 }
 
+/// Hash ONLY ContextCrawler's own hook registrations, binding each owned
+/// command to its `matcher`, canonicalised and sorted.
+///
+/// Unrelated sibling hooks are excluded on purpose (#234): a legitimate edit to
+/// some *other* tool's PreToolUse hook must not invalidate our baseline. But the
+/// matcher IS included (#234 round-2, council blocker): excluding it let an
+/// attacker move our hook to a different matcher (`Bash` -> `Read`) with the
+/// hash unchanged, silently dropping Bash gating. The event key is fixed
+/// (`PRE_TOOL_USE_KEY`, the only surface we read). The baseline still detects
+/// any add/remove/repoint/matcher-move of a contextcrawler entry.
 fn registration_surface_hash(surface: &serde_json::Value) -> Result<String> {
-    let bytes = serde_json::to_vec(surface).context("Failed to serialize PreToolUse identity")?;
-    Ok(hash_bytes(&bytes))
+    // Collect (matcher, command) for OWNED, executable (`type == "command"`)
+    // hooks only. Restricting to command-type is a control (#234 round-2,
+    // council blocker): a `type == "command"` -> `type == "prompt"` swap on our
+    // entry drops it from this set, so the hash changes and the swap is caught
+    // even though the command string is unchanged. A non-command "hook" cannot
+    // execute our binary, so it is not part of our identity.
+    let mut bindings: Vec<(&str, &str)> = Vec::new();
+    if let Some(entries) = surface.as_array() {
+        for entry in entries {
+            let matcher = entry
+                .get("matcher")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let Some(hooks) = entry.get("hooks").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for hook in hooks {
+                let is_command =
+                    hook.get("type").and_then(serde_json::Value::as_str) == Some("command");
+                let command = hook.get("command").and_then(serde_json::Value::as_str);
+                if let (true, Some(command)) = (is_command, command) {
+                    if is_expected_hook_command(command) {
+                        bindings.push((matcher, command));
+                    }
+                }
+            }
+        }
+    }
+    bindings.sort_unstable();
+    // Serialise the sorted tuples as JSON: the array/string structure is
+    // unambiguous, so an attacker cannot forge a matcher/command containing
+    // separators to collide two distinct registrations (#234 round-2, council
+    // blocker: the previous NUL-join was forgeable via NUL/newline in matcher).
+    let canonical =
+        serde_json::to_vec(&bindings).context("Failed to serialize PreToolUse identity")?;
+    Ok(hash_bytes(&canonical))
 }
 
 fn hash_record(hash: &str, label: &str) -> String {
@@ -1292,7 +1377,14 @@ fn verify_binary_hook_at_with_identity(
             return BinaryHookStatus::Tampered { command };
         }
         if !identity_present {
-            return BinaryHookStatus::NoBaseline;
+            // #234: a valid, non-masquerading registration with no recorded
+            // baseline is NON-FATAL — the caller runs and records the identity
+            // (TOFU). The anti-repoint guard (closed argv + trusted install
+            // path for the absolute form) has already validated the entry.
+            // Hard-bailing here bricked every fresh upgrade and re-bricked on
+            // each later hook edit; recording the baseline on first clean run
+            // then lets a later swap of our own binding be caught as Tampered.
+            return BinaryHookStatus::RegisteredNoBaseline;
         }
         let stored = match read_registration_identity(identity_path) {
             Ok(hash) => hash,
@@ -1568,13 +1660,23 @@ fn run_verify_at(
             println!("PASS  native binary hook registration verified");
             println!("      {}", settings_path.display());
         }
+        BinaryHookStatus::RegisteredNoBaseline => {
+            // #234 round-2 (TOFU): valid registration; record the baseline now
+            // so subsequent verifications enforce it. Best-effort.
+            let recorded = store_binary_hook_identity_at(settings_path, identity_path).is_ok();
+            println!("PASS  native binary hook registration verified");
+            println!(
+                "      {} ({})",
+                settings_path.display(),
+                if recorded {
+                    "install identity recorded"
+                } else {
+                    "identity not recorded (data dir not writable)"
+                }
+            );
+        }
         BinaryHookStatus::NotRegistered => {
             println!("SKIP  native binary hook not registered");
-        }
-        BinaryHookStatus::NoBaseline => {
-            eprintln!("FAIL  native binary hook has no installed-registration identity");
-            eprintln!("      Pre-identity upgrades must be re-initialised from a trusted install.");
-            failed = true;
         }
         BinaryHookStatus::Tampered { command } => {
             eprintln!("FAIL  native binary hook registration was changed");
@@ -1713,14 +1815,20 @@ fn runtime_check_binary_hook_at(settings_path: &Path, identity_path: &Path) -> R
         BinaryHookStatus::Registered | BinaryHookStatus::NotRegistered => {
             // Registered cleanly, or hook legitimately not installed.
         }
-        BinaryHookStatus::NoBaseline => {
-            anyhow::bail!(
-                "contextcrawler: native hook registration has no trusted install identity.\n  \
-                 This is expected after upgrading a pre-identity registration; absolute \
-                 registrations outside the supported install prefixes cannot be baselined.\n  \
-                 ContextCrawler will not run until `contextcrawler init -g --auto-patch` \
-                 records a fresh identity from a trusted install."
-            );
+        BinaryHookStatus::RegisteredNoBaseline => {
+            // #234 round-2 (TOFU): valid registration, no baseline yet. Record
+            // it now so a later swap of our own binding is caught, then run.
+            // Best-effort — a record failure (e.g. read-only data dir) must not
+            // brick an otherwise-valid registration, but it IS surfaced so the
+            // user knows tamper-detection is degraded (stderr only — stdout
+            // carries the hook JSON protocol).
+            if let Err(error) = store_binary_hook_identity_at(settings_path, identity_path) {
+                eprintln!(
+                    "contextcrawler: could not record hook-registration baseline ({}); \
+                     tamper-detection is degraded until `contextcrawler init -g --auto-patch`.",
+                    error
+                );
+            }
         }
         BinaryHookStatus::Tampered { command } => {
             anyhow::bail!(
@@ -2255,19 +2363,73 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_hook_rejects_any_unexpected_command_entry() {
+    fn test_unrelated_sibling_hook_does_not_disable_gating() {
+        // #234: an unrelated third-party PreToolUse hook (git-hygiene, etc.)
+        // coexisting with our own registration must NOT be treated as tamper.
+        // contextcrawler owns ITS entry; policing every other tool's hook is
+        // Claude Code's settings-trust boundary, not ours. Posture A (own-
+        // boundary). Previously this returned Tampered and bricked the tool.
         let temp = secure_tempdir();
-        let path =
-            write_settings_commands(temp.path(), &["contextcrawler hook claude", "/tmp/evil"]);
+        let path = write_settings_commands(
+            temp.path(),
+            &[
+                "contextcrawler hook claude",
+                "/home/x/.claude/hooks/git-hygiene.sh",
+            ],
+        );
 
-        assert!(matches!(
+        assert_eq!(
             verify_binary_without_identity(&path),
-            BinaryHookStatus::Tampered { .. }
-        ));
+            BinaryHookStatus::RegisteredNoBaseline
+        );
     }
 
     #[test]
-    fn test_binary_hook_rejects_malformed_command_beside_expected() {
+    fn test_sibling_named_like_us_is_not_flagged() {
+        // #234 round-2: ownership is by parsed executable basename, not
+        // substring. `smartkit.sh` contains "rtk" and its path contains "hook",
+        // but it is NOT our binary — it must be ignored, not flagged Tampered.
+        let temp = secure_tempdir();
+        let path = write_settings_commands(
+            temp.path(),
+            &[
+                "contextcrawler hook claude",
+                "/home/x/.claude/hooks/smartkit.sh",
+            ],
+        );
+        assert_eq!(
+            verify_binary_without_identity(&path),
+            BinaryHookStatus::RegisteredNoBaseline
+        );
+    }
+
+    #[test]
+    fn test_ctxcrl_shaped_sibling_repoint_is_still_tampered() {
+        // #234: the relaxation is scoped — a sibling that is SHAPED like our
+        // hook (mentions contextcrawler/rtk + hook) but fails validation is a
+        // repoint/masquerade and must still fail closed.
+        let temp = secure_tempdir();
+        let path = write_settings_commands(
+            temp.path(),
+            &["contextcrawler hook claude", "/tmp/evil/rtk hook claude"],
+        );
+
+        match verify_binary_without_identity(&path) {
+            BinaryHookStatus::Tampered { command } => {
+                assert!(command.contains("/tmp/evil/rtk hook claude"));
+            }
+            other => panic!(
+                "expected Tampered for masquerading sibling, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_malformed_sibling_beside_expected_is_ignored() {
+        // #234: a malformed unrelated entry beside a valid registration is not
+        // our concern (Claude Code ignores malformed hooks; they cannot auto-
+        // allow). Do not brick over it.
         let temp = secure_tempdir();
         let path = temp.path().join("settings.json");
         let body = serde_json::json!({
@@ -2283,10 +2445,185 @@ mod tests {
         });
         write_file_secure(&path, &serde_json::to_string_pretty(&body).unwrap());
 
-        assert!(matches!(
+        assert_eq!(
             verify_binary_without_identity(&path),
+            BinaryHookStatus::RegisteredNoBaseline
+        );
+    }
+
+    #[test]
+    fn test_matcher_move_after_baseline_is_tampered() {
+        // #234 round-2 (council blocker): the identity binds the matcher, so
+        // moving our hook from Bash to another matcher (dropping Bash gating)
+        // is caught even though the command string is unchanged.
+        let temp = secure_tempdir();
+        let settings = temp.path().join("settings.json");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        let bash = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&bash).unwrap());
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
+
+        let read = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Read",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&read).unwrap());
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
             BinaryHookStatus::Tampered { .. }
         ));
+    }
+
+    #[test]
+    fn test_command_to_prompt_type_swap_is_tampered() {
+        // #234 round-2 (council blocker): flipping our hook's `type` from
+        // "command" to a non-executing type (with the command string unchanged)
+        // drops it from the owned-command hash, so the swap is caught. Uses a
+        // second owned Read entry so has_expected survives the flip, isolating
+        // the hash as the detector.
+        let temp = secure_tempdir();
+        let settings = temp.path().join("settings.json");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        let both = serde_json::json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "Bash", "hooks": [
+                    { "type": "command", "command": "contextcrawler hook claude" }]},
+                { "matcher": "Read", "hooks": [
+                    { "type": "command", "command": "contextcrawler hook claude" }]}
+            ]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&both).unwrap());
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
+
+        let flipped = serde_json::json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "Bash", "hooks": [
+                    { "type": "prompt", "command": "contextcrawler hook claude" }]},
+                { "matcher": "Read", "hooks": [
+                    { "type": "command", "command": "contextcrawler hook claude" }]}
+            ]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&flipped).unwrap());
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
+    }
+
+    #[test]
+    fn test_adversarial_matcher_does_not_collide_or_crash() {
+        // #234 round-2 (council blocker): matcher strings with control chars
+        // must not collide via the hash encoding. Structured serialization
+        // makes distinct registrations hash distinctly and round-trips cleanly.
+        let temp = secure_tempdir();
+        let settings = temp.path().join("settings.json");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        let weird = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash\u{0}\nRead",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&weird).unwrap());
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
+        // A different matcher value is a different binding -> Tampered.
+        let other = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&other).unwrap());
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
+    }
+
+    #[test]
+    fn test_tofu_records_baseline_then_enforces() {
+        // #234 round-2: first clean run has no baseline (RegisteredNoBaseline);
+        // the runtime gate records it (TOFU); a later swap to another valid form
+        // is then caught as Tampered.
+        let temp = secure_tempdir();
+        let hook = temp.path().join("rtk-rewrite.sh");
+        let settings = write_settings(temp.path(), "contextcrawler hook claude");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::RegisteredNoBaseline
+        );
+        // Runtime gate records the identity on first clean run.
+        runtime_check_at(&hook, &settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
+
+        // A later swap to a different (still valid-form) command is now caught.
+        write_settings(temp.path(), "rtk hook claude");
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
+    }
+
+    #[test]
+    fn test_sibling_added_after_baseline_does_not_invalidate_it() {
+        // #234: the identity hash covers only contextcrawler-owned entries, so
+        // adding an unrelated sibling after baselining leaves us Registered.
+        let temp = secure_tempdir();
+        let settings = write_settings(temp.path(), "contextcrawler hook claude");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+
+        // A later, legitimate edit adds a sibling hook.
+        write_settings_commands(
+            temp.path(),
+            &[
+                "contextcrawler hook claude",
+                "/home/x/.claude/hooks/lab-repo-guard.sh",
+            ],
+        );
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
     }
 
     #[test]
@@ -2322,14 +2659,22 @@ mod tests {
     }
 
     #[test]
-    fn test_registered_command_without_identity_fails_closed() {
+    fn test_registered_command_without_identity_runs() {
+        // #234: a valid, non-masquerading registration with no recorded
+        // baseline RUNS (Registered). Hard-bailing here bricked every fresh
+        // upgrade until `init --auto-patch`, and re-bricked on each later hook
+        // edit. The anti-repoint guard (closed argv + trusted-path for the
+        // absolute form) has already validated the entry; the identity hash is
+        // a strengthening for when it exists, not a hard precondition. The
+        // bare-command form's PATH is out-of-scope for tamper detection by
+        // design, so bailing here protected almost nothing.
         let temp = secure_tempdir();
         let settings = write_settings(temp.path(), "contextcrawler hook claude");
         let identity = temp.path().join("missing-identity");
 
         assert_eq!(
             verify_binary_hook_at_with_identity(&settings, &identity),
-            BinaryHookStatus::NoBaseline
+            BinaryHookStatus::RegisteredNoBaseline
         );
     }
 
@@ -2365,18 +2710,20 @@ mod tests {
 
     #[test]
     fn test_raw_substring_is_never_registration_proof() {
+        // The executed command is `evil` (the rest is a shell comment), so this
+        // is NOT our registration: `has_expected` must stay false — a raw
+        // substring never counts as proof we are registered. Parsed ownership
+        // (#234 round-2) classifies argv[0]=`evil` as a third-party hook, so the
+        // verdict is NotRegistered, not a false Registered/RegisteredNoBaseline.
+        // (Once a baseline exists, replacing our entry with this is caught as
+        // Tampered via test_persisted_registration_identity_detects_repoint...)
         let temp = secure_tempdir();
         let settings = write_settings(temp.path(), "evil # contextcrawler hook claude");
         let identity = temp.path().join("identity");
-        let hook = temp.path().join("rtk-rewrite.sh");
 
-        assert!(matches!(
+        assert_eq!(
             verify_binary_hook_at_with_identity(&settings, &identity),
-            BinaryHookStatus::Tampered { .. }
-        ));
-        assert!(
-            run_verify_at(&hook, &settings, &identity, 0).is_err(),
-            "manual verification must call the structural registration verifier"
+            BinaryHookStatus::NotRegistered
         );
     }
 
@@ -2732,9 +3079,11 @@ mod tests {
         let real = write_settings(&real_dir, "contextcrawler hook claude");
         let link = temp.path().join("settings-link.json");
         std::os::unix::fs::symlink(&real, &link).unwrap();
+        // Safe symlink is accepted; a valid registration with no baseline runs
+        // (#234). The point of this test is that the symlink is not rejected.
         assert_eq!(
             verify_binary_without_identity(&link),
-            BinaryHookStatus::NoBaseline
+            BinaryHookStatus::RegisteredNoBaseline
         );
     }
 
@@ -2751,9 +3100,11 @@ mod tests {
         let linked_dir = temp.path().join(".claude");
         std::os::unix::fs::symlink(&real_dir, &linked_dir).unwrap();
 
+        // Safe symlinked directory is accepted; valid registration, no baseline
+        // -> runs (#234).
         assert_eq!(
             verify_binary_without_identity(&linked_dir.join("settings.json")),
-            BinaryHookStatus::NoBaseline
+            BinaryHookStatus::RegisteredNoBaseline
         );
     }
 
