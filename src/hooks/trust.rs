@@ -98,6 +98,71 @@ fn metadata_error(
     None
 }
 
+/// Best-effort self-heal of a legacy trust-store path whose permissions predate
+/// the private-by-default creation (#235). A store created by an older release
+/// (or under a permissive umask) can be `0755`/`0644`, which the strict
+/// validator rejects — warning and treating all filters as untrusted on every
+/// command. If the path is a regular file/dir owned by us with group/other bits
+/// set, we tighten it to `private_mode` before validation. We NEVER widen
+/// permissions, never touch a foreign-owned path (the validator must reject
+/// those), and never follow a symlink (a symlink here is a tamper signal for
+/// the validator, not something to chmod through). A repair failure is ignored
+/// — the strict validator then applies as before.
+#[cfg(unix)]
+fn repair_private_dir_perms(path: &Path, private_mode: u32) {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Open the directory itself with O_NOFOLLOW|O_DIRECTORY so a symlink swap
+    // cannot redirect the chmod (#235 council): fstat and fchmod then both act
+    // on this one descriptor, closing the TOCTOU a path-based chmod would have.
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC);
+    let Ok(directory) = options.open(path) else {
+        return;
+    };
+    let Ok(metadata) = directory.metadata() else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    let our_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != our_uid || metadata.mode() & 0o077 == 0 {
+        return;
+    }
+    let _ = directory.set_permissions(fs::Permissions::from_mode(private_mode));
+}
+
+#[cfg(not(unix))]
+fn repair_private_dir_perms(_path: &Path, _private_mode: u32) {}
+
+/// Same self-heal as [`repair_private_dir_perms`], but for an already-open,
+/// O_NOFOLLOW-validated regular file: `set_permissions` here is `fchmod` on the
+/// held descriptor, so there is no path re-resolution or TOCTOU window (#235).
+#[cfg(unix)]
+fn repair_private_file_perms(file: &File, private_mode: u32) {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    if !metadata.is_file() {
+        return;
+    }
+    let our_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != our_uid || metadata.mode() & 0o077 == 0 {
+        return;
+    }
+    let _ = file.set_permissions(fs::Permissions::from_mode(private_mode));
+}
+
+#[cfg(not(unix))]
+fn repair_private_file_perms(_file: &File, _private_mode: u32) {}
+
 struct ValidatedDirectory {
     requested_path: PathBuf,
     canonical_path: PathBuf,
@@ -490,6 +555,9 @@ fn read_store_at(path: &Path) -> Result<TrustStore> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
+    // #235: self-heal a legacy-permissioned store directory (owner-owned but
+    // group/other-readable) before the strict validator would reject it.
+    repair_private_dir_perms(parent, 0o700);
     let directory = open_validated_directory(parent, true, false)?;
     let file_name = path
         .file_name()
@@ -498,6 +566,8 @@ fn read_store_at(path: &Path) -> Result<TrustStore> {
         // A concurrent deletion removes trust rather than granting it.
         return Ok(TrustStore::default());
     };
+    // #235: self-heal a legacy-permissioned store file via its no-follow fd.
+    repair_private_file_perms(&file, 0o600);
     let metadata = file
         .metadata()
         .with_context(|| format!("Failed to inspect open trust store {}", path.display()))?;
@@ -986,6 +1056,35 @@ mod tests {
     fn setup_test_env(temp: &TempDir) -> PathBuf {
         let store_file = temp.path().join("trusted_filters.json");
         store_file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_legacy_permissive_store_is_self_healed_on_read() {
+        // #235: a store left over from a pre-private-perms release (0755 dir,
+        // 0644 file, owner-owned) must be tightened and read cleanly, not
+        // rejected with "trust store unreadable / all filters untrusted".
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let store_dir = temp.path().join("ctxcrl");
+        let store_file = store_dir.join("trusted_filters.json");
+
+        // Create the store the normal (private) way, then loosen it to mimic a
+        // legacy install under a permissive umask.
+        write_store_at(&store_file, &TrustStore::default()).unwrap();
+        fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&store_file, fs::Permissions::from_mode(0o644)).unwrap();
+
+        // Read must succeed (self-heal), not error.
+        let store = read_store_at(&store_file).expect("legacy-perm store should self-heal");
+        assert!(store.trusted.is_empty());
+
+        // And the perms are now private.
+        let dir_mode = fs::metadata(&store_dir).unwrap().permissions().mode() & 0o777;
+        let file_mode = fs::metadata(&store_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "store dir should be tightened to 0700");
+        assert_eq!(file_mode, 0o600, "store file should be tightened to 0600");
     }
 
     fn check_trust_with_store(filter_path: &Path, store_file: &Path) -> Result<TrustStatus> {
