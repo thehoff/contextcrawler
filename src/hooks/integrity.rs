@@ -1078,7 +1078,13 @@ fn inspect_registration_surface(surface: Option<&serde_json::Value>) -> Registra
 /// (`PRE_TOOL_USE_KEY`, the only surface we read). The baseline still detects
 /// any add/remove/repoint/matcher-move of a contextcrawler entry.
 fn registration_surface_hash(surface: &serde_json::Value) -> Result<String> {
-    let mut bindings: Vec<String> = Vec::new();
+    // Collect (matcher, command) for OWNED, executable (`type == "command"`)
+    // hooks only. Restricting to command-type is a control (#234 round-2,
+    // council blocker): a `type == "command"` -> `type == "prompt"` swap on our
+    // entry drops it from this set, so the hash changes and the swap is caught
+    // even though the command string is unchanged. A non-command "hook" cannot
+    // execute our binary, so it is not part of our identity.
+    let mut bindings: Vec<(&str, &str)> = Vec::new();
     if let Some(entries) = surface.as_array() {
         for entry in entries {
             let matcher = entry
@@ -1089,18 +1095,25 @@ fn registration_surface_hash(surface: &serde_json::Value) -> Result<String> {
                 continue;
             };
             for hook in hooks {
-                if let Some(command) = hook.get("command").and_then(serde_json::Value::as_str) {
+                let is_command =
+                    hook.get("type").and_then(serde_json::Value::as_str) == Some("command");
+                let command = hook.get("command").and_then(serde_json::Value::as_str);
+                if let (true, Some(command)) = (is_command, command) {
                     if is_expected_hook_command(command) {
-                        // NUL-separate matcher from command so the boundary is
-                        // unforgeable (neither field can contain a NUL).
-                        bindings.push(format!("{}\u{0}{}", matcher, command));
+                        bindings.push((matcher, command));
                     }
                 }
             }
         }
     }
     bindings.sort_unstable();
-    Ok(hash_bytes(bindings.join("\n").as_bytes()))
+    // Serialise the sorted tuples as JSON: the array/string structure is
+    // unambiguous, so an attacker cannot forge a matcher/command containing
+    // separators to collide two distinct registrations (#234 round-2, council
+    // blocker: the previous NUL-join was forgeable via NUL/newline in matcher).
+    let canonical =
+        serde_json::to_vec(&bindings).context("Failed to serialize PreToolUse identity")?;
+    Ok(hash_bytes(&canonical))
 }
 
 fn hash_record(hash: &str, label: &str) -> String {
@@ -1806,8 +1819,16 @@ fn runtime_check_binary_hook_at(settings_path: &Path, identity_path: &Path) -> R
             // #234 round-2 (TOFU): valid registration, no baseline yet. Record
             // it now so a later swap of our own binding is caught, then run.
             // Best-effort — a record failure (e.g. read-only data dir) must not
-            // brick an otherwise-valid registration.
-            let _ = store_binary_hook_identity_at(settings_path, identity_path);
+            // brick an otherwise-valid registration, but it IS surfaced so the
+            // user knows tamper-detection is degraded (stderr only — stdout
+            // carries the hook JSON protocol).
+            if let Err(error) = store_binary_hook_identity_at(settings_path, identity_path) {
+                eprintln!(
+                    "contextcrawler: could not record hook-registration baseline ({}); \
+                     tamper-detection is degraded until `contextcrawler init -g --auto-patch`.",
+                    error
+                );
+            }
         }
         BinaryHookStatus::Tampered { command } => {
             anyhow::bail!(
@@ -2461,6 +2482,86 @@ mod tests {
             }]}
         });
         write_file_secure(&settings, &serde_json::to_string_pretty(&read).unwrap());
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
+    }
+
+    #[test]
+    fn test_command_to_prompt_type_swap_is_tampered() {
+        // #234 round-2 (council blocker): flipping our hook's `type` from
+        // "command" to a non-executing type (with the command string unchanged)
+        // drops it from the owned-command hash, so the swap is caught. Uses a
+        // second owned Read entry so has_expected survives the flip, isolating
+        // the hash as the detector.
+        let temp = secure_tempdir();
+        let settings = temp.path().join("settings.json");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        let both = serde_json::json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "Bash", "hooks": [
+                    { "type": "command", "command": "contextcrawler hook claude" }]},
+                { "matcher": "Read", "hooks": [
+                    { "type": "command", "command": "contextcrawler hook claude" }]}
+            ]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&both).unwrap());
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
+
+        let flipped = serde_json::json!({
+            "hooks": { "PreToolUse": [
+                { "matcher": "Bash", "hooks": [
+                    { "type": "prompt", "command": "contextcrawler hook claude" }]},
+                { "matcher": "Read", "hooks": [
+                    { "type": "command", "command": "contextcrawler hook claude" }]}
+            ]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&flipped).unwrap());
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
+    }
+
+    #[test]
+    fn test_adversarial_matcher_does_not_collide_or_crash() {
+        // #234 round-2 (council blocker): matcher strings with control chars
+        // must not collide via the hash encoding. Structured serialization
+        // makes distinct registrations hash distinctly and round-trips cleanly.
+        let temp = secure_tempdir();
+        let settings = temp.path().join("settings.json");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        let weird = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash\u{0}\nRead",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&weird).unwrap());
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+        assert_eq!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Registered
+        );
+        // A different matcher value is a different binding -> Tampered.
+        let other = serde_json::json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": "contextcrawler hook claude" }]
+            }]}
+        });
+        write_file_secure(&settings, &serde_json::to_string_pretty(&other).unwrap());
         assert!(matches!(
             verify_binary_hook_at_with_identity(&settings, &identity),
             BinaryHookStatus::Tampered { .. }
