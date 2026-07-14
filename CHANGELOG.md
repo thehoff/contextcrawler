@@ -3,6 +3,29 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.5] — 2026-07-14
+
+P0 hotfix for a self-inflicted regression in 0.4.4.
+
+### Fixed
+- **Hook integrity gate no longer disables ContextCrawler when other PreToolUse
+  hooks coexist (#234).** 0.4.4's #219 hardening treated any sibling Bash hook
+  (git-hygiene, lab-repo-guard, ...) as tampering and refused to run, taking the
+  Tirith + supply-chain gates down with it and falling back to raw passthrough
+  on every command. The runtime gate now validates ContextCrawler's *own*
+  registration and ignores unrelated third-party hooks (Claude Code's
+  settings-trust boundary). Hardened over two council rounds:
+  - ownership is decided by the parsed executable basename, not a substring
+    (a hook named e.g. `smartkit.sh` is no longer mis-flagged);
+  - the install identity binds the `matcher` and hook `type` for our own
+    entries only (a `Bash`->`Read` move or a `command`->`prompt` swap is caught;
+    unrelated hook edits do not invalidate the baseline), serialised
+    unambiguously;
+  - a valid registration with no recorded baseline runs and records the
+    identity on first use (trust-on-first-use) instead of hard-bailing, so
+    upgrades are never bricked while a later swap of our own entry is still
+    caught. A failure to record is surfaced on stderr.
+
 ## [0.4.4] — 2026-07-14
 
 Large security release — the remainder of the codex-5.6-max sweep + 5-voice
