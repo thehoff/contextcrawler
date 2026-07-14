@@ -3,6 +3,21 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.7] — 2026-07-14
+
+### Fixed
+- **Legacy filter trust store is self-healed instead of disabled (#235).** A
+  trust store left `0755`/`0644` by a pre-0.4.4 release (or a permissive umask)
+  tripped the strict owner-only validator, printing `trust store unreadable ...
+  treating all filters as untrusted` on every command and silently disabling
+  custom-filter trust (built-in filters and the Tirith/supply-chain gates were
+  unaffected). ContextCrawler now tightens an owner-owned store to `0700`/`0600`
+  on read — descriptor-based (fchmod on the O_NOFOLLOW file fd; a fresh
+  `O_NOFOLLOW|O_DIRECTORY` open then fchmod for the directory), so no symlink
+  swap can redirect it. The owner-only requirement is unchanged; foreign-owned
+  or symlinked stores are still rejected, and permissions are only ever
+  tightened.
+
 ## [0.4.6] — 2026-07-14
 
 Supply-chain gate hardening — the last of the security audit register
