@@ -3,6 +3,36 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.6] — 2026-07-14
+
+Supply-chain gate hardening — the last of the security audit register
+(#210-#233). Three Codex-authored rounds in an isolated lane, each
+driver-verified and non-author-council-reviewed. The gate remains **default-off**
+(`supply_chain.enabled`).
+
+### Fixed
+- **Install-detection evasions (#227).** A gate-disable in command text is
+  ignored; shell words are reconstructed before classification (quoted-fragment
+  concatenation); per-manager global options are consumed before the install
+  verb; process substitutions and `bash -c` recursion are inspected (a
+  tokenisation error fails closed to unvettable, not silently dropped);
+  line-continuations are joined while bare newlines stay command boundaries;
+  `npx`/`pnpx`/`yarn dlx` launchers and `pnpm --frozen-lockfile`/bare lockfile
+  installs are treated as unvettable.
+- **Fail-open verdicts (#228).** OSV errors return Unavailable (not a silent
+  Allow); remote PyPI/VCS/wheel URLs (incl. quoted, `git+http(s)`/`git+ssh`, and
+  SCP `user@host:path` with any username) are unvettable and separated from
+  local editables; pip/uv network-trust and index flags (`--trusted-host`,
+  `--cert`, `--client-cert`, `--proxy`, `--index-url`, `--extra-index-url`,
+  `--find-links`) force unvettable (closes a MITM/mirror bypass); an
+  unauthenticated mutable cache can force a conservative Block but never justify
+  an Allow; all findings and logs are credential-safe (host/basename only);
+  UTF-8 suffix handling is boundary-safe; scrub/audit writes use O_NOFOLLOW
+  reads, in-directory atomic temp files, and 0600.
+- **429 DoS + cache trust (#231).** HTTP 429 joins 5xx/transport on the bounded
+  retry/backoff path; cache files are 0600; implausible far-past publish
+  timestamps are rejected.
+
 ## [0.4.5] — 2026-07-14
 
 P0 hotfix for a self-inflicted regression in 0.4.4.
