@@ -3,6 +3,45 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.4] — 2026-07-14
+
+Large security release — the remainder of the codex-5.6-max sweep + 5-voice
+council audit register (#210-#233). Every fix TDD'd and council-gated; the two
+big clusters were done by the Codex (gpt-5.6) worker in isolated worktrees and
+independently verified + non-author-council-reviewed before merge.
+
+### Fixed
+- **Hook-tamper validation rebuilt (#219, #220).** Prefix/substring hook-command
+  validation (the auto-allow surface validating itself) replaced with a closed
+  single-argv validator; symlink resolve-and-validate (accepts Homebrew's
+  bin->Cellar, rejects a trusted-prefix symlink to an untrusted target); every
+  PreToolUse entry gates the whole registration; an install-time SHA-256
+  registration identity is persisted and enforced independently of the mutable
+  hook; O_NOFOLLOW descriptor reads and atomic temp+rename throughout; trust
+  store hardened (private dir, 0600, no-follow, owner/mode).
+- **Non-Claude hook handlers gated (#225).** VS Code, Copilot-CLI and Gemini
+  handlers now run the Tirith + supply-chain gates and honour Ask/Deny (fail
+  closed on the no-ask hosts) instead of silently skipping.
+- **Permission-gate + lexer hardening (#212-#218, #230).** Deny/allow match the
+  resolved command word (after env assignments, redirections, shell prefixes);
+  command-substitution and stdin/heredoc-interpreter payloads attest or Ask;
+  reader->network->interpreter and process-substitution compositions taint to
+  Ask; wildcard-free allow rules require token equality; policy-file failures
+  fail closed; lexer closes shell-grammar gaps ($'...', backslash-newline, |&,
+  grouped pipelines, arithmetic-exec, env-assignment/persistent redirects) and
+  bounds nested-substitution DoS.
+- **Tirith gate deadlock (#211).** Stdout is drained concurrently with the wait
+  (a >64KiB verdict no longer blocks and fails open); an overflow fails closed.
+- **Config policy-injection (#222).** Config is read from a validated,
+  O_NOFOLLOW, user-owned, non-world-writable file (TOCTOU-safe) and the
+  current-directory fallback is dropped; a hostile XDG_CONFIG_HOME or symlinked
+  config is ignored in favour of safe defaults.
+- **Filter engine (#226, #232, #233).** Whole-blob ANSI/OSC state-machine
+  sanitisation (drops unterminated control strings across lines); CTXCRL_TOML_DEBUG
+  logs a redacted name not the raw command; AggressiveFilter counts the
+  signature brace; hard byte ceiling before materialisation; Go/JS/Python
+  language-parsing fixes; bounded user regex (ReDoS).
+
 ## [0.4.3] — 2026-07-13
 
 Security release. Closes a 0.4.2 regression and four bypasses from the
