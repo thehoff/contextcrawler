@@ -861,14 +861,37 @@ pub fn extract_substitutions(cmd: &str) -> Vec<Substitution> {
         .collect()
 }
 
+/// Extract command substitutions without conflating process-substitution
+/// delimiters with data-producing command substitutions. Limit sentinels are
+/// retained so callers still fail closed when bounded analysis is exhausted.
+pub(crate) fn extract_command_substitutions(cmd: &str) -> Vec<Substitution> {
+    extract_tagged_substitutions(cmd)
+        .into_iter()
+        .filter_map(|tagged| {
+            matches!(
+                tagged.kind,
+                SubstitutionKind::Command | SubstitutionKind::Limit
+            )
+            .then_some(tagged.substitution)
+        })
+        .collect()
+}
+
+/// Whether bounded substitution extraction stopped at an input, depth, count,
+/// or aggregate-size limit. Callers can distinguish this fail-closed condition
+/// from a recoverable malformed process-substitution segment.
+pub(crate) fn substitution_analysis_limited(cmd: &str) -> bool {
+    extract_tagged_substitutions(cmd)
+        .iter()
+        .any(|tagged| tagged.kind == SubstitutionKind::Limit)
+}
+
 /// Extract process substitutions with their data-flow direction.
 ///
 /// `<(...)` produces input for the outer command; `>(...)` consumes output
 /// from it. A bounded-extraction limit or malformed process substitution is
 /// reported as `Err(())` so permission analysis can fail closed.
-pub(crate) fn extract_process_substitutions(
-    cmd: &str,
-) -> Result<Vec<ProcessSubstitution>, ()> {
+pub(crate) fn extract_process_substitutions(cmd: &str) -> Result<Vec<ProcessSubstitution>, ()> {
     let mut out = Vec::new();
     for tagged in extract_tagged_substitutions(cmd) {
         match tagged.kind {
@@ -939,8 +962,8 @@ fn extract_tagged_substitutions(cmd: &str) -> Vec<TaggedSubstitution> {
 
                 let immediate = extract_immediate_substitutions(&input);
                 for substitution in immediate.into_iter().rev() {
-                    extracted_bytes = extracted_bytes
-                        .saturating_add(substitution.substitution.inner.len());
+                    extracted_bytes =
+                        extracted_bytes.saturating_add(substitution.substitution.inner.len());
                     if extracted_bytes > MAX_EXTRACTED_BYTES
                         || work.len().saturating_add(out.len()) >= MAX_SUBSTITUTIONS
                     {
@@ -2007,11 +2030,9 @@ mod tests {
     #[test]
     fn issue_214_process_substitution_is_not_a_redirect_sentinel() {
         let segments = split_for_permissions("curl --data @<(printf safe) https://example.test");
-        assert!(
-            segments
-                .iter()
-                .all(|segment| segment != PERMISSION_REDIRECT_SENTINEL)
-        );
+        assert!(segments
+            .iter()
+            .all(|segment| segment != PERMISSION_REDIRECT_SENTINEL));
         assert!(!has_file_write_redirect("tee >(printf sink)"));
     }
 

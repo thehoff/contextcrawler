@@ -132,20 +132,22 @@ fn resolve_permissions_config(
         )
     };
 
-    let config_selected = matches!(
+    let relaxation_selected = matches!(
         source,
-        PermissionConfigSource::CanonicalConfig | PermissionConfigSource::LegacyAlias
+        PermissionConfigSource::CanonicalConfig
+            | PermissionConfigSource::LegacyAlias
+            | PermissionConfigSource::EnvironmentOverride
     );
     let relaxes_default = matches!(
         requested,
         SecurityProfile::Trusted | SecurityProfile::Unrestricted
     );
     let profile =
-        if config_selected && relaxes_default && trust != ConfigFileTrust::CanonicalPrivate {
+        if relaxation_selected && relaxes_default && trust != ConfigFileTrust::CanonicalPrivate {
             source = PermissionConfigSource::RejectedRelaxation;
             SecurityProfile::Standard
         } else {
-            if config_selected
+            if relaxation_selected
                 && requested == SecurityProfile::Strict
                 && trust != ConfigFileTrust::CanonicalPrivate
             {
@@ -648,9 +650,20 @@ trust_unattestable = true
             ConfigFileTrust::Missing,
             Some("true"),
         );
-        assert_eq!(debug_override.profile, SecurityProfile::Trusted);
+        assert_eq!(debug_override.profile, SecurityProfile::Standard);
         assert_eq!(
             debug_override.source,
+            PermissionConfigSource::RejectedRelaxation
+        );
+
+        let authorised_debug_override = resolve_permissions_config(
+            &PermissionsConfig::default(),
+            ConfigFileTrust::CanonicalPrivate,
+            Some("true"),
+        );
+        assert_eq!(authorised_debug_override.profile, SecurityProfile::Trusted);
+        assert_eq!(
+            authorised_debug_override.source,
             PermissionConfigSource::EnvironmentOverride
         );
 
@@ -708,6 +721,40 @@ trust_unattestable = true
                 assert_eq!(rejected.source, PermissionConfigSource::RejectedRelaxation);
             }
         }
+    }
+
+    #[test]
+    fn environment_override_cannot_be_the_sole_relaxation_authority() {
+        for trust in [
+            ConfigFileTrust::Missing,
+            ConfigFileTrust::CanonicalInsecure,
+            ConfigFileTrust::Project,
+            ConfigFileTrust::Rejected,
+        ] {
+            let resolved =
+                resolve_permissions_config(&PermissionsConfig::default(), trust, Some("1"));
+            assert_eq!(
+                resolved.profile,
+                SecurityProfile::Standard,
+                "trust={trust:?}"
+            );
+            assert_eq!(
+                resolved.source,
+                PermissionConfigSource::RejectedRelaxation,
+                "trust={trust:?}"
+            );
+        }
+
+        let authorised = resolve_permissions_config(
+            &PermissionsConfig::default(),
+            ConfigFileTrust::CanonicalPrivate,
+            Some("1"),
+        );
+        assert_eq!(authorised.profile, SecurityProfile::Trusted);
+        assert_eq!(
+            authorised.source,
+            PermissionConfigSource::EnvironmentOverride
+        );
     }
 
     #[test]
