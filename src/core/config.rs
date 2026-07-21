@@ -9,8 +9,199 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::path::PathBuf;
 
+/// Permission-gate policy selected by the canonical user configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityProfile {
+    Strict,
+    #[default]
+    Standard,
+    Trusted,
+    Unrestricted,
+}
+
+impl SecurityProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Standard => "standard",
+            Self::Trusted => "trusted",
+            Self::Unrestricted => "unrestricted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ExfilAction {
+    #[default]
+    Ask,
+    Deny,
+}
+
+impl ExfilAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PermissionsConfig {
+    /// `None` means use the product default (`standard`). Keeping absence
+    /// distinct lets the deprecated boolean alias be recognised reliably.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<SecurityProfile>,
+    #[serde(default)]
+    pub exfil_action: ExfilAction,
+    /// Deprecated compatibility alias. Applied only when `profile` is absent.
+    #[serde(default)]
+    pub trust_unattestable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFileTrust {
+    Missing,
+    CanonicalPrivate,
+    CanonicalInsecure,
+    Project,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionConfigSource {
+    Default,
+    CanonicalConfig,
+    LegacyAlias,
+    EnvironmentOverride,
+    TighteningOverride,
+    RejectedRelaxation,
+    FailClosed,
+}
+
+impl PermissionConfigSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::CanonicalConfig => "canonical-config",
+            Self::LegacyAlias => "legacy-alias",
+            Self::EnvironmentOverride => "environment-debug-override",
+            Self::TighteningOverride => "untrusted-source-tightening",
+            Self::RejectedRelaxation => "rejected-relaxation",
+            Self::FailClosed => "fail-closed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectivePermissions {
+    pub profile: SecurityProfile,
+    pub exfil_action: ExfilAction,
+    pub source: PermissionConfigSource,
+    pub warn_legacy_alias: bool,
+    pub config_path: Option<PathBuf>,
+    pub ownership: String,
+}
+
+fn resolve_permissions_config(
+    permissions: &PermissionsConfig,
+    trust: ConfigFileTrust,
+    env_override: Option<&str>,
+) -> EffectivePermissions {
+    let (requested, mut source, warn_legacy_alias) = if let Some(profile) = permissions.profile {
+        (profile, PermissionConfigSource::CanonicalConfig, false)
+    } else if permissions.trust_unattestable {
+        (
+            SecurityProfile::Trusted,
+            PermissionConfigSource::LegacyAlias,
+            true,
+        )
+    } else if matches!(env_override, Some("1") | Some("true")) {
+        (
+            SecurityProfile::Trusted,
+            PermissionConfigSource::EnvironmentOverride,
+            false,
+        )
+    } else {
+        (
+            SecurityProfile::Standard,
+            PermissionConfigSource::Default,
+            false,
+        )
+    };
+
+    let config_selected = matches!(
+        source,
+        PermissionConfigSource::CanonicalConfig | PermissionConfigSource::LegacyAlias
+    );
+    let relaxes_default = matches!(
+        requested,
+        SecurityProfile::Trusted | SecurityProfile::Unrestricted
+    );
+    let profile =
+        if config_selected && relaxes_default && trust != ConfigFileTrust::CanonicalPrivate {
+            source = PermissionConfigSource::RejectedRelaxation;
+            SecurityProfile::Standard
+        } else {
+            if config_selected
+                && requested == SecurityProfile::Strict
+                && trust != ConfigFileTrust::CanonicalPrivate
+            {
+                source = PermissionConfigSource::TighteningOverride;
+            }
+            requested
+        };
+
+    EffectivePermissions {
+        profile,
+        exfil_action: permissions.exfil_action,
+        source,
+        warn_legacy_alias: warn_legacy_alias && profile == SecurityProfile::Trusted,
+        config_path: None,
+        ownership: "not-inspected".to_string(),
+    }
+}
+
+#[derive(Debug)]
+struct LoadedConfig {
+    config: Config,
+    path: PathBuf,
+    trust: ConfigFileTrust,
+    ownership: String,
+}
+
+/// Resolve the effective permission policy. Parse/read failures fail closed to
+/// `strict`; an absent config uses the product default (`standard`).
+pub fn effective_permissions() -> EffectivePermissions {
+    let env_override = std::env::var("CONTEXTCRAWLER_TRUST_UNATTESTABLE").ok();
+    match Config::load_with_source() {
+        Ok(loaded) => {
+            let mut effective = resolve_permissions_config(
+                &loaded.config.permissions,
+                loaded.trust,
+                env_override.as_deref(),
+            );
+            effective.config_path = Some(loaded.path);
+            effective.ownership = loaded.ownership;
+            effective
+        }
+        Err(error) => EffectivePermissions {
+            profile: SecurityProfile::Strict,
+            exfil_action: ExfilAction::Ask,
+            source: PermissionConfigSource::FailClosed,
+            warn_legacy_alias: false,
+            config_path: get_config_path().ok(),
+            ownership: format!("unavailable: {error:#}"),
+        },
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
     #[serde(default)]
     pub tracking: TrackingConfig,
     #[serde(default)]
@@ -204,6 +395,10 @@ pub fn read() -> ReadConfig {
 
 impl Config {
     pub fn load() -> Result<Self> {
+        Ok(Self::load_with_source()?.config)
+    }
+
+    fn load_with_source() -> Result<LoadedConfig> {
         let path = get_config_path()?;
 
         if path.exists() {
@@ -211,19 +406,34 @@ impl Config {
             // config (symlink / foreign-owner / world-writable, e.g. via a
             // hostile XDG_CONFIG_HOME) is ignored — safe defaults rather than
             // attacker-controlled hook policy.
-            match read_trusted_config(&path) {
-                Some(content) => Ok(toml::from_str(&content)?),
+            match read_trusted_config_details(&path) {
+                Some(read) => Ok(LoadedConfig {
+                    config: toml::from_str(&read.content)?,
+                    path,
+                    trust: read.trust,
+                    ownership: read.ownership,
+                }),
                 None => {
                     eprintln!(
                         "[contextcrawler] WARNING: config at {} is not a trusted, readable file \
                          (symlink, foreign owner, or group/world-writable); using defaults",
                         path.display()
                     );
-                    Ok(Config::default())
+                    Ok(LoadedConfig {
+                        config: Config::default(),
+                        path,
+                        trust: ConfigFileTrust::Rejected,
+                        ownership: "rejected: symlink, owner, mode, or file type".to_string(),
+                    })
                 }
             }
         } else {
-            Ok(Config::default())
+            Ok(LoadedConfig {
+                config: Config::default(),
+                path,
+                trust: ConfigFileTrust::Missing,
+                ownership: "absent".to_string(),
+            })
         }
     }
 
@@ -240,10 +450,16 @@ impl Config {
     }
 
     pub fn create_default() -> Result<PathBuf> {
-        let config = Config::default();
+        let config = default_file_config();
         config.save()?;
         get_config_path()
     }
+}
+
+fn default_file_config() -> Config {
+    let mut config = Config::default();
+    config.permissions.profile = Some(SecurityProfile::Standard);
+    config
 }
 
 fn get_config_path() -> Result<PathBuf> {
@@ -257,6 +473,13 @@ fn get_config_path() -> Result<PathBuf> {
     Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
 }
 
+#[derive(Debug)]
+struct TrustedConfigRead {
+    content: String,
+    trust: ConfigFileTrust,
+    ownership: String,
+}
+
 /// #222: read a config file ONLY if it is trusted, validating and reading the
 /// SAME open descriptor to avoid a TOCTOU (council HIGH). A hostile environment
 /// can point `XDG_CONFIG_HOME` at an attacker-owned directory or commit a
@@ -266,7 +489,12 @@ fn get_config_path() -> Result<PathBuf> {
 /// the fd is fstat-validated (regular file, user-owned, not group/world
 /// writable) and the content read from that fd — no path re-resolution between
 /// check and read. `None` = don't trust / can't read (fail closed).
+#[cfg(test)]
 fn read_trusted_config(path: &Path) -> Option<String> {
+    read_trusted_config_details(path).map(|read| read.content)
+}
+
+fn read_trusted_config_details(path: &Path) -> Option<TrustedConfigRead> {
     use std::io::Read;
     // Non-unix (Windows): no `O_NOFOLLOW` and no fd owner/mode check, so this
     // pre-check→open is not fully atomic and can be raced (council #222, codex).
@@ -310,7 +538,52 @@ fn read_trusted_config(path: &Path) -> Option<String> {
     }
     let mut content = String::new();
     file.read_to_string(&mut content).ok()?;
-    Some(content)
+
+    #[cfg(unix)]
+    let (trust, ownership) = {
+        use std::os::unix::fs::MetadataExt;
+        let mode = meta.mode() & 0o777;
+        let uid = meta.uid();
+        let our_uid = unsafe { libc::geteuid() };
+        let project_local = path_is_project_local(path);
+        let trust = if uid == our_uid && mode == 0o600 && !project_local {
+            ConfigFileTrust::CanonicalPrivate
+        } else if project_local {
+            ConfigFileTrust::Project
+        } else {
+            ConfigFileTrust::CanonicalInsecure
+        };
+        (
+            trust,
+            format!("uid={uid}, mode={mode:04o}, project_local={project_local}"),
+        )
+    };
+
+    #[cfg(not(unix))]
+    let (trust, ownership) = (
+        ConfigFileTrust::CanonicalInsecure,
+        "ownership verification unavailable on this platform".to_string(),
+    );
+
+    Some(TrustedConfigRead {
+        content,
+        trust,
+        ownership,
+    })
+}
+
+fn path_is_project_local(path: &Path) -> bool {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let Some(cwd) = std::env::current_dir().ok() else {
+        return false;
+    };
+    if resolved.starts_with(&cwd) {
+        return true;
+    }
+
+    cwd.ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .is_some_and(|project_root| resolved.starts_with(project_root))
 }
 
 pub fn show_config() -> Result<()> {
@@ -324,7 +597,7 @@ pub fn show_config() -> Result<()> {
     } else {
         println!("(default config, file not created)");
         println!();
-        let config = Config::default();
+        let config = default_file_config();
         println!("{}", toml::to_string_pretty(&config)?);
     }
 
@@ -334,6 +607,108 @@ pub fn show_config() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permissions_config_parses_profile_action_and_legacy_alias() {
+        let config: Config = toml::from_str(
+            r#"
+[permissions]
+profile = "trusted"
+exfil_action = "deny"
+trust_unattestable = true
+"#,
+        )
+        .expect("valid permissions config");
+
+        assert_eq!(config.permissions.profile, Some(SecurityProfile::Trusted));
+        assert_eq!(config.permissions.exfil_action, ExfilAction::Deny);
+        assert!(config.permissions.trust_unattestable);
+    }
+
+    #[test]
+    fn generated_default_config_materializes_standard_profile() {
+        let config = default_file_config();
+        assert_eq!(config.permissions.profile, Some(SecurityProfile::Standard));
+        let serialized = toml::to_string_pretty(&config).expect("serialize default config");
+        assert!(serialized.contains("profile = \"standard\""));
+    }
+
+    #[test]
+    fn permissions_resolution_is_standard_by_default_and_config_authoritative() {
+        let baseline = resolve_permissions_config(
+            &PermissionsConfig::default(),
+            ConfigFileTrust::Missing,
+            None,
+        );
+        assert_eq!(baseline.profile, SecurityProfile::Standard);
+        assert_eq!(baseline.source, PermissionConfigSource::Default);
+
+        let debug_override = resolve_permissions_config(
+            &PermissionsConfig::default(),
+            ConfigFileTrust::Missing,
+            Some("true"),
+        );
+        assert_eq!(debug_override.profile, SecurityProfile::Trusted);
+        assert_eq!(
+            debug_override.source,
+            PermissionConfigSource::EnvironmentOverride
+        );
+
+        let explicit = PermissionsConfig {
+            profile: Some(SecurityProfile::Strict),
+            trust_unattestable: true,
+            ..PermissionsConfig::default()
+        };
+        let resolved =
+            resolve_permissions_config(&explicit, ConfigFileTrust::CanonicalPrivate, Some("true"));
+        assert_eq!(resolved.profile, SecurityProfile::Strict);
+        assert_eq!(resolved.source, PermissionConfigSource::CanonicalConfig);
+    }
+
+    #[test]
+    fn legacy_alias_maps_to_trusted_but_untrusted_sources_cannot_relax() {
+        let legacy = PermissionsConfig {
+            trust_unattestable: true,
+            ..PermissionsConfig::default()
+        };
+        let private = resolve_permissions_config(&legacy, ConfigFileTrust::CanonicalPrivate, None);
+        assert_eq!(private.profile, SecurityProfile::Trusted);
+        assert_eq!(private.source, PermissionConfigSource::LegacyAlias);
+        assert!(private.warn_legacy_alias);
+
+        let project = resolve_permissions_config(&legacy, ConfigFileTrust::Project, None);
+        assert_eq!(project.profile, SecurityProfile::Standard);
+        assert_eq!(project.source, PermissionConfigSource::RejectedRelaxation);
+
+        let tighten = PermissionsConfig {
+            profile: Some(SecurityProfile::Strict),
+            exfil_action: ExfilAction::Deny,
+            ..PermissionsConfig::default()
+        };
+        let project = resolve_permissions_config(&tighten, ConfigFileTrust::Project, None);
+        assert_eq!(project.profile, SecurityProfile::Strict);
+        assert_eq!(project.exfil_action, ExfilAction::Deny);
+    }
+
+    #[test]
+    fn only_private_canonical_config_can_select_relaxed_profiles() {
+        for profile in [SecurityProfile::Trusted, SecurityProfile::Unrestricted] {
+            let requested = PermissionsConfig {
+                profile: Some(profile),
+                ..PermissionsConfig::default()
+            };
+            let accepted =
+                resolve_permissions_config(&requested, ConfigFileTrust::CanonicalPrivate, None);
+            assert_eq!(accepted.profile, profile);
+            assert_eq!(accepted.source, PermissionConfigSource::CanonicalConfig);
+
+            for trust in [ConfigFileTrust::CanonicalInsecure, ConfigFileTrust::Project] {
+                let rejected = resolve_permissions_config(&requested, trust, None);
+                assert_eq!(rejected.profile, SecurityProfile::Standard);
+                assert_eq!(rejected.source, PermissionConfigSource::RejectedRelaxation);
+            }
+        }
+    }
 
     #[test]
     #[cfg(unix)]
@@ -348,6 +723,18 @@ mod tests {
             read_trusted_config(&good).as_deref(),
             Some("[hooks]\n"),
             "0600 user-owned file is trusted and read"
+        );
+        assert_eq!(
+            read_trusted_config_details(&good).map(|read| read.trust),
+            Some(ConfigFileTrust::CanonicalPrivate)
+        );
+
+        // 0644 remains readable for non-security settings, but cannot opt the
+        // permission gate into Trusted/Unrestricted.
+        std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            read_trusted_config_details(&good).map(|read| read.trust),
+            Some(ConfigFileTrust::CanonicalInsecure)
         );
 
         // World-writable → untrusted → None.
@@ -367,6 +754,12 @@ mod tests {
             "symlinked config must be rejected"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repository_paths_are_never_relaxation_sources() {
+        let repo_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        assert!(path_is_project_local(&repo_config));
     }
 
     #[test]

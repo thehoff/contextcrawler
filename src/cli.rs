@@ -733,6 +733,9 @@ pub(crate) enum Commands {
 
     /// Tirith defense-in-depth gate status + recent downgrade events
     Security {
+        /// Explain the effective permission profile and policy dispositions
+        #[arg(long, conflicts_with_all = ["all", "scrub_logs"])]
+        explain: bool,
         /// Show all logged downgrade events, not just the last 10
         #[arg(long)]
         all: bool,
@@ -4442,6 +4445,7 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Security {
+            explain,
             all,
             json,
             scrub_logs,
@@ -4449,6 +4453,8 @@ fn run_cli() -> Result<i32> {
         } => {
             if scrub_logs {
                 hooks::tirith_gate::run_scrub_logs(dry_run)?
+            } else if explain {
+                hooks::tirith_gate::run_security_explain(json)?
             } else {
                 hooks::tirith_gate::run_security_dashboard(all, json)?
             }
@@ -4521,6 +4527,30 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::cell::Cell;
+
+    #[test]
+    fn security_explain_parses_as_a_distinct_read_only_surface() {
+        let cli = Cli::try_parse_from(["contextcrawler", "security", "--explain", "--json"])
+            .expect("security --explain should parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Security {
+                explain: true,
+                json: true,
+                all: false,
+                scrub_logs: false,
+                dry_run: false,
+            }
+        ));
+
+        assert!(Cli::try_parse_from([
+            "contextcrawler",
+            "security",
+            "--explain",
+            "--scrub-logs",
+        ])
+        .is_err());
+    }
 
     #[test]
     fn test_is_foreign_command_distinguishes_unknown_from_bad_args() {
