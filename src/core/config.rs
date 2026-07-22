@@ -441,14 +441,8 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let path = get_config_path()?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
-        Ok(())
+        write_private_config(&path, content.as_bytes())
     }
 
     pub fn create_default() -> Result<PathBuf> {
@@ -458,6 +452,52 @@ impl Config {
     }
 }
 
+/// Atomically replace the canonical config without following an existing
+/// final-component symlink. `NamedTempFile` creates the temporary entry with
+/// create-new/O_EXCL semantics; persisting it renames over the directory entry
+/// itself, so an attacker-controlled symlink is replaced rather than followed.
+/// The mode is fixed before publication so readers never observe a permissive
+/// freshly-written config.
+fn write_private_config(path: &Path, content: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .context("config path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create temporary config in {}", parent.display()))?;
+    temporary
+        .write_all(content)
+        .with_context(|| format!("failed to write temporary config for {}", path.display()))?;
+    temporary
+        .flush()
+        .with_context(|| format!("failed to flush temporary config for {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to set mode 0600 on {}", path.display()))?;
+    }
+    temporary
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("failed to sync temporary config for {}", path.display()))?;
+
+    let persisted = temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to atomically replace {}", path.display()))?;
+    persisted
+        .sync_all()
+        .with_context(|| format!("failed to sync config {}", path.display()))?;
+    Ok(())
+}
+
 fn default_file_config() -> Config {
     let mut config = Config::default();
     config.permissions.profile = Some(SecurityProfile::Standard);
@@ -465,6 +505,11 @@ fn default_file_config() -> Config {
 }
 
 fn get_config_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_CONFIG_PATH.with(|slot| slot.borrow().clone()) {
+        return Ok(path);
+    }
+
     // #222: NEVER fall back to the current directory. Config controls
     // security-relevant behaviour (hooks.exclude_commands disables the proxy
     // for those commands; transparent_prefixes), so reading `./ctxcrl/config.toml`
@@ -473,6 +518,12 @@ fn get_config_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir()
         .context("cannot determine a user config directory; refusing to read config from the current directory")?;
     Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_PATH: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Debug)]
@@ -498,6 +549,8 @@ fn read_trusted_config(path: &Path) -> Option<String> {
 
 fn read_trusted_config_details(path: &Path) -> Option<TrustedConfigRead> {
     use std::io::Read;
+    #[cfg(unix)]
+    let project_local_before_open = path_is_project_local(path);
     // Non-unix (Windows): no `O_NOFOLLOW` and no fd owner/mode check, so this
     // pre-check→open is not fully atomic and can be raced (council #222, codex).
     // Accepted residual, same call as #221: unix (Linux + macOS, the deployment
@@ -547,7 +600,10 @@ fn read_trusted_config_details(path: &Path) -> Option<TrustedConfigRead> {
         let mode = meta.mode() & 0o777;
         let uid = meta.uid();
         let our_uid = unsafe { libc::geteuid() };
-        let project_local = path_is_project_local(path);
+        // Classify both before and after the descriptor read. Either view
+        // being project-local is enough to reject relaxation; a path race may
+        // tighten policy, never loosen it.
+        let project_local = project_local_before_open || path_is_project_local(path);
         let trust = if uid == our_uid && mode == 0o600 && !project_local {
             ConfigFileTrust::CanonicalPrivate
         } else if project_local {
@@ -575,17 +631,41 @@ fn read_trusted_config_details(path: &Path) -> Option<TrustedConfigRead> {
 }
 
 fn path_is_project_local(path: &Path) -> bool {
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let Some(cwd) = std::env::current_dir().ok() else {
+        return true;
+    };
+    path_is_project_local_from(path, &cwd)
+}
+
+fn path_is_project_local_from(path: &Path, cwd: &Path) -> bool {
+    let Some(canonical_cwd) = std::fs::canonicalize(cwd).ok() else {
+        return true;
+    };
+    let Some(project_root) = canonical_cwd
+        .ancestors()
+        .find(|ancestor| std::fs::symlink_metadata(ancestor.join(".git")).is_ok())
+    else {
         return false;
     };
-    if resolved.starts_with(&cwd) {
-        return true;
-    }
 
-    cwd.ancestors()
-        .find(|ancestor| ancestor.join(".git").exists())
-        .is_some_and(|project_root| resolved.starts_with(project_root))
+    // Do not canonicalize the final config component: a symlink located in a
+    // repository remains repository authority even when its target is a
+    // private file elsewhere. Canonicalize the parent once to handle symlinked
+    // cwd/HOME paths consistently, while retaining the lexical comparison so
+    // an in-repo parent symlink can only tighten policy.
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        canonical_cwd.join(path)
+    };
+    let Some(parent) = absolute.parent() else {
+        return true;
+    };
+    let Some(canonical_parent) = std::fs::canonicalize(parent).ok() else {
+        return true;
+    };
+
+    parent.starts_with(project_root) || canonical_parent.starts_with(project_root)
 }
 
 pub fn show_config() -> Result<()> {
@@ -610,6 +690,26 @@ pub fn show_config() -> Result<()> {
 mod tests {
     use super::*;
 
+    struct TestConfigPathGuard;
+
+    impl TestConfigPathGuard {
+        fn set(path: PathBuf) -> Self {
+            TEST_CONFIG_PATH.with(|slot| {
+                let previous = slot.replace(Some(path));
+                assert!(previous.is_none(), "test config path override already set");
+            });
+            Self
+        }
+    }
+
+    impl Drop for TestConfigPathGuard {
+        fn drop(&mut self) {
+            TEST_CONFIG_PATH.with(|slot| {
+                slot.replace(None);
+            });
+        }
+    }
+
     #[test]
     fn permissions_config_parses_profile_action_and_legacy_alias() {
         let config: Config = toml::from_str(
@@ -633,6 +733,42 @@ trust_unattestable = true
         assert_eq!(config.permissions.profile, Some(SecurityProfile::Standard));
         let serialized = toml::to_string_pretty(&config).expect("serialize default config");
         assert!(serialized.contains("profile = \"standard\""));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_replaces_symlinks_with_private_config_and_honours_trusted_profile() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("temporary config root");
+        let config_path = dir.path().join("contextcrawler/config.toml");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        let victim = dir.path().join("victim.toml");
+        std::fs::write(&victim, "victim must survive\n").expect("write symlink target");
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600))
+            .expect("make target private");
+        std::os::unix::fs::symlink(&victim, &config_path).expect("plant config symlink");
+        let _path_guard = TestConfigPathGuard::set(config_path.clone());
+
+        let mut config = Config::default();
+        config.permissions.profile = Some(SecurityProfile::Trusted);
+        config.save().expect("save private config");
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("read untouched target"),
+            "victim must survive\n",
+            "save followed an attacker-controlled symlink"
+        );
+        let metadata = std::fs::symlink_metadata(&config_path).expect("saved config metadata");
+        assert!(metadata.is_file(), "save did not publish a regular file");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+        let loaded = Config::load_with_source().expect("load saved config");
+        assert_eq!(loaded.trust, ConfigFileTrust::CanonicalPrivate);
+        let effective = resolve_permissions_config(&loaded.config.permissions, loaded.trust, None);
+        assert_eq!(effective.profile, SecurityProfile::Trusted);
+        assert_eq!(effective.source, PermissionConfigSource::CanonicalConfig);
     }
 
     #[test]
@@ -807,6 +943,50 @@ trust_unattestable = true
     fn repository_paths_are_never_relaxation_sources() {
         let repo_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
         assert!(path_is_project_local(&repo_config));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_repository_config_can_only_tighten_policy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("temporary authority roots");
+        let repo = dir.path().join("repo");
+        let repo_config_dir = repo.join(".contextcrawler");
+        std::fs::create_dir_all(repo.join(".git")).expect("create fake git metadata");
+        std::fs::create_dir_all(&repo_config_dir).expect("create repo config directory");
+
+        let private = dir.path().join("private-config.toml");
+        std::fs::write(&private, "[permissions]\nprofile = \"trusted\"\n")
+            .expect("write private target");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600))
+            .expect("make target private");
+        let link = repo_config_dir.join("config.toml");
+        std::os::unix::fs::symlink(&private, &link).expect("link repo config to private file");
+
+        assert!(path_is_project_local_from(&link, &repo));
+        assert!(
+            read_trusted_config_details(&link).is_none(),
+            "the final-component O_NOFOLLOW check must reject the symlink"
+        );
+        let requested = PermissionsConfig {
+            profile: Some(SecurityProfile::Trusted),
+            ..PermissionsConfig::default()
+        };
+        let effective = resolve_permissions_config(&requested, ConfigFileTrust::Project, None);
+        assert_eq!(effective.profile, SecurityProfile::Standard);
+        assert_eq!(effective.source, PermissionConfigSource::RejectedRelaxation);
+
+        let real_home = dir.path().join("real-home");
+        let real_config_parent = real_home.join(".config/contextcrawler");
+        std::fs::create_dir_all(&real_config_parent).expect("create canonical home config parent");
+        let home_link = dir.path().join("home-link");
+        std::os::unix::fs::symlink(&real_home, &home_link).expect("create HOME symlink");
+        let home_config = home_link.join(".config/contextcrawler/config.toml");
+        assert!(
+            !path_is_project_local_from(&home_config, &repo),
+            "a canonical HOME config outside the repo was misclassified as project authority"
+        );
     }
 
     #[test]
