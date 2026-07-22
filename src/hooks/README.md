@@ -72,6 +72,22 @@ Deny > Ask > Allow (explicit) > Default (ask)
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
 
+Structural findings and permission rules are evaluated separately. Configure the structural policy in the canonical user config:
+
+```toml
+[permissions]
+profile = "standard"
+exfil_action = "ask"
+```
+
+`standard` is the default: benign redirects, heredocs, literal interpreter payloads, and known-safe substitutions no longer add an extra prompt. `strict` keeps the legacy prompt-on-unattestable behavior. `trusted` also relaxes parse ambiguity and dynamic words. `unrestricted` additionally relaxes exfil findings and therefore emits a persistent warning. Explicit deny and ask rules are never relaxed; exfil remains Ask (or Deny when `exfil_action = "deny"`) in Strict, Standard, and Trusted.
+
+Trusted and Unrestricted are accepted only from the canonical user-owned config file with mode `0600`. Project/repository config can tighten policy but cannot relax it. The deprecated `trust_unattestable = true` alias maps to Trusted with a startup warning; `CONTEXTCRAWLER_TRUST_UNATTESTABLE=1` remains a logged debug-only override when no profile is configured.
+
+Run `contextcrawler security --explain` to inspect the effective profile, exfil action, config source and ownership, Tirith status, forcing reasons, and recent profile-relaxed auto-allows. Relaxed allows are redacted and audited in `downgrades.jsonl`.
+
+Tirith is an independent opt-in defense-in-depth layer. A permission profile never enables or disables Tirith, and neither layer can override an explicit Deny.
+
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
 | Deny | `permissions.deny` rule matched | 2 | Passthrough — host tool handles denial |

