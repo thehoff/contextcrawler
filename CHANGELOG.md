@@ -3,6 +3,36 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.8] — 2026-07-22
+
+Permission-gate redesign (rtk#2286) — stop the ask-prompt flood without losing
+the exfil guard. Four review rounds (Codex-authored, council-gated, empirically
+verified end-to-end).
+
+### Changed
+- **Permission profiles.** New `[permissions] profile` in config.toml:
+  `strict` / `standard` (new default) / `trusted` / `unrestricted`, with
+  `exfil_action = "ask" | "deny"`. **Standard is the default**, so benign
+  constructs — file-write redirects, heredocs, `python3 -`/`bash -c`,
+  value-producer substitutions, `scp file host:`, `ssh host cmd | tail` — no
+  longer prompt for anyone, with no opt-in. Config is authoritative (read
+  straight off disk, so it works in every session type); the
+  `CONTEXTCRAWLER_TRUST_UNATTESTABLE` env var is a debug-only override and can
+  only relax from a canonical user-owned 0600 config. The legacy
+  `trust_unattestable = true` maps to `trusted` with a one-shot warning.
+
+### Fixed / hardened
+- **Exfil guard is now derived from a directional Clean/Tainted/Unknown taint
+  lattice** (not a single heuristic), and is never suppressed below
+  `unrestricted`. Covers reader→network flows through pipes, command and process
+  substitutions, wrappers (`env`, `xargs`, `sudo`, …), interpreters/`eval`, and
+  direct uploads (`curl -T`/`--upload-file`/`--data @`/`-F =@`, `wget`,
+  `scp`/`rsync`, `socat`), with secret-shaped/glob upload scoping (anchored, so
+  ordinary files like `report.pdf` don't prompt). `Unknown` fails closed to Ask.
+- Deny rules always win (including inside heredoc bodies); config saved 0600 via
+  no-follow atomic replace; audit of trust-relaxed decisions to `downgrades.jsonl`
+  with secret-path redaction; `contextcrawler security --explain`.
+
 ## [0.4.7] — 2026-07-14
 
 ### Fixed
