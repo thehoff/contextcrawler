@@ -2310,7 +2310,10 @@ fn grep_reads_pattern_file(args: &[String]) -> bool {
         argument
             .strip_prefix("--file=")
             .is_some_and(|pattern_file| pattern_file != "-")
-            || (argument.starts_with("-f") && argument.len() > 2)
+            // Attached form `-fFILE`, but NOT `-f-` (pattern read from stdin,
+            // not a local file) — council finding, avoids over-blocking
+            // `… | grep -f -`.
+            || (argument.starts_with("-f") && argument.len() > 2 && &argument[2..] != "-")
     })
 }
 
