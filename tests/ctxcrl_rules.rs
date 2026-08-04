@@ -208,3 +208,37 @@ fn ctx_005_rules_document_is_tracked_and_cites_every_enforced_rule() {
         "these rules claim ENFORCED but name no test:\n{enforced_without_test:#?}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CTX-005 (part 2) — the session-loaded summary must not drift from the law.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `CLAUDE.md` is what an agent actually reads at session start; `RULES.md` is
+/// the law. A rule that exists only in the law is a rule no session sees, and
+/// a rule listed only in the summary is one with no reasoning behind it.
+///
+/// This is the decay this whole system is meant to resist, so it is checked
+/// rather than trusted.
+#[test]
+fn ctx_005_claude_md_lists_exactly_the_ratified_rules() {
+    let rules = fs::read_to_string("docs/rules/RULES.md").expect("docs/rules/RULES.md");
+    let summary = fs::read_to_string("CLAUDE.md")
+        .expect("CLAUDE.md must exist and be tracked — .claude/ is gitignored");
+
+    // Rule IDs are declared by their `## CTX-NNN` heading in the law.
+    let mut declared: Vec<String> = rules
+        .lines()
+        .filter_map(|l| l.strip_prefix("## "))
+        .filter(|h| h.starts_with("CTX-"))
+        .map(|h| h.split_whitespace().next().unwrap_or_default().to_string())
+        .collect();
+    declared.sort();
+    declared.dedup();
+    assert!(!declared.is_empty(), "no CTX- rules found in docs/rules/RULES.md");
+
+    let missing: Vec<&String> = declared.iter().filter(|id| !summary.contains(*id)).collect();
+    assert!(
+        missing.is_empty(),
+        "ratified rules absent from CLAUDE.md, so no session will see them: {missing:?}"
+    );
+}
