@@ -315,7 +315,7 @@ Source: `src/cmds/system/`.
 |---|---|---|
 | `ls` | Compact tree-style listing. | Estimate 65%. |
 | `tree` | Proxies native `tree`, auto-excludes noise directories via `-I` unless `-a` is given. | Estimate 70%. |
-| `read <files>` | Reads source files with optional language-aware filtering (`--level none\|minimal\|aggressive`), `--max-lines` / `--tail-lines`, `--line-numbers`, `--intent "<terms>"` surgical extraction (scores heading-anchored sections, returns top matches plus head/tail bookends; only for files over 5 KB with 3+ sections), and `--force` to bypass repeat-read elimination. | Estimate 60%. Verified floor 60% (intent path 50 to 80%). |
+| `read <files>` | Reads source files with optional language-aware filtering (`--level none\|minimal\|aggressive`), `--max-lines` / `--tail-lines`, `--start-line` / `--end-line` (aliases `--start` / `--end`), `--line-numbers`, `--intent "<terms>"` surgical extraction (scores heading-anchored sections, returns top matches plus head/tail bookends; only for files over 5 KB with 3+ sections), and `--force` to bypass repeat-read elimination. | Estimate 60%. Verified floor 60% (intent path 50 to 80%). |
 | `cat`, `head`, `tail` | Mapped to `contextcrawler read`. `head -3 file`, `head -n 3 file`, `head --lines N file` and the `tail` equivalents are recognised. See coverage gaps below. | Estimate 60%. |
 | `grep`, `rg` | Groups matches by file instead of one line per match. | Estimate 75%. Verified floor 60%. |
 | `find` | Groups files by directory. | Estimate 70%. |
@@ -330,6 +330,21 @@ Source: `src/cmds/system/`.
 The conservative system utilities (`du`, `df`, `ps`, `systemctl status`, plus
 build/lint tools like `make`, `shellcheck`, `yamllint`, `markdownlint`,
 `hadolint`, `pre-commit`) sit at the 60 to 65% estimate band.
+
+### Explicit line ranges
+
+`read <file> --start-line A --end-line B` returns lines A to B, 1-indexed and
+inclusive — the same window as `sed -n 'A,Bp'`, which is the idiom it replaces.
+`--start` and `--end` are accepted as aliases.
+
+Either bound may be omitted: `--start 30` alone runs to end of file, `--end 20`
+alone starts at line 1. Bounds past the end of the file clamp, an inverted
+range returns nothing, and `--start 0` is treated as line 1. The file's
+trailing-newline state is preserved so the output is a faithful excerpt.
+
+A range conflicts with `--max-lines` and `--tail-lines`, and takes precedence
+over the large-file cap: a range is a bounded request the caller already sized,
+so capping it again would silently return less than was asked for.
 
 ### Repeat-read elimination
 

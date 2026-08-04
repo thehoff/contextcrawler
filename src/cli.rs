@@ -121,6 +121,14 @@ pub(crate) enum Commands {
         /// this file unchanged. See issue #236.
         #[arg(long)]
         force: bool,
+        /// First line to show (1-indexed, inclusive). Pairs with --end-line;
+        /// on its own it runs to end of file. `sed -n 'A,Bp'` semantics (#207).
+        #[arg(long, visible_alias = "start", conflicts_with_all = ["max_lines", "tail_lines"])]
+        start_line: Option<usize>,
+        /// Last line to show (1-indexed, inclusive). On its own it starts at
+        /// line 1.
+        #[arg(long, visible_alias = "end", conflicts_with_all = ["max_lines", "tail_lines"])]
+        end_line: Option<usize>,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -3213,7 +3221,15 @@ fn run_cli() -> Result<i32> {
             line_numbers,
             intent,
             force,
+            start_line,
+            end_line,
         } => {
+            let window = crate::cmds::system::read::LineWindow {
+                max_lines,
+                tail_lines,
+                start_line,
+                end_line,
+            };
             let mut had_error = false;
             let mut stdin_seen = false;
             let intent_ref = intent.as_deref();
@@ -3241,20 +3257,12 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(
-                        level,
-                        max_lines,
-                        tail_lines,
-                        line_numbers,
-                        intent_ref,
-                        cli.verbose,
-                    )
+                    read::run_stdin(level, window, line_numbers, intent_ref, cli.verbose)
                 } else {
                     read::run(
                         file,
                         level,
-                        max_lines,
-                        tail_lines,
+                        window,
                         line_numbers,
                         intent_ref,
                         force,

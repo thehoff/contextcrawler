@@ -134,6 +134,8 @@ pub struct RenderMode {
     pub line_numbers: bool,
     pub max_lines: Option<usize>,
     pub tail_lines: Option<usize>,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
     pub intent: Option<String>,
 }
 
@@ -149,6 +151,14 @@ impl RenderMode {
         }
         if let Some(n) = self.tail_lines {
             parts.push(format!("tail{n}"));
+        }
+        // #207: an explicit range is its own rendering — `--start 1 --end 20`
+        // must never be satisfied by a cached `--start 1 --end 200`.
+        if let Some(n) = self.start_line {
+            parts.push(format!("from{n}"));
+        }
+        if let Some(n) = self.end_line {
+            parts.push(format!("to{n}"));
         }
         if let Some(i) = &self.intent {
             // Hash rather than embed: intent strings are free text and can be
@@ -404,8 +414,40 @@ mod tests {
             line_numbers,
             max_lines,
             tail_lines,
+            start_line: None,
+            end_line: None,
             intent: intent.map(str::to_string),
         }
+    }
+
+    /// #207: an explicit range is its own rendering.
+    fn range_mode(start: Option<usize>, end: Option<usize>) -> RenderMode {
+        RenderMode {
+            start_line: start,
+            end_line: end,
+            ..mode(false, None, None, None)
+        }
+    }
+
+    #[test]
+    fn line_ranges_are_distinct_render_modes() {
+        let discriminators: Vec<String> = [
+            range_mode(None, None),
+            range_mode(Some(1), Some(20)),
+            range_mode(Some(1), Some(200)),
+            range_mode(Some(30), Some(60)),
+            range_mode(Some(1), None),
+            range_mode(None, Some(20)),
+        ]
+        .iter()
+        .map(|m| m.discriminator())
+        .collect();
+        let unique: std::collections::HashSet<&String> = discriminators.iter().collect();
+        assert_eq!(
+            unique.len(),
+            discriminators.len(),
+            "a narrower range must never be satisfied by a wider cached one: {discriminators:?}"
+        );
     }
 
     #[test]

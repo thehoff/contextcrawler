@@ -17,8 +17,7 @@ const JSON_MAX_DEPTH: usize = 5;
 pub fn run(
     file: &Path,
     level: FilterLevel,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
+    window: LineWindow,
     line_numbers: bool,
     intent: Option<&str>,
     force: bool,
@@ -42,8 +41,7 @@ pub fn run(
         &content,
         force,
         line_numbers,
-        max_lines,
-        tail_lines,
+        &window,
         intent,
         &read_config,
     ) {
@@ -84,8 +82,7 @@ pub fn run(
             ext,
             lang,
             level,
-            max_lines,
-            tail_lines,
+            &window,
             &read_config,
             true,
             &display_path,
@@ -111,8 +108,7 @@ pub fn run(
 #[allow(clippy::too_many_arguments)]
 pub fn run_stdin(
     level: FilterLevel,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
+    window: LineWindow,
     line_numbers: bool,
     intent: Option<&str>,
     verbose: u8,
@@ -150,8 +146,7 @@ pub fn run_stdin(
             None,
             lang,
             level,
-            max_lines,
-            tail_lines,
+            &window,
             &read_config,
             // Apply the cap to stdin too. Piping a huge unrecognised file via
             // `cat … | ctxcrl read -` should give the same protection as reading
@@ -185,8 +180,7 @@ pub(crate) fn render_output(
     ext: Option<&str>,
     lang: Language,
     level: FilterLevel,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
+    window: &LineWindow,
     read_config: &config::ReadConfig,
     allow_unknown_cap: bool,
     display_path: &str,
@@ -220,29 +214,34 @@ pub(crate) fn render_output(
         );
     }
 
-    if should_apply_unknown_extension_cap(
-        ext,
-        &lang,
-        max_lines,
-        tail_lines,
-        input_tokens,
-        read_config,
-        allow_unknown_cap,
-    ) {
+    // An explicit range is a deliberate, bounded request — capping it again
+    // would silently shrink a window the caller already sized.
+    if !window.has_range()
+        && should_apply_unknown_extension_cap(
+            ext,
+            &lang,
+            window.max_lines,
+            window.tail_lines,
+            input_tokens,
+            read_config,
+            allow_unknown_cap,
+        )
+    {
         return apply_unknown_extension_cap(&filtered, input_tokens, read_config, display_path);
     }
 
-    apply_line_window(&filtered, max_lines, tail_lines, &lang)
+    apply_line_window(&filtered, window, &lang)
 }
 
 /// #236: decide whether this session has already been shown this exact file,
 /// returning the recovery marker if so — and recording the read if not.
 ///
-/// Restricted to plain whole-file reads. A windowed (`--max-lines`,
-/// `--tail-lines`), numbered or intent-scoped read renders something other
-/// than the file's full text, so a hash of the file alone would not describe
-/// what the agent actually received; treating those as "already seen" would
-/// withhold content the agent has never had.
+/// Keyed on the render mode as well as the path, so a repeat is only ever
+/// recognised as one when the earlier read produced the same text. A windowed
+/// (`--max-lines`, `--tail-lines`, `--start-line`/`--end-line`), numbered or
+/// intent-scoped read renders something other than the file's full text, so
+/// treating it as satisfied by a plain read would withhold content the agent
+/// has never had.
 ///
 /// Returns `None` — meaning emit in full — for every disabled, absent or
 /// changed case, so a failure anywhere in the cache degrades to today's
@@ -253,8 +252,7 @@ fn repeat_read_stub(
     content: &str,
     force: bool,
     line_numbers: bool,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
+    window: &LineWindow,
     intent: Option<&str>,
     read_config: &config::ReadConfig,
 ) -> Option<String> {
@@ -263,8 +261,10 @@ fn repeat_read_stub(
     }
     let mode = read_cache::RenderMode {
         line_numbers,
-        max_lines,
-        tail_lines,
+        max_lines: window.max_lines,
+        tail_lines: window.tail_lines,
+        start_line: window.start_line,
+        end_line: window.end_line,
         intent: intent.map(str::to_string),
     };
     let session = read_cache::session_id()?;
@@ -421,7 +421,62 @@ fn apply_unknown_extension_cap(
     output
 }
 
-fn apply_line_window(
+/// Which slice of a file to render.
+///
+/// Bundled rather than passed as four more positional arguments —
+/// `render_output` already carried ten, and the repo's own Rust patterns call
+/// for a struct past five optional fields.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LineWindow {
+    pub max_lines: Option<usize>,
+    pub tail_lines: Option<usize>,
+    /// 1-indexed, inclusive — `sed -n 'A,Bp'` semantics (#207).
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+}
+
+impl LineWindow {
+    /// True when an explicit range was requested.
+    fn has_range(&self) -> bool {
+        self.start_line.is_some() || self.end_line.is_some()
+    }
+}
+
+/// Take a 1-indexed, inclusive line range, `sed -n 'A,Bp'` style.
+///
+/// Either bound may be omitted: start-only runs to EOF, end-only starts at
+/// line 1. Bounds past EOF clamp; an inverted range yields nothing. `--start 0`
+/// is treated as line 1 — it is a user slip, not a reason to return an empty
+/// file. The file's trailing-newline state is preserved so the output is a
+/// faithful excerpt rather than a subtly reformatted one.
+fn apply_line_range(content: &str, start: Option<usize>, end: Option<usize>) -> String {
+    if start.is_none() && end.is_none() {
+        return content.to_string();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    // 1-indexed inclusive -> 0-indexed half-open.
+    let from = start.unwrap_or(1).max(1) - 1;
+    let to = end.map(|e| e.min(lines.len())).unwrap_or(lines.len());
+    if from >= to || from >= lines.len() {
+        return String::new();
+    }
+    let mut result = lines[from..to].join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+fn apply_line_window(content: &str, window: &LineWindow, lang: &Language) -> String {
+    // An explicit range is the most specific instruction available, so it wins
+    // over head/tail caps rather than compounding with them.
+    if window.has_range() {
+        return apply_line_range(content, window.start_line, window.end_line);
+    }
+    apply_line_window_caps(content, window.max_lines, window.tail_lines, lang)
+}
+
+fn apply_line_window_caps(
     content: &str,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
@@ -468,8 +523,7 @@ fn main() {{
         run(
             file.path(),
             FilterLevel::Minimal,
-            None,
-            None,
+            LineWindow::default(),
             false,
             None,
             false,
@@ -488,23 +542,93 @@ fn main() {{
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window_caps(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
         let input = "a\nb\nc\nd";
-        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        let output = apply_line_window_caps(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
     }
 
     #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
+        let output = apply_line_window_caps(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    // --- #207: explicit line ranges (`--start-line` / `--end-line`) ---
+    //
+    // Agents invoke `read <file> --start N --end M`. Those flags did not
+    // exist, so clap errored and the command fell back to raw passthrough —
+    // the whole file, unfiltered, at 0 savings. Erroring to raw is the worst
+    // possible outcome for a flag whose entire purpose is to read less.
+
+    fn range(input: &str, start: Option<usize>, end: Option<usize>) -> String {
+        apply_line_range(input, start, end)
+    }
+
+    #[test]
+    fn line_range_is_one_indexed_and_inclusive() {
+        // Matches `sed -n '2,3p'`, which is the idiom this replaces.
+        assert_eq!(range("a\nb\nc\nd\n", Some(2), Some(3)), "b\nc\n");
+    }
+
+    #[test]
+    fn line_range_start_only_runs_to_end_of_file() {
+        assert_eq!(range("a\nb\nc\nd\n", Some(3), None), "c\nd\n");
+    }
+
+    #[test]
+    fn line_range_end_only_starts_at_line_one() {
+        assert_eq!(range("a\nb\nc\nd\n", None, Some(2)), "a\nb\n");
+    }
+
+    #[test]
+    fn line_range_clamps_past_end_of_file() {
+        assert_eq!(range("a\nb\n", Some(2), Some(999)), "b\n");
+        assert_eq!(range("a\nb\n", Some(999), Some(1000)), "");
+    }
+
+    #[test]
+    fn line_range_start_zero_is_treated_as_line_one() {
+        // `--start 0` is a user slip, not a reason to return nothing.
+        assert_eq!(range("a\nb\nc\n", Some(0), Some(2)), "a\nb\n");
+    }
+
+    #[test]
+    fn line_range_inverted_returns_empty() {
+        assert_eq!(range("a\nb\nc\n", Some(3), Some(1)), "");
+    }
+
+    #[test]
+    fn line_range_preserves_missing_trailing_newline() {
+        assert_eq!(range("a\nb\nc", Some(2), Some(3)), "b\nc");
+    }
+
+    #[test]
+    fn line_range_takes_precedence_over_max_lines() {
+        // Both supplied should not happen (clap conflicts), but the window
+        // helper must still be deterministic rather than silently blending.
+        let window = LineWindow {
+            max_lines: Some(2),
+            start_line: Some(2),
+            end_line: Some(3),
+            ..LineWindow::default()
+        };
+        assert_eq!(
+            apply_line_window("a\nb\nc\nd\n", &window, &Language::Unknown),
+            "b\nc\n"
+        );
+    }
+
+    #[test]
+    fn no_range_leaves_content_untouched() {
+        assert_eq!(range("a\nb\n", None, None), "a\nb\n");
     }
 
     #[test]
@@ -528,8 +652,7 @@ fn main() {{
             Some("xcstrings"),
             Language::from_extension("xcstrings"),
             FilterLevel::None,
-            None,
-            None,
+            &LineWindow::default(),
             &read_config,
             true,
             "fixture.xcstrings",
@@ -575,8 +698,7 @@ fn main() {{
             Some("unknowntype"),
             Language::Unknown,
             FilterLevel::None,
-            None,
-            None,
+            &LineWindow::default(),
             &read_config,
             true,
             "fixture.unknowntype",
@@ -646,8 +768,7 @@ fn main() {{
             Some("svelte"),
             Language::Unknown,
             FilterLevel::None,
-            None,
-            None,
+            &LineWindow::default(),
             &read_config,
             true,
             "Component.svelte",
@@ -701,8 +822,7 @@ fn main() {{
             Some("md"),
             Language::Data,
             FilterLevel::None,
-            None,
-            None,
+            &LineWindow::default(),
             &cfg,
             true,
             "AGENTS.md",
@@ -733,8 +853,7 @@ fn main() {{
             Some("md"),
             Language::Data,
             FilterLevel::None,
-            None,
-            None,
+            &LineWindow::default(),
             &cfg,
             true,
             "small.md",
@@ -760,8 +879,7 @@ fn main() {{
                 Some(ext),
                 Language::Data,
                 FilterLevel::None,
-                None,
-                None,
+                &LineWindow::default(),
                 &cfg,
                 true,
                 &format!("data.{}", ext),
@@ -792,8 +910,7 @@ fn main() {{
             Some("md"),
             Language::Data,
             FilterLevel::None,
-            None,
-            None,
+            &LineWindow::default(),
             &cfg,
             true,
             "AGENTS.md",
@@ -824,8 +941,7 @@ fn main() {{
             None,
             Language::Unknown,
             FilterLevel::None,
-            None,
-            None,
+            &LineWindow::default(),
             &read_config,
             true,
             "(stdin)",
@@ -916,7 +1032,7 @@ fn main() {{
     // --- #236 repeat-read elimination, at the gate `run()` actually calls ---
 
     mod repeat_read {
-        use super::super::repeat_read_stub;
+        use super::super::{repeat_read_stub, LineWindow};
         use crate::cmds::system::read_cache::TestCacheEnv;
         use crate::core::config::ReadConfig;
         use std::io::Write;
@@ -937,7 +1053,15 @@ fn main() {{
             force: bool,
             cfg: &ReadConfig,
         ) -> Option<String> {
-            repeat_read_stub(path, content, force, false, None, None, None, cfg)
+            repeat_read_stub(
+                path,
+                content,
+                force,
+                false,
+                &LineWindow::default(),
+                None,
+                cfg,
+            )
         }
 
         #[test]
@@ -1013,19 +1137,57 @@ fn main() {{
             for (label, out) in [
                 (
                     "--max-lines",
-                    repeat_read_stub(&path, &content, false, false, Some(20), None, None, &cfg),
+                    repeat_read_stub(
+                        &path,
+                        &content,
+                        false,
+                        false,
+                        &LineWindow {
+                            max_lines: Some(20),
+                            ..LineWindow::default()
+                        },
+                        None,
+                        &cfg,
+                    ),
                 ),
                 (
                     "--tail-lines",
-                    repeat_read_stub(&path, &content, false, false, None, Some(20), None, &cfg),
+                    repeat_read_stub(
+                        &path,
+                        &content,
+                        false,
+                        false,
+                        &LineWindow {
+                            tail_lines: Some(20),
+                            ..LineWindow::default()
+                        },
+                        None,
+                        &cfg,
+                    ),
                 ),
                 (
                     "--intent",
-                    repeat_read_stub(&path, &content, false, false, None, None, Some("x"), &cfg),
+                    repeat_read_stub(
+                        &path,
+                        &content,
+                        false,
+                        false,
+                        &LineWindow::default(),
+                        Some("x"),
+                        &cfg,
+                    ),
                 ),
                 (
                     "--line-numbers",
-                    repeat_read_stub(&path, &content, false, true, None, None, None, &cfg),
+                    repeat_read_stub(
+                        &path,
+                        &content,
+                        false,
+                        true,
+                        &LineWindow::default(),
+                        None,
+                        &cfg,
+                    ),
                 ),
             ] {
                 assert!(
@@ -1046,9 +1208,25 @@ fn main() {{
             let content = std::fs::read_to_string(&path).expect("read");
             let cfg = ReadConfig::default();
 
-            let first = repeat_read_stub(&path, &content, false, true, None, None, None, &cfg);
+            let first = repeat_read_stub(
+                &path,
+                &content,
+                false,
+                true,
+                &LineWindow::default(),
+                None,
+                &cfg,
+            );
             assert!(first.is_none(), "first --line-numbers read emits in full");
-            let second = repeat_read_stub(&path, &content, false, true, None, None, None, &cfg);
+            let second = repeat_read_stub(
+                &path,
+                &content,
+                false,
+                true,
+                &LineWindow::default(),
+                None,
+                &cfg,
+            );
             assert!(
                 second.is_some(),
                 "a repeated --line-numbers read of unchanged content must be stubbed"
@@ -1063,15 +1241,48 @@ fn main() {{
             let content = std::fs::read_to_string(&path).expect("read");
             let cfg = ReadConfig::default();
 
-            repeat_read_stub(&path, &content, false, false, Some(20), None, None, &cfg);
+            repeat_read_stub(
+                &path,
+                &content,
+                false,
+                false,
+                &LineWindow {
+                    max_lines: Some(20),
+                    ..LineWindow::default()
+                },
+                None,
+                &cfg,
+            );
             assert!(
-                repeat_read_stub(&path, &content, false, false, Some(20), None, None, &cfg)
-                    .is_some(),
+                repeat_read_stub(
+                    &path,
+                    &content,
+                    false,
+                    false,
+                    &LineWindow {
+                        max_lines: Some(20),
+                        ..LineWindow::default()
+                    },
+                    None,
+                    &cfg
+                )
+                .is_some(),
                 "the same window repeated is a repeat"
             );
             assert!(
-                repeat_read_stub(&path, &content, false, false, Some(50), None, None, &cfg)
-                    .is_none(),
+                repeat_read_stub(
+                    &path,
+                    &content,
+                    false,
+                    false,
+                    &LineWindow {
+                        max_lines: Some(50),
+                        ..LineWindow::default()
+                    },
+                    None,
+                    &cfg
+                )
+                .is_none(),
                 "a wider window shows lines the agent has not seen"
             );
         }

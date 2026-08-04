@@ -74,8 +74,10 @@ fn uses_compact_status_path(args: &[String]) -> bool {
 
 fn is_machine_status_args(args: &[String]) -> bool {
     args.iter().any(|arg| {
-        matches!(arg.as_str(), "--porcelain" | "--porcelain=v1" | "--porcelain=v2" | "-z")
-            || arg.starts_with("--porcelain=")
+        matches!(
+            arg.as_str(),
+            "--porcelain" | "--porcelain=v1" | "--porcelain=v2" | "-z"
+        ) || arg.starts_with("--porcelain=")
     })
 }
 
@@ -426,8 +428,7 @@ fn run_show(
                         ext,
                         lang,
                         FilterLevel::Minimal,
-                        None,
-                        None,
+                        &crate::cmds::system::read::LineWindow::default(),
                         &read_config,
                         true,
                         path,
@@ -2221,7 +2222,10 @@ mod tests {
 
     #[test]
     fn commit_compact_line_plain_and_root_commit() {
-        assert_eq!(commit_compact_line(Some("[main abc1234] add thing")), "ok abc1234");
+        assert_eq!(
+            commit_compact_line(Some("[main abc1234] add thing")),
+            "ok abc1234"
+        );
         assert_eq!(
             commit_compact_line(Some("[main (root-commit) fb597ec] Initial commit")),
             "ok fb597ec"
@@ -2242,7 +2246,7 @@ mod tests {
         assert_eq!(commit_compact_line(None), "ok");
         assert_eq!(commit_compact_line(Some("")), "ok"); // no bracket
         assert_eq!(commit_compact_line(Some("[main short] msg")), "ok"); // hash < 7
-        // A bare multibyte hash-position token shorter than 7 bytes is still safe.
+                                                                         // A bare multibyte hash-position token shorter than 7 bytes is still safe.
         assert_eq!(commit_compact_line(Some("[主] x")), "ok");
     }
 
@@ -2708,8 +2712,7 @@ mod tests {
             Some("rs"),
             Language::Rust,
             FilterLevel::Minimal,
-            None,
-            None,
+            &crate::cmds::system::read::LineWindow::default(),
             &read_config,
             true,
             "src/main.rs",
