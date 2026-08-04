@@ -2492,13 +2492,11 @@ mod tests {
     fn test_track_records_inflation_for_inflating_filter() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("RTK_DB_PATH").ok();
-        // RTK_DB_PATH is confined to $HOME (G3 audit #111); a unique per-pid
-        // file keeps total_inflation_tokens() reading only this test's rows.
-        let tmp = dirs::home_dir()
-            .expect("home dir")
-            .join(format!("cc-track-inflation-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        std::env::set_var("RTK_DB_PATH", &tmp);
+        // RTK_DB_PATH is confined to $HOME (G3 audit #111); a private temp dir
+        // keeps total_inflation_tokens() reading only this test's rows, and
+        // takes the WAL sidecars with it on drop (#199).
+        let tmp = HomeTempDb::new("cc-track-inflation-");
+        std::env::set_var("RTK_DB_PATH", tmp.path());
 
         // Raw baseline tiny; filtered output much larger (streaming filter
         // that added framing it cannot un-print).
@@ -2534,7 +2532,8 @@ mod tests {
             "track() must record the real inflation overflow (#196)"
         );
 
-        let _ = std::fs::remove_file(&tmp);
+        drop(tracker);
+        drop(tmp);
         std::env::remove_var("RTK_DB_PATH");
         if let Some(v) = prior {
             std::env::set_var("RTK_DB_PATH", v);
@@ -2653,6 +2652,99 @@ mod tests {
     // Wide enough that a test's own record can't be pushed out of the result
     // set by parallel writers to the shared test DB.
     const TEST_RECENT_WINDOW: usize = 5000;
+
+    /// A SQLite test DB inside a self-deleting directory under `$HOME`.
+    ///
+    /// `RTK_DB_PATH` is confined to `$HOME` (#111 G3), so these DBs cannot use
+    /// `std::env::temp_dir()`. Putting the `.db` directly in `$HOME` and
+    /// unlinking only that file on teardown leaks the WAL sidecars (`-wal`,
+    /// `-shm`) on every run — 440 files had accumulated by 2026-08-04
+    /// (issue #199). Owning a *directory* means `TempDir`'s `Drop` takes the
+    /// DB and every sidecar with it, including when a test panics.
+    struct HomeTempDb {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    impl HomeTempDb {
+        fn new(prefix: &str) -> Self {
+            let home = dirs::home_dir().expect("home dir");
+            let dir = tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir_in(home)
+                .expect("create temp dir inside $HOME");
+            let path = dir.path().join("history.db");
+            Self { _dir: dir, path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    /// #199 regression: teardown must take the WAL sidecars with it, not just
+    /// the `.db`.
+    ///
+    /// SQLite deletes `-wal`/`-shm` itself when the last connection closes
+    /// cleanly, so the leak only shows up when a connection is still open at
+    /// teardown — a panicking test, or a `Tracker` held in a local that
+    /// outlives the file cleanup. This test reproduces that by tearing the
+    /// directory down while the tracker is still live, which is precisely the
+    /// case the old `remove_file(&db)` teardown could not cover.
+    #[test]
+    fn home_temp_db_leaves_no_sidecars_behind() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("RTK_DB_PATH").ok();
+
+        let tmp = HomeTempDb::new("cc-sidecar-probe-");
+        let db_path = tmp.path().to_path_buf();
+        let dir_path = db_path
+            .parent()
+            .expect("db sits inside its temp dir")
+            .to_path_buf();
+
+        std::env::set_var("RTK_DB_PATH", &db_path);
+        let tracker = Tracker::new().expect("tracker open");
+        tracker
+            .record("orig", &unique_marker("sidecar"), 100, 20, 5)
+            .expect("record");
+
+        // Precondition: WAL mode really is on and the sidecars exist while the
+        // connection is open, otherwise this test would pass for free.
+        let wal = PathBuf::from({
+            let mut s = db_path.clone().into_os_string();
+            s.push("-wal");
+            s
+        });
+        assert!(
+            wal.exists(),
+            "expected a -wal sidecar at {} — WAL mode may have failed to engage",
+            wal.display()
+        );
+
+        // Tear down with the connection still live. `TempDir::drop` removes the
+        // directory and everything in it; the old teardown unlinked the `.db`
+        // alone and left `-wal`/`-shm` in $HOME.
+        drop(tmp);
+
+        assert!(
+            !dir_path.exists(),
+            "temp dir survived drop, leaking into $HOME: {}",
+            dir_path.display()
+        );
+        for suffix in ["", "-wal", "-shm"] {
+            let mut s = db_path.clone().into_os_string();
+            s.push(suffix);
+            let leaked = PathBuf::from(s);
+            assert!(!leaked.exists(), "leaked into $HOME: {}", leaked.display());
+        }
+
+        drop(tracker);
+        match prior {
+            Some(v) => std::env::set_var("RTK_DB_PATH", v),
+            None => std::env::remove_var("RTK_DB_PATH"),
+        }
+    }
 
     /// RAII guard: pins `RTK_DB_PATH` to a private tempfile for the duration of
     /// a test, then restores the prior value (and deletes the tempfile).
@@ -3082,12 +3174,10 @@ mod tests {
         let prior = std::env::var("RTK_DB_PATH").ok();
 
         // RTK_DB_PATH is confined to $HOME (G3 audit #111) — keep the opt-in
-        // DB inside $HOME so get_db_path() resolves it unchanged.
-        let tmp = dirs::home_dir()
-            .expect("home dir")
-            .join(format!("contextcrawler-optin-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&tmp);
-        std::env::set_var("RTK_DB_PATH", &tmp);
+        // DB inside $HOME so get_db_path() resolves it unchanged. A private
+        // temp dir also takes the WAL sidecars with it on drop (#199).
+        let tmp = HomeTempDb::new("contextcrawler-optin-");
+        std::env::set_var("RTK_DB_PATH", tmp.path());
 
         // is_test_context() must return false under opt-in
         assert!(
@@ -3097,7 +3187,7 @@ mod tests {
 
         // And get_db_path resolves to that exact path
         let p = get_db_path().expect("get_db_path");
-        assert_eq!(p, tmp);
+        assert_eq!(p, tmp.path());
 
         // Round-trip a record through the opt-in DB.
         let tracker = Tracker::new().expect("tracker open");
@@ -3111,8 +3201,10 @@ mod tests {
             "opt-in record not persisted"
         );
 
-        // Cleanup
-        let _ = std::fs::remove_file(&tmp);
+        // Cleanup — dropping the tracker first lets SQLite checkpoint, and
+        // dropping the dir removes the DB plus any surviving sidecars (#199).
+        drop(tracker);
+        drop(tmp);
         std::env::remove_var("RTK_DB_PATH");
         if let Some(v) = prior {
             std::env::set_var("RTK_DB_PATH", v);

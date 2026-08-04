@@ -1663,17 +1663,17 @@ fn run_verify_at(
         BinaryHookStatus::RegisteredNoBaseline => {
             // #234 round-2 (TOFU): valid registration; record the baseline now
             // so subsequent verifications enforce it. Best-effort.
-            let recorded = store_binary_hook_identity_at(settings_path, identity_path).is_ok();
+            //
+            // Report the real reason rather than guessing at one. The common
+            // failure on a umask-002 machine is a group-writable `~/.claude`,
+            // which is not "not writable" — it is writable by too many people,
+            // and the fix is `chmod g-w`, not a permissions grant.
+            let outcome = match store_binary_hook_identity_at(settings_path, identity_path) {
+                Ok(()) => "install identity recorded".to_string(),
+                Err(error) => format!("identity not recorded: {}", error),
+            };
             println!("PASS  native binary hook registration verified");
-            println!(
-                "      {} ({})",
-                settings_path.display(),
-                if recorded {
-                    "install identity recorded"
-                } else {
-                    "identity not recorded (data dir not writable)"
-                }
-            );
+            println!("      {} ({})", settings_path.display(), outcome);
         }
         BinaryHookStatus::NotRegistered => {
             println!("SKIP  native binary hook not registered");
@@ -1823,10 +1823,20 @@ fn runtime_check_binary_hook_at(settings_path: &Path, identity_path: &Path) -> R
             // user knows tamper-detection is degraded (stderr only — stdout
             // carries the hook JSON protocol).
             if let Err(error) = store_binary_hook_identity_at(settings_path, identity_path) {
+                // `init --auto-patch` re-writes the registration; it cannot
+                // widen a permission or tighten a mode. When the cause is an
+                // unsafe (group- or world-writable) directory — the usual case
+                // on a umask-002 machine — the fix is chmod, so say so rather
+                // than sending the user round a loop that cannot help.
+                let remedy = if format!("{error}").contains("unsafe mode") {
+                    "tighten the offending path (e.g. `chmod g-w,o-w ~/.claude`)"
+                } else {
+                    "re-run `contextcrawler init -g --auto-patch`"
+                };
                 eprintln!(
                     "contextcrawler: could not record hook-registration baseline ({}); \
-                     tamper-detection is degraded until `contextcrawler init -g --auto-patch`.",
-                    error
+                     tamper-detection is degraded until you {}.",
+                    error, remedy
                 );
             }
         }
@@ -1871,9 +1881,63 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// A temp dir forced to a private (0700) mode, regardless of the ambient
+    /// umask.
+    ///
+    /// `TempDir::new()` inherits the umask, so on a umask-002 machine the
+    /// fixture lands at 0775. The integrity checks then correctly refuse to
+    /// trust a group-writable parent, and 21 tests across this module and
+    /// `init` failed for anyone whose umask is not 022. That is a portability
+    /// defect in the suite, not in the product: production treats a failed
+    /// baseline store as best-effort and surfaces it, it does not unwrap.
+    ///
+    /// Tests that specifically exercise the unsafe-mode rejection chmod the
+    /// directory themselves afterwards, so forcing a safe starting mode here
+    /// does not weaken them.
+    fn private_tempdir() -> TempDir {
+        normalise_test_umask();
+        let dir = TempDir::new().expect("create temp dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("tighten temp dir mode");
+        }
+        dir
+    }
+
+    /// Force a 022 umask for the test process.
+    ///
+    /// Tightening the temp *directory* is not enough: the fixture *files*
+    /// written inside it (`rtk-rewrite.sh`, `settings.json`) also inherit the
+    /// umask, landing at 0664 under umask 002, and the integrity checks reject
+    /// a group-writable hook script just as firmly as a group-writable parent.
+    /// There are ~90 such writes across this module and `init`, so normalising
+    /// the umask once is the honest fix rather than chmod-ing each site.
+    ///
+    /// Safe under the parallel test harness: every affected test calls
+    /// `private_tempdir()` before its own writes, and the umask only ever
+    /// moves 002 -> 022 and stays there.
+    ///
+    /// INVARIANT for future tests in this binary: once any test has called
+    /// `private_tempdir()`, the whole process runs at umask 022. Do not write a
+    /// test that asserts a file landed group-writable "because the ambient
+    /// umask is 002" — set the mode explicitly with `set_permissions` instead.
+    /// (Council/codex flagged this as a planted footgun; it is deliberate, and
+    /// this is the documentation of it.)
+    fn normalise_test_umask() {
+        #[cfg(unix)]
+        {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| unsafe {
+                libc::umask(0o022);
+            });
+        }
+    }
+
     #[test]
     fn test_compute_hash_deterministic() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let file = temp.path().join("test.sh");
         fs::write(&file, "#!/bin/bash\necho hello\n").unwrap();
 
@@ -1887,7 +1951,7 @@ mod tests {
 
     #[test]
     fn test_compute_hash_changes_on_modification() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let file = temp.path().join("test.sh");
 
         fs::write(&file, "original content").unwrap();
@@ -1901,7 +1965,7 @@ mod tests {
 
     #[test]
     fn test_store_and_verify_ok() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
 
@@ -1913,7 +1977,7 @@ mod tests {
 
     #[test]
     fn test_verify_detects_tampering() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho original\n").unwrap();
 
@@ -1935,7 +1999,7 @@ mod tests {
 
     #[test]
     fn test_verify_no_baseline() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
 
@@ -1946,7 +2010,7 @@ mod tests {
 
     #[test]
     fn test_verify_not_installed() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         // Don't create hook file
 
@@ -1956,7 +2020,7 @@ mod tests {
 
     #[test]
     fn test_verify_orphaned_hash() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
@@ -1973,7 +2037,7 @@ mod tests {
 
     #[test]
     fn test_store_hash_creates_sha256sum_format() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "test content").unwrap();
 
@@ -1993,7 +2057,7 @@ mod tests {
 
     #[test]
     fn test_store_hash_overwrites_existing() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
 
         fs::write(&hook, "version 1").unwrap();
@@ -2016,7 +2080,7 @@ mod tests {
     fn test_hash_file_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "test").unwrap();
 
@@ -2029,7 +2093,7 @@ mod tests {
 
     #[test]
     fn test_remove_hash() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "test").unwrap();
 
@@ -2044,7 +2108,7 @@ mod tests {
 
     #[test]
     fn test_remove_hash_not_found() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
 
         let removed = remove_hash(&hook).unwrap();
@@ -2053,7 +2117,7 @@ mod tests {
 
     #[test]
     fn test_invalid_hash_file_rejected() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
@@ -2066,7 +2130,7 @@ mod tests {
 
     #[test]
     fn test_hash_only_no_filename_rejected() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
@@ -2087,7 +2151,7 @@ mod tests {
 
     #[test]
     fn test_wrong_separator_rejected() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         let hash_file = temp.path().join(".ctxcrl-hook.sha256");
 
@@ -2109,7 +2173,7 @@ mod tests {
         // We exercise verify_hook_at directly (runtime_check resolves the
         // real ~/.claude path), and assert the NoBaseline status — the
         // status runtime_check now bails on.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
 
@@ -2125,7 +2189,7 @@ mod tests {
     #[cfg(unix)]
     fn test_baseline_trust_rejects_world_writable() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
         store_hash(&hook).unwrap();
@@ -2145,10 +2209,42 @@ mod tests {
         );
     }
 
+    /// A group-writable settings dir is the usual baseline-store failure on a
+    /// umask-002 machine. The reported cause must say so — the old message
+    /// claimed "data dir not writable", which is the opposite of the truth and
+    /// sends the user looking for a permission to grant rather than one to
+    /// revoke.
+    #[test]
+    fn test_baseline_store_failure_names_the_unsafe_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = private_tempdir();
+        let settings = temp.path().join("settings.json");
+        fs::write(
+            &settings,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"contextcrawler hook claude"}]}]}}"#,
+        )
+        .unwrap();
+        // Widen the parent the way umask 002 would.
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o775)).unwrap();
+
+        let identity = temp.path().join(".ctxcrl-hook-identity");
+        let error = store_binary_hook_identity_at(&settings, &identity)
+            .expect_err("a group-writable parent must not be baselined");
+        let text = format!("{error}");
+        assert!(
+            text.contains("unsafe mode"),
+            "the cause must name the unsafe mode so the remedy is chmod, got: {text}"
+        );
+        assert!(
+            !text.contains("not writable"),
+            "must not misreport a too-permissive dir as unwritable, got: {text}"
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn test_baseline_trust_rejects_symlink() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
 
@@ -2170,7 +2266,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_baseline_trust_accepts_normal_readonly_baseline() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho test\n").unwrap();
         store_hash(&hook).unwrap();
@@ -2188,7 +2284,7 @@ mod tests {
     /// operator's ambient umask (e.g. 002 → 0775). No-op on non-unix, where
     /// the perm check is compiled out anyway.
     fn secure_tempdir() -> TempDir {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2299,7 +2395,7 @@ mod tests {
 
     #[test]
     fn test_binary_hook_not_registered_when_no_settings() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let path = temp.path().join("settings.json");
         assert_eq!(
             verify_binary_without_identity(&path),
@@ -3059,7 +3155,7 @@ mod tests {
     #[cfg(unix)]
     fn test_binary_hook_world_writable_settings_is_unsafe() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let path = write_settings(temp.path(), "contextcrawler hook claude");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
         assert!(matches!(
@@ -3129,7 +3225,7 @@ mod tests {
 
     #[test]
     fn test_hash_format_compatible_with_sha256sum() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hook = temp.path().join("rtk-rewrite.sh");
         fs::write(&hook, "#!/bin/bash\necho hello\n").unwrap();
 

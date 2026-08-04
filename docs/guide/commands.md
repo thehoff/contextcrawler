@@ -94,6 +94,8 @@ These are contextcrawler's own commands. Always call them through
 | `contextcrawler pipe -f <filter>` | Read stdin, apply a named filter, print the result (Unix pipe mode). |
 | `contextcrawler security` | Tirith defense-in-depth gate dashboard and recent downgrade events. |
 | `contextcrawler security --all` / `--json` | Full or machine-readable gate downgrade event log. |
+| `contextcrawler security --explain` | Explain the effective permission profile and its policy dispositions. |
+| `contextcrawler security --scrub-logs [--dry-run]` | Scrub credentials from the existing audit logs in place, backing up each rewritten file. |
 | `contextcrawler config [--create]` | Show or create the config file. |
 | `contextcrawler verify` | Verify hook integrity and run TOML filter inline tests. |
 | `contextcrawler trust` / `untrust` | Trust or revoke project-local TOML filters. |
@@ -134,6 +136,19 @@ When Tirith is not installed the same command reports the gate as fail-open
 and runs no inspection. Use `--all` for the full log and `--json` for
 machine-readable output. For how the gate decides and how to work with it,
 see [Working with the security gate](../security/working-with-the-gate.md).
+
+Two flags do more than report:
+
+- `--explain` prints the effective permission profile and how each policy
+  disposition was reached, which is the fastest way to answer "why did that
+  command prompt?". It cannot be combined with `--all` or `--scrub-logs`.
+- `--scrub-logs` rewrites the existing `downgrades.jsonl` and
+  `supply_chain.jsonl` in place with credentials redacted, leaving a
+  `.bak-<timestamp>` copy of each file it touches. Commands are redacted at
+  write time, so this is only needed for logs written before that landed. Pair
+  it with `--dry-run` to see what would change without writing anything;
+  `--dry-run` is only valid alongside `--scrub-logs`, which in turn cannot be
+  combined with `--all` or `--json`.
 
 ## Covered commands by ecosystem
 
@@ -300,7 +315,7 @@ Source: `src/cmds/system/`.
 |---|---|---|
 | `ls` | Compact tree-style listing. | Estimate 65%. |
 | `tree` | Proxies native `tree`, auto-excludes noise directories via `-I` unless `-a` is given. | Estimate 70%. |
-| `read <files>` | Reads source files with optional language-aware filtering (`--level none\|minimal\|aggressive`), `--max-lines` / `--tail-lines`, `--line-numbers`, and `--intent "<terms>"` surgical extraction (scores heading-anchored sections, returns top matches plus head/tail bookends; only for files over 5 KB with 3+ sections). | Estimate 60%. Verified floor 60% (intent path 50 to 80%). |
+| `read <files>` | Reads source files with optional language-aware filtering (`--level none\|minimal\|aggressive`), `--max-lines` / `--tail-lines`, `--start-line` / `--end-line` (aliases `--start` / `--end`), `--line-numbers`, `--intent "<terms>"` surgical extraction (scores heading-anchored sections, returns top matches plus head/tail bookends; only for files over 5 KB with 3+ sections), and `--force` to bypass repeat-read elimination. | Estimate 60%. Verified floor 60% (intent path 50 to 80%). |
 | `cat`, `head`, `tail` | Mapped to `contextcrawler read`. `head -3 file`, `head -n 3 file`, `head --lines N file` and the `tail` equivalents are recognised. See coverage gaps below. | Estimate 60%. |
 | `grep`, `rg` | Groups matches by file instead of one line per match. | Estimate 75%. Verified floor 60%. |
 | `find` | Groups files by directory. | Estimate 70%. |
@@ -315,6 +330,81 @@ Source: `src/cmds/system/`.
 The conservative system utilities (`du`, `df`, `ps`, `systemctl status`, plus
 build/lint tools like `make`, `shellcheck`, `yamllint`, `markdownlint`,
 `hadolint`, `pre-commit`) sit at the 60 to 65% estimate band.
+
+### Explicit line ranges
+
+`read <file> --start-line A --end-line B` returns lines A to B, 1-indexed and
+inclusive — the same window as `sed -n 'A,Bp'`, which is the idiom it replaces.
+`--start` and `--end` are accepted as aliases.
+
+Either bound may be omitted: `--start 30` alone runs to end of file, `--end 20`
+alone starts at line 1. An `--end` past the end of the file clamps to the last
+line; a `--start` past the end returns nothing rather than the final line, which
+is what `sed -n 'A,Bp'` does. An inverted range returns nothing, and `--start 0`
+is treated as line 1. The file's trailing-newline state is preserved so the
+output is a faithful excerpt.
+
+A range conflicts with `--max-lines` and `--tail-lines`, and takes precedence
+over the large-file cap: a range is a bounded request the caller already sized,
+so capping it again would silently return less than was asked for.
+
+### Repeat-read elimination
+
+`read` defaults to `--level none`, so a whole-file read returns the file
+verbatim. Across a 153k-command tracking corpus that made `read` the single
+largest token sink, and roughly 40% of that spend was the *same file read
+again* inside one session.
+
+When a session reads a file it has already been shown, and the content has not
+changed, `read` substitutes a marker instead of the text:
+
+```text
+[contextcrawler] src/cli.rs unchanged since your earlier read this session.
+  50931 tokens · sha256 4f2a1c9b8e7d
+  full content: contextcrawler read src/cli.rs --force
+```
+
+The content is never lost. The marker names the exact command that returns it,
+so the cost of a wrong guess is one extra turn rather than a missing file.
+
+Full content is always emitted when:
+
+- the content changed since the last read (compared by SHA-256)
+- `--force` is passed
+- the file is under `read.repeat_read_min_tokens` (default 500)
+- the read is rendered differently from the one that primed the cache — the
+  cache key covers `--line-numbers`, `--max-lines`, `--tail-lines` and
+  `--intent`, so a plain read never satisfies a windowed one and a narrow
+  window never satisfies a wider one
+- the host exports no `CLAUDE_CODE_SESSION_ID`, which disables the feature
+- `read.repeat_read_stub = false` in the config
+
+Repeats of the *same* rendering are caught: a file fetched twice with
+`--line-numbers` is a repeat, and so is the same `--max-lines 20` window
+twice.
+
+A read that was already truncated by the large-file cap, or replaced by an
+`--intent` extract, is never stubbed. Those carry their own recovery marker,
+and overwriting it with a `--force` hint that re-renders the same truncated
+view would leave the full text unreachable by the route being advertised.
+
+State lives in `read_cache.db` alongside the tracking database, keyed by
+session, canonical path and render mode, and entries are pruned after seven
+days. The read cache never writes to the tracking database. Note that the
+*command* still records a normal tracking row for a stubbed read, as every
+contextcrawler command does — it is the cache that stays out, not the
+invocation.
+
+The cache fingerprints content, not file identity: a file deleted and recreated
+with identical bytes counts as unchanged. That is correct for the agent's
+purposes, but worth knowing if you are reading a rotating file at a fixed path.
+
+Turn it off entirely with:
+
+```toml
+[read]
+repeat_read_stub = false
+```
 
 ## Pipe mode
 

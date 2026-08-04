@@ -4801,6 +4801,60 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// A temp dir forced to a private (0700) mode, regardless of the ambient
+    /// umask.
+    ///
+    /// `TempDir::new()` inherits the umask, so on a umask-002 machine the
+    /// fixture lands at 0775. The integrity checks then correctly refuse to
+    /// trust a group-writable parent, and 21 tests across this module and
+    /// `init` failed for anyone whose umask is not 022. That is a portability
+    /// defect in the suite, not in the product: production treats a failed
+    /// baseline store as best-effort and surfaces it, it does not unwrap.
+    ///
+    /// Tests that specifically exercise the unsafe-mode rejection chmod the
+    /// directory themselves afterwards, so forcing a safe starting mode here
+    /// does not weaken them.
+    fn private_tempdir() -> TempDir {
+        normalise_test_umask();
+        let dir = TempDir::new().expect("create temp dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("tighten temp dir mode");
+        }
+        dir
+    }
+
+    /// Force a 022 umask for the test process.
+    ///
+    /// Tightening the temp *directory* is not enough: the fixture *files*
+    /// written inside it (`rtk-rewrite.sh`, `settings.json`) also inherit the
+    /// umask, landing at 0664 under umask 002, and the integrity checks reject
+    /// a group-writable hook script just as firmly as a group-writable parent.
+    /// There are ~90 such writes across this module and `init`, so normalising
+    /// the umask once is the honest fix rather than chmod-ing each site.
+    ///
+    /// Safe under the parallel test harness: every affected test calls
+    /// `private_tempdir()` before its own writes, and the umask only ever
+    /// moves 002 -> 022 and stays there.
+    ///
+    /// INVARIANT for future tests in this binary: once any test has called
+    /// `private_tempdir()`, the whole process runs at umask 022. Do not write a
+    /// test that asserts a file landed group-writable "because the ambient
+    /// umask is 002" — set the mode explicitly with `set_permissions` instead.
+    /// (Council/codex flagged this as a planted footgun; it is deliberate, and
+    /// this is the documentation of it.)
+    fn normalise_test_umask() {
+        #[cfg(unix)]
+        {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| unsafe {
+                libc::umask(0o022);
+            });
+        }
+    }
+
     // ─── Drift-guard: agent_guidance() for every harness ────────────────────
     //
     // These tests are the regression guard for the guidance-unification
@@ -5110,7 +5164,7 @@ mod tests {
 
     #[test]
     fn test_opencode_plugin_install_and_update() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let opencode_dir = temp.path().join("opencode");
         let plugin_path = opencode_plugin_path(&opencode_dir);
 
@@ -5133,7 +5187,7 @@ mod tests {
 
     #[test]
     fn test_opencode_plugin_remove() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let opencode_dir = temp.path().join("opencode");
         let plugin_path = opencode_plugin_path(&opencode_dir);
         fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
@@ -5149,7 +5203,7 @@ mod tests {
         // OpenCode auto-loads AGENTS.md, not a standalone CONTEXTCRAWLER.md.
         // Verify the upsert preserves user content and is idempotent, and the
         // uninstall stripping leaves user content intact.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let opencode_dir = temp.path().join("opencode");
         fs::create_dir_all(&opencode_dir).unwrap();
         let agents_md = opencode_agents_md_path(&opencode_dir);
@@ -5201,7 +5255,7 @@ mod tests {
     fn test_pidev_mode_writes_extension_and_agents_md() {
         // Install: extension file lands in <agent_dir>/extensions/, AGENTS.md
         // block is upserted, both idempotently, and user content survives.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agent_dir = temp.path().join("pi-agent");
 
         // Pre-seed AGENTS.md with user content the install must not clobber.
@@ -5248,7 +5302,7 @@ mod tests {
 
     #[test]
     fn test_pidev_uninstall_strips_block_and_removes_extension() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agent_dir = temp.path().join("pi-agent");
         fs::create_dir_all(&agent_dir).unwrap();
         fs::write(
@@ -5290,7 +5344,7 @@ mod tests {
     #[test]
     fn test_pidev_uninstall_noop_when_not_installed() {
         // Uninstall on a clean agent_dir: nothing to remove, no error.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agent_dir = temp.path().join("pi-agent");
         let removed = uninstall_pidev_at(&agent_dir, InitContext::default()).unwrap();
         assert!(
@@ -5301,7 +5355,7 @@ mod tests {
 
     #[test]
     fn test_strip_ctxcrl_block_deletes_file_when_only_our_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         let block = agent_guidance_block(AGENT_OPENCODE).expect("opencode block");
         fs::write(&agents_md, &block).unwrap();
@@ -5318,7 +5372,7 @@ mod tests {
 
     #[test]
     fn test_strip_ctxcrl_block_noop_when_no_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         fs::write(&agents_md, "# Just user content\n").unwrap();
 
@@ -5334,7 +5388,7 @@ mod tests {
 
     #[test]
     fn test_strip_ctxcrl_block_missing_file_is_noop() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let missing = temp.path().join("AGENTS.md");
         let desc =
             strip_ctxcrl_block_from_file(&missing, "guidance", InitContext::default()).unwrap();
@@ -5346,7 +5400,7 @@ mod tests {
     fn test_cursor_guidance_written_to_project_root() {
         // .cursor/rules/ is project-scoped — guidance must land at the project
         // root, not in ~/.cursor/.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         write_cursor_guidance(temp.path(), InitContext::default()).unwrap();
 
         let mdc = temp.path().join(".cursor/rules/contextcrawler.mdc");
@@ -5362,7 +5416,7 @@ mod tests {
 
     #[test]
     fn test_looks_like_project_root_detection() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         assert!(
             !looks_like_project_root(temp.path()),
             "empty dir is not a project root"
@@ -5384,7 +5438,7 @@ mod tests {
 
     #[test]
     fn test_default_mode_creates_ctxcrl_md() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let ctxcrl_md_path = temp.path().join("CONTEXTCRAWLER.md");
 
         let claude_guidance = agent_guidance(AGENT_CLAUDE).expect("claude guidance");
@@ -5486,7 +5540,7 @@ mod tests {
     // Fix 1: strip/uninstall must also remove a legacy `rtk-instructions` block.
     #[test]
     fn test_strip_removes_legacy_rtk_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         let body = format!(
             "# Notes\n\n{} v3 -->\nLEGACY BODY\n{}\n\nkeep me\n",
@@ -5513,7 +5567,7 @@ mod tests {
 
     #[test]
     fn test_init_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let claude_md = temp.path().join("CLAUDE.md");
 
         fs::write(&claude_md, format!("# My stuff\n\n{}\n", CTXCRL_MD_REF)).unwrap();
@@ -5525,7 +5579,7 @@ mod tests {
 
     #[test]
     fn test_patch_agents_md_adds_reference_once() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
 
         fs::write(&agents_md, "# Team rules\n").unwrap();
@@ -5587,7 +5641,7 @@ mod tests {
 
     #[test]
     fn test_kilocode_mode_creates_rules_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
 
         let rules_path = temp.path().join(".kilocode/rules/rtk-rules.md");
@@ -5601,7 +5655,7 @@ mod tests {
 
     #[test]
     fn test_kilocode_mode_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         run_kilocode_mode_at(temp.path(), InitContext::default()).unwrap();
 
         let path = temp.path().join(".kilocode/rules/rtk-rules.md");
@@ -5615,7 +5669,7 @@ mod tests {
 
     #[test]
     fn test_antigravity_mode_creates_rules_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
 
         let rules_path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
@@ -5629,7 +5683,7 @@ mod tests {
 
     #[test]
     fn test_antigravity_mode_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
 
         let path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
@@ -5643,7 +5697,7 @@ mod tests {
 
     #[test]
     fn test_patch_agents_md_creates_missing_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
 
         let added = patch_agents_md(&agents_md, CTXCRL_MD_REF, InitContext::default()).unwrap();
@@ -5655,7 +5709,7 @@ mod tests {
 
     #[test]
     fn test_patch_agents_md_migrates_inline_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         fs::write(
             &agents_md,
@@ -5676,7 +5730,7 @@ mod tests {
 
     #[test]
     fn test_hermes_mode_creates_plugin_files() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         run_hermes_mode_at(temp.path(), InitContext::default()).unwrap();
 
         let plugin_dir = temp.path().join("plugins/rtk-rewrite");
@@ -5729,7 +5783,7 @@ mod tests {
 
     #[test]
     fn test_hermes_mode_guidance_block_preserves_user_content_and_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         fs::write(&agents_md, "# Team rules\n\nDo the thing.\n").unwrap();
 
@@ -5757,7 +5811,7 @@ mod tests {
 
     #[test]
     fn test_hermes_uninstall_strips_guidance_block_preserving_user_content() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hermes_home = temp.path();
         let agents_md = hermes_home.join("AGENTS.md");
         fs::write(&agents_md, "# Team rules\n\nKeep me.\n").unwrap();
@@ -5795,7 +5849,7 @@ mod tests {
 
     #[test]
     fn test_hermes_uninstall_deletes_agents_md_when_only_our_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hermes_home = temp.path();
         let agents_md = hermes_home.join("AGENTS.md");
 
@@ -5812,7 +5866,7 @@ mod tests {
 
     #[test]
     fn test_hermes_mode_preserves_config_and_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let config_path = temp.path().join("config.yaml");
         fs::write(
             &config_path,
@@ -5835,7 +5889,7 @@ mod tests {
 
     #[test]
     fn test_hermes_mode_preserves_pyyaml_same_indent_config_and_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let config_path = temp.path().join("config.yaml");
         fs::write(
             &config_path,
@@ -5859,7 +5913,7 @@ mod tests {
 
     #[test]
     fn test_hermes_mode_patches_and_uninstalls_pyyaml_same_indent_missing_enabled_idempotently() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hermes_home = temp.path();
         let plugin_dir = hermes_home.join("plugins").join(HERMES_PLUGIN_NAME);
         let other_plugin_dir = hermes_home.join("plugins/keep-me");
@@ -5910,7 +5964,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_hermes_at_removes_plugin_dir_and_cleans_config() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hermes_home = temp.path();
         let plugin_dir = hermes_home.join("plugins").join(HERMES_PLUGIN_NAME);
         let nested_plugin_file = plugin_dir.join("nested/marker.txt");
@@ -5947,7 +6001,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_hermes_at_cleans_pyyaml_same_indent_config_idempotently() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hermes_home = temp.path();
         let plugin_dir = hermes_home.join("plugins").join(HERMES_PLUGIN_NAME);
         let nested_plugin_file = plugin_dir.join("nested/marker.txt");
@@ -5986,7 +6040,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_hermes_at_missing_files_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let hermes_home = temp.path();
 
         let removed_first = uninstall_hermes_at(hermes_home, InitContext::default()).unwrap();
@@ -6272,7 +6326,7 @@ mod tests {
 
     #[test]
     fn test_run_codex_mode_global_writes_absolute_reference_to_codex_dir() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         // Use the constant so the fixture filename tracks any future rename
         // — and so cleanup_legacy_codex_files (which removes CONTEXTCRAWLER.md) doesn't
@@ -6340,7 +6394,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_legacy_codex_files_removes_orphan_ctxcrl_md() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         // Fixture must use the legacy filename so the test exercises the
         // codepath that the cleanup helper exists to handle.
@@ -6382,7 +6436,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_legacy_codex_files_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         fs::write(&agents_md, "# header\n").unwrap();
 
@@ -6395,7 +6449,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_legacy_codex_files_handles_relative_at_ref() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         // Some older installs used a relative `@RTK.md` rather than the
         // absolute path. Both forms must be stripped.
@@ -6426,7 +6480,7 @@ mod tests {
         // second `@CONTEXTCRAWLER.md` line, leaving both references in
         // place. This test asserts the legacy line is rewritten to the
         // canonical form rather than duplicated.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let claude_md = temp.path().join("CLAUDE.md");
         fs::write(&claude_md, "# My stuff\n\n@RTK.md\n").unwrap();
 
@@ -6457,7 +6511,7 @@ mod tests {
         // RTK.md / @RTK.md from a regressed install should be cleanable
         // via `uninstall --codex` without forcing the user to run a
         // fresh `init` first.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let legacy_ctxcrl_md = codex_dir.join("RTK.md");
@@ -6579,7 +6633,7 @@ mod tests {
         // SECURITY (#100 G2 IMPORTANT 4): a malformed settings.json must
         // cause an error, NOT be silently replaced with `{}` and
         // reserialised (which destroys the user's whole Gemini config).
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let gemini_dir = temp.path();
         let settings_path = gemini_dir.join(SETTINGS_JSON);
         let original = "{ this is not valid json ";
@@ -6618,7 +6672,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_codex_at_is_idempotent() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let ctxcrl_md = codex_dir.join(CTXCRL_MD);
@@ -6640,7 +6694,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_codex_at_removes_absolute_reference() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let ctxcrl_md = codex_dir.join(CTXCRL_MD);
@@ -6659,7 +6713,7 @@ mod tests {
 
     #[test]
     fn test_write_if_changed_dry_run_does_not_create_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let target = temp.path().join("rtk-test.md");
 
         let changed = write_if_changed(
@@ -6686,7 +6740,7 @@ mod tests {
 
     #[test]
     fn test_write_if_changed_dry_run_does_not_modify_existing_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let target = temp.path().join("rtk-test.md");
         fs::write(&target, "original").unwrap();
 
@@ -6711,7 +6765,7 @@ mod tests {
 
     #[test]
     fn test_run_codex_mode_dry_run_writes_nothing() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let agents_md = temp.path().join("AGENTS.md");
         let ctxcrl_md = temp.path().join("CONTEXTCRAWLER.md");
 
@@ -6740,7 +6794,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_codex_at_removes_rtk_instructions_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let ctxcrl_md = codex_dir.join("CONTEXTCRAWLER.md");
@@ -6783,7 +6837,7 @@ mod tests {
         //   2. CONTEXTCRAWLER.md was deleted
         //   3. The `removed` list contains entries for both AGENTS.md
         //      mutations + the file deletion
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let ctxcrl_md = codex_dir.join("CONTEXTCRAWLER.md");
@@ -6833,7 +6887,7 @@ mod tests {
     #[test]
     fn test_local_init_unchanged() {
         // Local init should use claude-md mode
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let claude_md = temp.path().join("CLAUDE.md");
 
         fs::write(&claude_md, CTXCRL_INSTRUCTIONS).unwrap();
@@ -6997,7 +7051,7 @@ mod tests {
     // Tests for atomic_write()
     #[test]
     fn test_atomic_write() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let file_path = temp.path().join("test.json");
 
         let content = r#"{"key": "value"}"#;
@@ -7016,7 +7070,7 @@ mod tests {
     fn test_atomic_write_preserves_symlink() {
         use std::os::unix::fs::symlink;
 
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let target_path = temp.path().join("real-settings.json");
         let link_path = temp.path().join("settings.json");
 
@@ -7038,7 +7092,7 @@ mod tests {
     fn test_atomic_write_preserves_relative_symlink() {
         use std::os::unix::fs::symlink;
 
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let subdir = temp.path().join("real");
         fs::create_dir(&subdir).unwrap();
         let target_path = subdir.join("settings.json");
@@ -7547,7 +7601,7 @@ mod tests {
 
     #[test]
     fn test_global_default_mode_creates_artifacts() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
@@ -7577,7 +7631,7 @@ mod tests {
 
     #[test]
     fn test_global_uninstall_removes_artifacts() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             uninstall(true, false, false, false, InitContext::default()).unwrap();
@@ -7603,7 +7657,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_global_uninstall_completes_when_identity_removal_fails() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(claude_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -7631,7 +7685,7 @@ mod tests {
 
     #[test]
     fn test_global_default_mode_idempotent() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
@@ -7644,7 +7698,7 @@ mod tests {
 
     #[test]
     fn test_upgrade_from_claude_md_to_hook_mode() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_claude_md_mode(true, false, InitContext::default()).unwrap();
             let claude_md_content = fs::read_to_string(claude_dir.join(CLAUDE_MD)).unwrap();
@@ -7669,7 +7723,7 @@ mod tests {
 
     #[test]
     fn test_local_init_no_hook() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
@@ -7689,7 +7743,7 @@ mod tests {
 
     #[test]
     fn test_global_hook_only_mode_creates_settings() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_hook_only_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
 
@@ -7707,7 +7761,7 @@ mod tests {
 
     #[test]
     fn test_run_default_mode_dry_run_writes_nothing() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             let dry = InitContext {
                 dry_run: true,
@@ -7732,7 +7786,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_dry_run_preserves_artifacts() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             // Stage a real install first
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
@@ -7773,7 +7827,7 @@ mod tests {
 
     #[test]
     fn test_uninstall_removes_rtk_instructions_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let claude_md = temp.path().join("CLAUDE.md");
 
         fs::write(&claude_md, CTXCRL_INSTRUCTIONS).unwrap();
@@ -7873,7 +7927,7 @@ mod tests {
     fn test_copilot_init_preserves_existing_instructions() {
         // Regression: run_copilot previously truncated a pre-existing
         // user-authored copilot-instructions.md via write_if_changed.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let github_dir = temp.path().join(".github");
         fs::create_dir_all(&github_dir).unwrap();
 
@@ -7907,7 +7961,7 @@ mod tests {
 
     #[test]
     fn test_copilot_init_idempotent_repeats() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let github_dir = temp.path().join(".github");
         fs::create_dir_all(&github_dir).unwrap();
 
@@ -7936,7 +7990,7 @@ mod tests {
 
     #[test]
     fn test_copilot_init_updates_stale_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let github_dir = temp.path().join(".github");
         fs::create_dir_all(&github_dir).unwrap();
 
@@ -7967,7 +8021,7 @@ mod tests {
 
     #[test]
     fn test_copilot_init_dry_run_no_write() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let github_dir = temp.path().join(".github");
         fs::create_dir_all(&github_dir).unwrap();
 
@@ -7988,7 +8042,7 @@ mod tests {
 
     #[test]
     fn test_copilot_init_fresh_install_creates_file() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let instructions_path = temp.path().join(".github").join("copilot-instructions.md");
         assert!(!instructions_path.exists());
 
@@ -8005,7 +8059,7 @@ mod tests {
 
     #[test]
     fn test_copilot_init_refuses_malformed_block() {
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let github_dir = temp.path().join(".github");
         fs::create_dir_all(&github_dir).unwrap();
 
@@ -8031,7 +8085,7 @@ mod tests {
         // The upsert runs before the hook config is written, so a malformed
         // copilot-instructions.md must abort the install before any hook
         // config lands on disk.
-        let temp = TempDir::new().unwrap();
+        let temp = private_tempdir();
         let github_dir = temp.path().join(".github");
         fs::create_dir_all(&github_dir).unwrap();
 
@@ -8060,7 +8114,7 @@ mod tests {
         // CLAUDE.md previously emitted a warning and exited 0, silently
         // skipping the OpenCode plugin step. The shared `write_ctxcrl_block`
         // dispatcher now bails for both paths.
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         with_claude_dir_override(&tmp, |claude_dir| {
             let claude_md = claude_dir.join(CLAUDE_MD);
             let malformed = format!(

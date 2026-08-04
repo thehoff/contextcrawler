@@ -64,7 +64,12 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
     let condensed = condense_unified_diff(&input);
     println!("{}", condensed);
 
-    timer.track("diff (stdin)", "contextcrawler diff (stdin)", &input, &condensed);
+    timer.track(
+        "diff (stdin)",
+        "contextcrawler diff (stdin)",
+        &input,
+        &condensed,
+    );
 
     Ok(())
 }
@@ -157,6 +162,25 @@ fn similarity(a: &str, b: &str) -> f64 {
     }
 }
 
+/// Emit one file's header and its change lines.
+///
+/// Every collected change line is printed — the condenser strips diff *metadata*
+/// (headers, `@@` hunks), never content. There is deliberately no overflow marker:
+/// nothing is hidden, so claiming otherwise sends agents chasing lines that are
+/// already on screen (issue #202).
+fn push_file_block(
+    result: &mut Vec<String>,
+    file: &str,
+    added: usize,
+    removed: usize,
+    changes: &[String],
+) {
+    result.push(format!("[file] {} (+{} -{})", file, added, removed));
+    for c in changes {
+        result.push(format!("  {}", c));
+    }
+}
+
 fn condense_unified_diff(diff: &str) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
@@ -170,14 +194,7 @@ fn condense_unified_diff(diff: &str) -> String {
         if line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ") {
             if line.starts_with("+++ ") {
                 if !current_file.is_empty() && (added > 0 || removed > 0) {
-                    result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-                    for c in &changes {
-                        result.push(format!("  {}", c));
-                    }
-                    let total = added + removed;
-                    if total > 10 {
-                        result.push(format!("  ... +{} more", total - 10));
-                    }
+                    push_file_block(&mut result, &current_file, added, removed, &changes);
                 }
                 current_file = line
                     .trim_start_matches("+++ ")
@@ -198,14 +215,7 @@ fn condense_unified_diff(diff: &str) -> String {
 
     // Last file
     if !current_file.is_empty() && (added > 0 || removed > 0) {
-        result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-        for c in &changes {
-            result.push(format!("  {}", c));
-        }
-        let total = added + removed;
-        if total > 10 {
-            result.push(format!("  ... +{} more", total - 10));
-        }
+        push_file_block(&mut result, &current_file, added, removed, &changes);
     }
 
     result.join("\n")
@@ -367,26 +377,57 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn test_condense_unified_diff_overflow_count_accuracy() {
-        // 100 added + 100 removed = 200 total changes, only 10 shown
-        // True overflow = 200 - 10 = 190
-        // Bug: changes vec capped at 15, so old code showed "+5 more" (15-10) instead of "+190 more"
+    fn test_condense_unified_diff_emits_every_change_line() {
+        // Policy: diff content is never truncated. 200 changes in, 200 changes out.
+        let diff = make_large_unified_diff(100, 100);
+        let result = condense_unified_diff(&diff);
+        for i in 0..100 {
+            assert!(
+                result.contains(&format!("+new_value_{}", i)),
+                "addition {} was dropped from the condensed diff",
+                i
+            );
+            assert!(
+                result.contains(&format!("-old_value_{}", i)),
+                "removal {} was dropped from the condensed diff",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_condense_unified_diff_no_false_overflow_marker() {
+        // #202: every change line is printed, so an overflow marker always lies.
         let diff = make_large_unified_diff(100, 100);
         let result = condense_unified_diff(&diff);
         assert!(
-            result.contains("+190 more"),
-            "Expected '+190 more' but got:\n{}",
+            !result.contains("more"),
+            "False overflow marker on a fully-shown diff:\n{}",
             result
-        );
-        assert!(
-            !result.contains("+5 more"),
-            "Bug still present: showing '+5 more' instead of true overflow"
         );
     }
 
     #[test]
-    fn test_condense_unified_diff_no_false_overflow() {
-        // 8 changes total — all fit within the 10-line display cap, no overflow message
+    fn test_condense_unified_diff_no_false_overflow_marker_multi_file() {
+        // The last-file tail path had its own copy of the marker logic (#202).
+        let mut diff = make_large_unified_diff(20, 20);
+        diff.push('\n');
+        diff.push_str(&make_large_unified_diff(30, 30).replace("config.yaml", "second.yaml"));
+        let result = condense_unified_diff(&diff);
+        assert!(
+            result.contains("second.yaml"),
+            "second file missing:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("more"),
+            "False overflow marker on a fully-shown multi-file diff:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_condense_unified_diff_small_diff_has_no_marker() {
         let diff = make_large_unified_diff(4, 4);
         let result = condense_unified_diff(&diff);
         assert!(
