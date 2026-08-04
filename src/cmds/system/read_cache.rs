@@ -278,18 +278,54 @@ fn open_db() -> Option<rusqlite::Connection> {
         "PRAGMA busy_timeout=2000;
          PRAGMA journal_mode=WAL;",
     );
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS reads (
+    ensure_schema(&conn)?;
+    Some(conn)
+}
+
+/// Columns the current code expects. Renaming or adding one without a
+/// migration silently breaks every query against an older file.
+const EXPECTED_COLUMNS: &[&str] = &["session_id", "path", "sha", "tokens", "last_seen"];
+
+const CREATE_READS: &str = "CREATE TABLE IF NOT EXISTS reads (
              session_id TEXT NOT NULL,
              path       TEXT NOT NULL,
              sha        TEXT NOT NULL,
              tokens     INTEGER NOT NULL,
-             last_seen TEXT NOT NULL,
+             last_seen  TEXT NOT NULL,
              PRIMARY KEY (session_id, path)
-         );",
-    )
-    .ok()?;
-    Some(conn)
+         );";
+
+/// Create the table, rebuilding it if an older build left a different shape.
+///
+/// This is a *cache*: discarding it costs one extra full read, so a mismatch is
+/// repaired by recreating rather than migrating. Without this, a schema change
+/// makes every query error — the feature then fails open and goes silently
+/// inert. Safe, but useless, and invisible.
+///
+/// That is precisely what the `first_seen` -> `last_seen` rename did to an
+/// already-deployed cache. Every test passed, because tests always start from
+/// an empty DB. Only installing the binary and using it on a real machine
+/// surfaced it.
+fn ensure_schema(conn: &rusqlite::Connection) -> Option<()> {
+    conn.execute_batch(CREATE_READS).ok()?;
+
+    let mut stmt = conn.prepare("PRAGMA table_info(reads)").ok()?;
+    let found: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+
+    let matches = EXPECTED_COLUMNS.len() == found.len()
+        && EXPECTED_COLUMNS
+            .iter()
+            .all(|c| found.iter().any(|f| f == c));
+    if !matches {
+        conn.execute_batch("DROP TABLE IF EXISTS reads;").ok()?;
+        conn.execute_batch(CREATE_READS).ok()?;
+    }
+    Some(())
 }
 
 /// What this session recorded for `key`, if anything.
@@ -687,6 +723,37 @@ mod tests {
             load("sess-new", "/fresh.rs").is_some(),
             "a recent entry must be left alone"
         );
+    }
+
+    /// [ctxcrlRules] A cache written by an older build must not silently
+    /// disable the feature. Tests always start from an empty DB, so this is
+    /// the one failure mode unit tests structurally cannot see — it was found
+    /// by installing the binary and using it.
+    #[test]
+    fn a_stale_schema_is_rebuilt_rather_than_breaking_every_query() {
+        let _db = TestCacheEnv::new("sess-schema");
+        let path = cache_db_path().expect("cache path");
+
+        // Recreate the pre-rename shape an earlier build would have left.
+        let old = rusqlite::Connection::open(&path).expect("open");
+        old.execute_batch(
+            "CREATE TABLE reads (
+                 session_id TEXT NOT NULL,
+                 path       TEXT NOT NULL,
+                 sha        TEXT NOT NULL,
+                 tokens     INTEGER NOT NULL,
+                 first_seen TEXT NOT NULL,
+                 PRIMARY KEY (session_id, path)
+             );",
+        )
+        .expect("legacy schema");
+        drop(old);
+
+        // The feature must work, not fail open forever.
+        record("sess-schema", "/x.rs", "sha-1", 5000);
+        let got = load("sess-schema", "/x.rs")
+            .expect("a stale schema must be rebuilt, not left to error on every query");
+        assert_eq!(got.sha, "sha-1");
     }
 
     /// Fail-open contract: a corrupt cache DB must degrade to "emit the file",
