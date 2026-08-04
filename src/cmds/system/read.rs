@@ -92,6 +92,7 @@ pub fn run(
         file,
         &content,
         &ctxcrl_output,
+        level,
         force,
         line_numbers,
         &window,
@@ -259,6 +260,7 @@ fn repeat_read_stub(
     file: &Path,
     content: &str,
     emitted: &str,
+    level: FilterLevel,
     force: bool,
     line_numbers: bool,
     window: &LineWindow,
@@ -289,6 +291,7 @@ fn repeat_read_stub(
     }
     let session = read_cache::session_id()?;
     let mode = read_cache::RenderMode {
+        level: level.to_string(),
         line_numbers,
         max_lines: window.max_lines,
         tail_lines: window.tail_lines,
@@ -435,13 +438,18 @@ fn apply_unknown_extension_cap(
         "[───────────────────────── {} ─────────────────────────]",
         TRUNCATION_MARKER
     ));
+    // Same reasoning as the repeat-read stub: a recovery hint the reader
+    // cannot paste is not a recovery hint (council, mmax).
+    let quoted_path = shlex::try_quote(display_path)
+        .map(|q| q.into_owned())
+        .unwrap_or_else(|_| display_path.to_string());
     result.push(format!(
         "[omitted {} of {} lines ({:.1}% · ~{} tokens). Full file: `contextcrawler proxy cat {}`]",
         omitted_lines,
         total_lines,
         omitted_pct,
         format_tokens(input_tokens),
-        display_path,
+        quoted_path,
     ));
     result.extend(
         lines
@@ -994,7 +1002,14 @@ fn main() {{
 
         // stdin path must also be capped — codex P2 feedback.
         assert!(output.contains("ContextCrawler omitted middle"));
-        assert!(output.contains("contextcrawler proxy cat (stdin)"));
+        // The path in a recovery hint is shell-quoted, so the `(stdin)`
+        // placeholder comes through as `'(stdin)'` — parens are shell
+        // metacharacters. Assert on the quoted form rather than weakening the
+        // quoting that makes real paths with spaces usable (council, mmax).
+        assert!(
+            output.contains("contextcrawler proxy cat '(stdin)'"),
+            "expected a shell-quoted recovery path, got:\n{output}"
+        );
         // Input had ~3200 tokens of "stdin-line-N more content here for tokens"
         // (8 tokens/line * 400 lines). Output retains head+tail = 160 lines.
         assert!(output.lines().count() < input.lines().count());
@@ -1079,6 +1094,7 @@ fn main() {{
         use super::super::{repeat_read_stub, LineWindow, TRUNCATION_MARKER};
         use crate::cmds::system::read_cache::TestCacheEnv;
         use crate::core::config::ReadConfig;
+        use crate::core::filter::FilterLevel;
         use crate::core::tracking;
         use std::io::Write;
 
@@ -1102,6 +1118,7 @@ fn main() {{
                 path,
                 content,
                 content,
+                FilterLevel::None,
                 force,
                 false,
                 &LineWindow::default(),
@@ -1187,6 +1204,7 @@ fn main() {{
                         &path,
                         &content,
                         &content,
+                        FilterLevel::None,
                         false,
                         false,
                         &LineWindow {
@@ -1203,6 +1221,7 @@ fn main() {{
                         &path,
                         &content,
                         &content,
+                        FilterLevel::None,
                         false,
                         false,
                         &LineWindow {
@@ -1219,6 +1238,7 @@ fn main() {{
                         &path,
                         &content,
                         &content,
+                        FilterLevel::None,
                         false,
                         false,
                         &LineWindow::default(),
@@ -1232,6 +1252,7 @@ fn main() {{
                         &path,
                         &content,
                         &content,
+                        FilterLevel::None,
                         false,
                         true,
                         &LineWindow::default(),
@@ -1262,6 +1283,7 @@ fn main() {{
                 &path,
                 &content,
                 &content,
+                FilterLevel::None,
                 false,
                 true,
                 &LineWindow::default(),
@@ -1273,6 +1295,7 @@ fn main() {{
                 &path,
                 &content,
                 &content,
+                FilterLevel::None,
                 false,
                 true,
                 &LineWindow::default(),
@@ -1297,6 +1320,7 @@ fn main() {{
                 &path,
                 &content,
                 &content,
+                FilterLevel::None,
                 false,
                 false,
                 &LineWindow {
@@ -1311,6 +1335,7 @@ fn main() {{
                     &path,
                     &content,
                     &content,
+                    FilterLevel::None,
                     false,
                     false,
                     &LineWindow {
@@ -1328,6 +1353,7 @@ fn main() {{
                     &path,
                     &content,
                     &content,
+                    FilterLevel::None,
                     false,
                     false,
                     &LineWindow {
@@ -1369,6 +1395,7 @@ fn main() {{
                 &path,
                 &content,
                 &capped,
+                FilterLevel::None,
                 false,
                 false,
                 &LineWindow::default(),
@@ -1380,6 +1407,7 @@ fn main() {{
                 &path,
                 &content,
                 &capped,
+                FilterLevel::None,
                 false,
                 false,
                 &LineWindow::default(),
@@ -1418,10 +1446,29 @@ fn main() {{
                 "precondition: the window is smaller than the file"
             );
 
-            repeat_read_stub(&path, &content, &emitted, false, false, &window, None, &cfg);
-            let stub =
-                repeat_read_stub(&path, &content, &emitted, false, false, &window, None, &cfg)
-                    .expect("repeat of the same window stubs");
+            repeat_read_stub(
+                &path,
+                &content,
+                &emitted,
+                FilterLevel::None,
+                false,
+                false,
+                &window,
+                None,
+                &cfg,
+            );
+            let stub = repeat_read_stub(
+                &path,
+                &content,
+                &emitted,
+                FilterLevel::None,
+                false,
+                false,
+                &window,
+                None,
+                &cfg,
+            )
+            .expect("repeat of the same window stubs");
             assert!(
                 stub.contains(&emitted_tokens.to_string()),
                 "stub must report what the agent received ({emitted_tokens}), got: {stub}"
@@ -1429,6 +1476,97 @@ fn main() {{
             assert!(
                 !stub.contains(&raw_tokens.to_string()),
                 "stub must not claim credit for the whole file ({raw_tokens}), got: {stub}"
+            );
+        }
+
+        /// #236 round-2 (council, mmax): a `--level aggressive` render is
+        /// signatures-only, emphatically not the same text as a plain read.
+        /// Omitting the level from the cache key let one satisfy the other, so
+        /// the agent was told it already had a file it had only seen stripped.
+        #[test]
+        fn a_filtered_read_never_satisfies_a_plain_one() {
+            let _env = TestCacheEnv::new("sess-level");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+            let aggressive = "fn f0();\nfn f1();\n".repeat(300);
+
+            // Prime with an aggressive render.
+            repeat_read_stub(
+                &path,
+                &content,
+                &aggressive,
+                FilterLevel::Aggressive,
+                false,
+                false,
+                &LineWindow::default(),
+                None,
+                &cfg,
+            );
+            assert!(
+                repeat_read_stub(
+                    &path,
+                    &content,
+                    &content,
+                    FilterLevel::None,
+                    false,
+                    false,
+                    &LineWindow::default(),
+                    None,
+                    &cfg,
+                )
+                .is_none(),
+                "a plain read must not be satisfied by an aggressive one"
+            );
+        }
+
+        /// The recovery command is the whole safety net; a path it cannot
+        /// express is a withhold, not a deferral (council, mmax).
+        #[test]
+        fn recovery_command_is_shell_quoted() {
+            let _env = TestCacheEnv::new("sess-quote");
+            let dir = tempfile::tempdir().expect("dir");
+            let sub = dir.path().join("dir with spaces");
+            std::fs::create_dir_all(&sub).expect("mkdir");
+            let path = sub.join("f.rs");
+            let mut f = std::fs::File::create(&path).expect("create");
+            for i in 0..400 {
+                writeln!(f, "fn f{i}() {{ println!(\"line {i}\"); }}").expect("write");
+            }
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            stub(&path, &content, false, &cfg);
+            let marker = stub(&path, &content, false, &cfg).expect("second read stubs");
+            let hint = marker
+                .lines()
+                .find(|l| l.contains("--force"))
+                .expect("stub carries a recovery line");
+            let words = shlex::split(hint.trim()).expect("recovery hint must be shell-parseable");
+            assert!(
+                words.iter().any(|w| w.ends_with("dir with spaces/f.rs")),
+                "the path must survive shell-splitting as ONE argument: {words:?}"
+            );
+        }
+
+        /// `--force` must refresh the entry, not merely bypass it.
+        #[test]
+        fn force_refreshes_the_recorded_entry() {
+            let _env = TestCacheEnv::new("sess-force-refresh");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            stub(&path, &content, false, &cfg);
+            let edited = format!("{content}\n// edited");
+            // Forced read of CHANGED content must re-record the new hash, so a
+            // following plain read of that same new content stubs.
+            assert!(stub(&path, &edited, true, &cfg).is_none(), "--force emits");
+            assert!(
+                stub(&path, &edited, false, &cfg).is_some(),
+                "--force must leave the new content recorded as the baseline"
             );
         }
 

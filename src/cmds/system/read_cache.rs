@@ -37,8 +37,10 @@ pub struct CacheEntry {
     pub sha: String,
     /// Token estimate of the content that was emitted.
     pub tokens: usize,
-    /// RFC3339 timestamp of the first full emit in this session.
-    pub first_seen: String,
+    /// RFC3339 timestamp of the most recent full emit in this session.
+    /// `record` overwrites it on every emit, so it is a *last* seen, not a
+    /// first — the prune horizon is measured from it (council, mmax).
+    pub last_seen: String,
 }
 
 /// Whether to emit the file or substitute the recovery marker.
@@ -84,11 +86,18 @@ pub fn decide(
 /// recovery hint is not optional dressing — it is what keeps the substitution
 /// safe after a context compaction.
 pub fn render_stub(display_path: &str, entry: &CacheEntry) -> String {
+    // The recovery command IS the safety net. An unquoted path with a space or
+    // a shell metacharacter produces a hint the agent cannot run, which turns
+    // a deferral into a withhold (council, mmax).
+    let quoted = shlex::try_quote(display_path)
+        .map(|q| q.into_owned())
+        .unwrap_or_else(|_| display_path.to_string());
     format!(
         "[contextcrawler] {path} unchanged since your earlier read this session.\n  \
          {tokens} tokens · sha256 {sha:.12}\n  \
-         full content: contextcrawler read {path} --force\n",
+         full content: contextcrawler read {quoted} --force\n",
         path = display_path,
+        quoted = quoted,
         tokens = entry.tokens,
         sha = entry.sha,
     )
@@ -131,6 +140,11 @@ pub fn cache_key(path: &Path) -> String {
 /// mistaken for one the agent has already seen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderMode {
+    /// Filter level the read was rendered at. A `--level aggressive` render
+    /// (signatures only) is emphatically not the same text as a plain read,
+    /// and omitting this let one satisfy the other — the agent was told it
+    /// already had a file it had only ever seen stripped (council, mmax).
+    pub level: String,
     pub line_numbers: bool,
     pub max_lines: Option<usize>,
     pub tail_lines: Option<usize>,
@@ -143,6 +157,9 @@ impl RenderMode {
     /// Stable discriminator appended to the path in the cache key.
     pub fn discriminator(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
+        if self.level != "none" {
+            parts.push(format!("lvl{}", self.level));
+        }
         if self.line_numbers {
             parts.push("ln".to_string());
         }
@@ -267,7 +284,7 @@ fn open_db() -> Option<rusqlite::Connection> {
              path       TEXT NOT NULL,
              sha        TEXT NOT NULL,
              tokens     INTEGER NOT NULL,
-             first_seen TEXT NOT NULL,
+             last_seen TEXT NOT NULL,
              PRIMARY KEY (session_id, path)
          );",
     )
@@ -282,13 +299,13 @@ fn open_db() -> Option<rusqlite::Connection> {
 pub fn load(session: &str, key: &str) -> Option<CacheEntry> {
     let conn = open_db()?;
     conn.query_row(
-        "SELECT sha, tokens, first_seen FROM reads WHERE session_id = ?1 AND path = ?2",
+        "SELECT sha, tokens, last_seen FROM reads WHERE session_id = ?1 AND path = ?2",
         rusqlite::params![session, key],
         |row| {
             Ok(CacheEntry {
                 sha: row.get(0)?,
                 tokens: row.get::<_, i64>(1)? as usize,
-                first_seen: row.get(2)?,
+                last_seen: row.get(2)?,
             })
         },
     )
@@ -302,16 +319,16 @@ pub fn record(session: &str, key: &str, sha: &str, tokens: usize) {
     };
     let now = chrono::Utc::now();
     let _ = conn.execute(
-        "INSERT INTO reads (session_id, path, sha, tokens, first_seen)
+        "INSERT INTO reads (session_id, path, sha, tokens, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(session_id, path) DO UPDATE SET
              sha = excluded.sha,
              tokens = excluded.tokens,
-             first_seen = excluded.first_seen",
+             last_seen = excluded.last_seen",
         rusqlite::params![session, key, sha, tokens as i64, now.to_rfc3339()],
     );
     let cutoff = (now - chrono::Duration::days(PRUNE_AFTER_DAYS)).to_rfc3339();
-    let _ = conn.execute("DELETE FROM reads WHERE first_seen < ?1", [cutoff]);
+    let _ = conn.execute("DELETE FROM reads WHERE last_seen < ?1", [cutoff]);
 }
 
 #[cfg(test)]
@@ -322,7 +339,7 @@ mod tests {
         CacheEntry {
             sha: sha.to_string(),
             tokens,
-            first_seen: "2026-08-04T00:00:00Z".to_string(),
+            last_seen: "2026-08-04T00:00:00Z".to_string(),
         }
     }
 
@@ -411,6 +428,7 @@ mod tests {
         intent: Option<&str>,
     ) -> RenderMode {
         RenderMode {
+            level: "none".to_string(),
             line_numbers,
             max_lines,
             tail_lines,
@@ -559,7 +577,7 @@ mod tests {
         let ancient =
             (chrono::Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS + 1)).to_rfc3339();
         conn.execute(
-            "UPDATE reads SET first_seen = ?1 WHERE path = '/stale.rs'",
+            "UPDATE reads SET last_seen = ?1 WHERE path = '/stale.rs'",
             [ancient],
         )
         .expect("backdate");
