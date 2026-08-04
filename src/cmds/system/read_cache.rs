@@ -493,6 +493,99 @@ mod tests {
         );
     }
 
+    /// [ctxcrlRules, CTX-002] Every field of RenderMode must reach the key.
+    ///
+    /// Varies each field one at a time from a baseline and asserts every
+    /// discriminator differs. A field added to the struct but forgotten in
+    /// `discriminator()` fails here — which is exactly how the filter level
+    /// slipped through and let a `--level aggressive` render satisfy a plain
+    /// read.
+    #[test]
+    fn every_render_mode_field_changes_the_key() {
+        let baseline = RenderMode {
+            level: "none".to_string(),
+            line_numbers: false,
+            max_lines: None,
+            tail_lines: None,
+            start_line: None,
+            end_line: None,
+            intent: None,
+        };
+
+        let variants: Vec<(&str, RenderMode)> = vec![
+            (
+                "level",
+                RenderMode {
+                    level: "aggressive".to_string(),
+                    ..baseline.clone()
+                },
+            ),
+            (
+                "line_numbers",
+                RenderMode {
+                    line_numbers: true,
+                    ..baseline.clone()
+                },
+            ),
+            (
+                "max_lines",
+                RenderMode {
+                    max_lines: Some(20),
+                    ..baseline.clone()
+                },
+            ),
+            (
+                "tail_lines",
+                RenderMode {
+                    tail_lines: Some(20),
+                    ..baseline.clone()
+                },
+            ),
+            (
+                "start_line",
+                RenderMode {
+                    start_line: Some(5),
+                    ..baseline.clone()
+                },
+            ),
+            (
+                "end_line",
+                RenderMode {
+                    end_line: Some(50),
+                    ..baseline.clone()
+                },
+            ),
+            (
+                "intent",
+                RenderMode {
+                    intent: Some("auth".into()),
+                    ..baseline.clone()
+                },
+            ),
+        ];
+
+        let base_key = baseline.discriminator();
+        for (field, variant) in &variants {
+            assert_ne!(
+                variant.discriminator(),
+                base_key,
+                "changing `{field}` did not change the cache key — a read rendered \
+                 differently would be treated as one the agent has already seen. \
+                 Add it to RenderMode::discriminator(). [ctxcrlRules, CTX-002]"
+            );
+        }
+
+        // ...and no two variants may collide with each other either.
+        let mut keys: Vec<String> = variants.iter().map(|(_, m)| m.discriminator()).collect();
+        keys.push(base_key);
+        let unique: std::collections::HashSet<&String> = keys.iter().collect();
+        assert_eq!(
+            unique.len(),
+            keys.len(),
+            "two distinct render modes share a cache key: {keys:?} [ctxcrlRules, CTX-002]"
+        );
+    }
+
     #[test]
     fn line_numbered_read_does_not_collide_with_plain_read() {
         let path = Path::new("/tmp/x.rs");

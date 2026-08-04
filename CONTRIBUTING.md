@@ -8,6 +8,7 @@
 - [Open Pull Requests](../../pulls)
 - [Start a Discussion](../../discussions)
 - [Technical Documentation](docs/contributing/TECHNICAL.md) — Architecture, end-to-end flow, folder map, how to write tests
+- [ctxcrlRules](docs/rules/RULES.md) — **ratified law for this repo**; read before changing anything that filters, truncates or suppresses output
 
 ---
 
@@ -237,6 +238,24 @@ your branch --> develop (review + CI + integration testing) --> version branch -
 ## Testing
 
 Every change **must** include tests. We follow **TDD (Red-Green-Refactor)**: write a failing test first, implement the minimum to pass, then refactor.
+
+> **TDD is not sufficient for output-suppression changes.** If your change
+> withholds, substitutes, truncates or gates what the caller receives, you must
+> also build the binary and drive the real entry point — see
+> [ctxcrlRules CTX-006](docs/rules/RULES.md). Across two features, unit tests
+> written first missed 5 of 5 bugs of that kind; every one lived in the wiring
+> around a decision function that was itself correct and well tested.
+
+### Repository rules (ctxcrlRules)
+
+[docs/rules/RULES.md](docs/rules/RULES.md) holds rules earned the hard way.
+Those marked **ENFORCED** are checked by `tests/ctxcrl_rules.rs` and adjacent
+unit tests — breaking one fails `cargo test`. Those marked **REVIEW** are on the
+pre-merge checklist.
+
+Found a quirk worth remembering? Write it to `docs/rules/lessons/` **at the
+moment you confirm the fix**, using `lessons/TEMPLATE.md`. Do not promote it to
+a numbered rule yourself; ratification is a maintainer step.
 
 For how to write tests (fixtures, snapshots, token savings verification), see [docs/contributing/TECHNICAL.md — Testing](docs/contributing/TECHNICAL.md#testing).
 
