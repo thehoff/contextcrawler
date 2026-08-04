@@ -94,6 +94,8 @@ These are contextcrawler's own commands. Always call them through
 | `contextcrawler pipe -f <filter>` | Read stdin, apply a named filter, print the result (Unix pipe mode). |
 | `contextcrawler security` | Tirith defense-in-depth gate dashboard and recent downgrade events. |
 | `contextcrawler security --all` / `--json` | Full or machine-readable gate downgrade event log. |
+| `contextcrawler security --explain` | Explain the effective permission profile and its policy dispositions. |
+| `contextcrawler security --scrub-logs [--dry-run]` | Scrub credentials from the existing audit logs in place, backing up each rewritten file. |
 | `contextcrawler config [--create]` | Show or create the config file. |
 | `contextcrawler verify` | Verify hook integrity and run TOML filter inline tests. |
 | `contextcrawler trust` / `untrust` | Trust or revoke project-local TOML filters. |
@@ -134,6 +136,19 @@ When Tirith is not installed the same command reports the gate as fail-open
 and runs no inspection. Use `--all` for the full log and `--json` for
 machine-readable output. For how the gate decides and how to work with it,
 see [Working with the security gate](../security/working-with-the-gate.md).
+
+Two flags do more than report:
+
+- `--explain` prints the effective permission profile and how each policy
+  disposition was reached, which is the fastest way to answer "why did that
+  command prompt?". It cannot be combined with `--all` or `--scrub-logs`.
+- `--scrub-logs` rewrites the existing `downgrades.jsonl` and
+  `supply_chain.jsonl` in place with credentials redacted, leaving a
+  `.bak-<timestamp>` copy of each file it touches. Commands are redacted at
+  write time, so this is only needed for logs written before that landed. Pair
+  it with `--dry-run` to see what would change without writing anything;
+  `--dry-run` is only valid alongside `--scrub-logs`, which in turn cannot be
+  combined with `--all` or `--json`.
 
 ## Covered commands by ecosystem
 
