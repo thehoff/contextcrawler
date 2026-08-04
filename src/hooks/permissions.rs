@@ -3729,7 +3729,7 @@ mod tests {
                 PermissionVerdict::Ask,
             ),
             ("bash -c 'echo ok'", PermissionVerdict::Allow),
-            ("rm -rf /tmp/rtk-2286", PermissionVerdict::Deny),
+            ("rm -rf /tmp/ctxcrl-2286", PermissionVerdict::Deny),
             ("deploy-prod now", PermissionVerdict::Ask),
             ("echo ok", PermissionVerdict::Allow),
             ("scp file host:", PermissionVerdict::Allow),
@@ -4404,7 +4404,7 @@ mod tests {
         ] {
             assert_eq!(
                 check_command_with_rules_profile(
-                    "rm -rf /tmp/rtk-2286",
+                    "rm -rf /tmp/ctxcrl-2286",
                     &deny,
                     &[],
                     &allow,
