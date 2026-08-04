@@ -277,6 +277,17 @@ fn repeat_read_stub(
     if intent.is_some() || emitted_is_truncated(emitted) {
         return None;
     }
+    // Size the entry by what the agent actually received. Recording the raw
+    // token count made the stub claim credit for text that was never emitted —
+    // a 4,000-line file capped to 162 lines reported "65,723 tokens" withheld.
+    //
+    // Checked before any canonicalize/hash/DB work: most reads are small, and
+    // `read` sits on a sub-10ms startup budget (council, codex).
+    let tokens = tracking::estimate_tokens(emitted);
+    if tokens < read_config.repeat_read_min_tokens {
+        return None;
+    }
+    let session = read_cache::session_id()?;
     let mode = read_cache::RenderMode {
         line_numbers,
         max_lines: window.max_lines,
@@ -285,14 +296,9 @@ fn repeat_read_stub(
         end_line: window.end_line,
         intent: intent.map(str::to_string),
     };
-    let session = read_cache::session_id()?;
     let key = read_cache::cache_key_with_mode(file, &mode);
-    // Hash the source (so a file edit is always detected) but size the entry by
-    // what the agent actually received. Recording the raw token count made the
-    // stub claim credit for text that was never emitted — a 4,000-line file
-    // capped to 162 lines reported "65,723 tokens" withheld.
+    // Hash the source so a file edit is always detected.
     let sha = read_cache::content_sha(content);
-    let tokens = tracking::estimate_tokens(emitted);
     let prior = read_cache::load(&session, &key);
     match read_cache::decide(
         prior.as_ref(),
@@ -620,9 +626,16 @@ fn main() {{
     }
 
     #[test]
-    fn line_range_clamps_past_end_of_file() {
+    fn line_range_end_past_eof_clamps_to_last_line() {
         assert_eq!(range("a\nb\n", Some(2), Some(999)), "b\n");
+    }
+
+    /// Asymmetric on purpose, matching `sed -n 'A,Bp'`: an end past EOF clamps,
+    /// but a start past EOF selects nothing rather than the final line.
+    #[test]
+    fn line_range_start_past_eof_returns_empty_not_the_last_line() {
         assert_eq!(range("a\nb\n", Some(999), Some(1000)), "");
+        assert_eq!(range("a\nb\n", Some(3), None), "");
     }
 
     #[test]

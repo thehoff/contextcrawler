@@ -338,9 +338,11 @@ inclusive — the same window as `sed -n 'A,Bp'`, which is the idiom it replaces
 `--start` and `--end` are accepted as aliases.
 
 Either bound may be omitted: `--start 30` alone runs to end of file, `--end 20`
-alone starts at line 1. Bounds past the end of the file clamp, an inverted
-range returns nothing, and `--start 0` is treated as line 1. The file's
-trailing-newline state is preserved so the output is a faithful excerpt.
+alone starts at line 1. An `--end` past the end of the file clamps to the last
+line; a `--start` past the end returns nothing rather than the final line, which
+is what `sed -n 'A,Bp'` does. An inverted range returns nothing, and `--start 0`
+is treated as line 1. The file's trailing-newline state is preserved so the
+output is a faithful excerpt.
 
 A range conflicts with `--max-lines` and `--tail-lines`, and takes precedence
 over the large-file cap: a range is a bounded request the caller already sized,
@@ -381,9 +383,21 @@ Repeats of the *same* rendering are caught: a file fetched twice with
 `--line-numbers` is a repeat, and so is the same `--max-lines 20` window
 twice.
 
+A read that was already truncated by the large-file cap, or replaced by an
+`--intent` extract, is never stubbed. Those carry their own recovery marker,
+and overwriting it with a `--force` hint that re-renders the same truncated
+view would leave the full text unreachable by the route being advertised.
+
 State lives in `read_cache.db` alongside the tracking database, keyed by
 session, canonical path and render mode, and entries are pruned after seven
-days. The tracking database itself is never written by this feature.
+days. The read cache never writes to the tracking database. Note that the
+*command* still records a normal tracking row for a stubbed read, as every
+contextcrawler command does — it is the cache that stays out, not the
+invocation.
+
+The cache fingerprints content, not file identity: a file deleted and recreated
+with identical bytes counts as unchanged. That is correct for the agent's
+purposes, but worth knowing if you are reading a rotating file at a fixed path.
 
 Turn it off entirely with:
 

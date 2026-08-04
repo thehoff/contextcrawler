@@ -1918,6 +1918,13 @@ mod tests {
     /// Safe under the parallel test harness: every affected test calls
     /// `private_tempdir()` before its own writes, and the umask only ever
     /// moves 002 -> 022 and stays there.
+    ///
+    /// INVARIANT for future tests in this binary: once any test has called
+    /// `private_tempdir()`, the whole process runs at umask 022. Do not write a
+    /// test that asserts a file landed group-writable "because the ambient
+    /// umask is 002" — set the mode explicitly with `set_permissions` instead.
+    /// (Council/codex flagged this as a planted footgun; it is deliberate, and
+    /// this is the documentation of it.)
     fn normalise_test_umask() {
         #[cfg(unix)]
         {

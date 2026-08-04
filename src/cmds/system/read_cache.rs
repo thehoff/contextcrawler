@@ -546,6 +546,68 @@ mod tests {
         assert!(cache.exists(), "cache wrote to its own file");
     }
 
+    /// The 7-day prune is what stops the cache growing without bound. Council
+    /// (codex) called out that it was asserted only by reading the code.
+    #[test]
+    fn entries_older_than_the_prune_window_are_dropped() {
+        let _db = TestCacheEnv::new("sess-prune");
+        record("sess-old", "/stale.rs", "sha-old", 5000);
+        record("sess-new", "/fresh.rs", "sha-new", 5000);
+
+        // Backdate one entry past the prune horizon, then trigger a write.
+        let conn = open_db().expect("cache db");
+        let ancient =
+            (chrono::Utc::now() - chrono::Duration::days(PRUNE_AFTER_DAYS + 1)).to_rfc3339();
+        conn.execute(
+            "UPDATE reads SET first_seen = ?1 WHERE path = '/stale.rs'",
+            [ancient],
+        )
+        .expect("backdate");
+        drop(conn);
+
+        record("sess-trigger", "/trigger.rs", "sha-t", 5000);
+
+        assert_eq!(
+            load("sess-old", "/stale.rs"),
+            None,
+            "an entry past the prune window must not survive the next write"
+        );
+        assert!(
+            load("sess-new", "/fresh.rs").is_some(),
+            "a recent entry must be left alone"
+        );
+    }
+
+    /// Fail-open contract: a corrupt cache DB must degrade to "emit the file",
+    /// never to a panic and never to a stub. Council (codex) flagged this as
+    /// asserted by code review only.
+    #[test]
+    fn a_corrupt_cache_db_fails_open() {
+        let _db = TestCacheEnv::new("sess-corrupt");
+        let path = cache_db_path().expect("cache path");
+        std::fs::write(&path, b"this is not a sqlite database at all").expect("write garbage");
+
+        assert_eq!(
+            load("sess-corrupt", "/x.rs"),
+            None,
+            "a corrupt DB must read as 'nothing cached', so the caller emits"
+        );
+        // Must not panic.
+        record("sess-corrupt", "/x.rs", "sha", 5000);
+    }
+
+    /// A read whose canonical path cannot be resolved (deleted between read and
+    /// cache lookup) still produces a usable key rather than panicking.
+    #[test]
+    fn cache_key_survives_an_unresolvable_path() {
+        let missing = Path::new("/definitely/does/not/exist/anywhere.rs");
+        let key = cache_key(missing);
+        assert!(
+            key.contains("anywhere.rs"),
+            "falls back to the raw path, got: {key}"
+        );
+    }
+
     #[test]
     fn missing_session_id_disables_the_feature() {
         let env = TestCacheEnv::new("sess-present");
