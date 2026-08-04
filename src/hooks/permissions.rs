@@ -46,6 +46,8 @@ pub enum FindingReason {
     ParseAmbiguity,
     DynamicWord,
     Exfil,
+    /// The command reads a credential-bearing file (#206).
+    SecretRead,
     AnalysisLimit,
 }
 
@@ -59,6 +61,7 @@ impl FindingReason {
             Self::ParseAmbiguity => "parse_ambiguity",
             Self::DynamicWord => "dynamic_word",
             Self::Exfil => "exfil",
+            Self::SecretRead => "secret_read",
             Self::AnalysisLimit => "analysis_limit",
         }
     }
@@ -91,6 +94,14 @@ fn analyze_command_depth(cmd: &str, depth: usize) -> Vec<Finding> {
         .map(|segment| resolve_permission_segment(segment))
         .collect();
     let mut findings = Vec::new();
+
+    // #206: a command that reads a credential-bearing file must not be
+    // auto-allowed. Raised as a finding so the profile machinery decides,
+    // rather than being special-cased at the hook — that keeps `Unrestricted`
+    // meaningful and covers the legacy rewrite path for free.
+    if crate::hooks::secret_paths::touches_secret_path(cmd).is_some() {
+        findings.push(Finding::new(FindingReason::SecretRead));
+    }
 
     let heredocs = extract_heredocs(cmd);
     if heredocs.malformed {
@@ -192,6 +203,10 @@ pub fn apply_policy(profile: SecurityProfile, findings: &[Finding]) -> Permissio
     let forces_ask = |reason| match reason {
         FindingReason::ExplicitDeny | FindingReason::ExplicitAsk => false,
         FindingReason::Exfil => profile != SecurityProfile::Unrestricted,
+        // #206: reading a credential file must never be auto-allowed. Treated
+        // exactly like Exfil — `Unrestricted` is a deliberate opt-out and is
+        // still honoured, everything else prompts.
+        FindingReason::SecretRead => profile != SecurityProfile::Unrestricted,
         FindingReason::AnalysisLimit => true,
         FindingReason::LocalWrite | FindingReason::OpaqueExec => profile == SecurityProfile::Strict,
         FindingReason::ParseAmbiguity | FindingReason::DynamicWord => {
@@ -4623,9 +4638,40 @@ mod tests {
         assert_eq!(extract_bash_pattern("Read(**/.env*)"), "Read(**/.env*)");
 
         // With empty rule sets, verdict is Default (not Allow).
+        //
+        // Uses an ordinary file: `cat .env` now raises `SecretRead` (#206) and
+        // so returns Ask regardless of the rule sets, which would make it a
+        // misleading vehicle for this assertion.
+        assert_eq!(
+            check_command_with_rules("cat README.md", &[], &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    /// #206: a credential read must never fall through to Default, where the
+    /// hook would auto-allow it. Reproduced before the fix: `cat .env` was
+    /// rewritten and returned `permissionDecision: "allow"`, printing secrets.
+    #[test]
+    fn secret_file_reads_ask_even_with_no_rules_configured() {
         assert_eq!(
             check_command_with_rules("cat .env", &[], &[], &[]),
-            PermissionVerdict::Default
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("cat ~/.ssh/id_rsa", &[], &[], &[]),
+            PermissionVerdict::Ask
+        );
+        // The opt-out still means something.
+        assert_eq!(
+            check_command_with_rules_profile(
+                "cat .env",
+                &[],
+                &[],
+                &[],
+                SecurityProfile::Unrestricted
+            ),
+            PermissionVerdict::Default,
+            "Unrestricted is a deliberate opt-out and must be honoured"
         );
     }
 

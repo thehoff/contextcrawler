@@ -6,6 +6,7 @@ pub mod hook_check;
 #[deny(clippy::print_stdout, clippy::print_stderr)]
 pub mod hook_cmd;
 pub mod init;
+pub mod secret_paths;
 pub mod integrity;
 pub mod permissions;
 pub mod rewrite_cmd;

@@ -19,16 +19,63 @@ use crate::discover::registry::{has_heredoc, rewrite_command};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
+/// Wall-clock bound on reading the hook payload (#200).
+///
+/// `STDIN_CAP` bounds *bytes*, not *time*: a peer that holds the pipe open
+/// without writing leaves `read_to_string` waiting for EOF forever, and the
+/// hook sits on the critical path of every command the agent runs. Reproduced
+/// before the fix with `timeout 4 sh -lc '{ sleep 12; } | contextcrawler hook
+/// claude'` — exit 124.
+///
+/// Ten seconds is far beyond any legitimate host write (Claude Code emits the
+/// payload immediately) while still being finite.
+const STDIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn read_stdin_limited() -> Result<String> {
-    let mut input = String::new();
-    io::stdin()
-        .take((STDIN_CAP + 1) as u64)
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
-    if input.len() > STDIN_CAP {
-        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+    read_limited_with_timeout(io::stdin(), STDIN_CAP, STDIN_TIMEOUT)
+}
+
+/// Read at most `cap` bytes from `reader`, giving up after `timeout`.
+///
+/// Generic over the reader so the timeout path is testable without a real
+/// stalled pipe.
+///
+/// On timeout the reader thread is deliberately left running: it is blocked in
+/// a syscall and cannot be cancelled, and the process exits moments later. The
+/// alternative — waiting for it — is the bug being fixed.
+fn read_limited_with_timeout<R: Read + Send + 'static>(
+    reader: R,
+    cap: usize,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut input = String::new();
+        let outcome = reader
+            .take((cap + 1) as u64)
+            .read_to_string(&mut input)
+            .map(|_| input);
+        // A send failure just means the receiver already timed out.
+        let _ = tx.send(outcome);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(input)) => {
+            if input.len() > cap {
+                anyhow::bail!("hook stdin exceeds {} byte limit", cap);
+            }
+            Ok(input)
+        }
+        Ok(Err(e)) => Err(e).context("Failed to read stdin"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            anyhow::bail!("hook stdin did not close within {}s", timeout.as_secs_f32())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("hook stdin reader stopped unexpectedly")
+        }
     }
-    Ok(input)
 }
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
@@ -940,11 +987,33 @@ fn process_claude_payload_with_gate(
         ti
     };
 
+    // #206: never auto-allow a read of a credential-bearing file. Rewriting
+    // `cat .env` to `contextcrawler read .env` and returning `allow` made the
+    // read MORE permitted than it would have been without contextcrawler
+    // installed, and printed the secrets in full.
+    //
+    // Downgrade to `ask` rather than omitting the decision: the rewritten
+    // command is `contextcrawler read <path>`, so a host with a broad
+    // `Bash(contextcrawler:*)` allow rule would run it unattended if no
+    // decision were emitted.
+    //
+    // The verdict itself is decided in `permissions` via
+    // `FindingReason::SecretRead`, so the profile is honoured there. This is
+    // only the user-facing reason, shown when that finding produced an Ask.
+    let secret_hint = if verdict == PermissionVerdict::Ask {
+        crate::hooks::secret_paths::touches_secret_path(cmd)
+    } else {
+        None
+    };
+
     // When a gate flagged this (rewritable) command, surface the tailored
     // trust hint (#197) as the reason the user sees in the Ask prompt;
     // otherwise it's a clean auto-rewrite.
-    let decision_reason = match (gate_ask, gate_suggestion.take()) {
-        (true, Some(hint)) => hint,
+    let decision_reason = match (gate_ask, gate_suggestion.take(), secret_hint) {
+        (true, Some(hint), _) => hint,
+        (_, _, Some(what)) => format!(
+            "contextcrawler: this reads {what} — approve only if you intend the contents in context"
+        ),
         _ => "contextcrawler auto-rewrite".to_string(),
     };
     let mut hook_output = json!({
@@ -1171,9 +1240,21 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    // Cursor preToolUse currently enforces allow/deny only and can ignore
-    // updated_input when permission is "ask". Use "allow" for rewritten
-    // commands unless the command is explicitly denied above.
+    // #206: an Ask verdict must never be emitted as `allow`. Cursor's
+    // preToolUse enforces allow/deny only and can ignore `updated_input` when
+    // permission is "ask", so rather than emit a decision Cursor may mishandle,
+    // withhold the opinion entirely and let Cursor's own permission engine
+    // decide — the same `{}` path an explicit Deny already takes.
+    //
+    // Losing the rewrite on these commands is the correct trade: a missed token
+    // saving costs nothing, silently auto-allowing `cat .env` costs a secret.
+    if verdict == PermissionVerdict::Ask {
+        audit_log("ask", &cmd, &rewritten);
+        let _ = writeln!(io::stdout(), "{{}}");
+        return Ok(());
+    }
+
+    // Rewritten commands that cleared the permission check are auto-allowed.
     let decision = "allow";
 
     audit_log("rewrite", &cmd, &rewritten);
@@ -1224,6 +1305,11 @@ fn run_cursor_inner_with_rules(
         return "{}".to_string();
     }
 
+    if verdict == PermissionVerdict::Ask {
+        // Mirrors the production path: no opinion, Cursor decides (#206).
+        return "{}".to_string();
+    }
+
     match get_rewritten(&cmd) {
         Some(rewritten) => {
             let decision = "allow";
@@ -1241,6 +1327,93 @@ fn run_cursor_inner_with_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #206: no host path may auto-allow a credential read ─────────────
+
+    /// Every host handler must refuse to auto-allow a secret read. Cursor
+    /// hardcoded `permission: "allow"` on the rewrite path and leaked it; the
+    /// Claude and Copilot paths honour the Ask verdict, and Gemini fails closed
+    /// to deny. Verified against the real binary for all four.
+    #[test]
+    fn cursor_does_not_auto_allow_a_secret_read() {
+        let payload = r#"{"tool_name":"Bash","tool_input":{"command":"cat .env"}}"#;
+        let out = run_cursor_inner(payload);
+        assert!(
+            !out.contains("\"permission\":\"allow\""),
+            "cursor must not auto-allow a credential read, got: {out}"
+        );
+    }
+
+    #[test]
+    fn cursor_still_rewrites_and_allows_an_ordinary_read() {
+        let payload = r#"{"tool_name":"Bash","tool_input":{"command":"cat README.md"}}"#;
+        let out = run_cursor_inner(payload);
+        assert!(
+            out.contains("\"permission\":\"allow\""),
+            "ordinary reads must keep their auto-allow, got: {out}"
+        );
+        assert!(
+            out.contains("contextcrawler read README.md"),
+            "and must still carry the rewrite, got: {out}"
+        );
+    }
+
+    // ── #200: the hook must not wait forever for stdin ──────────────────
+
+    /// A reader that never yields data and never signals EOF — exactly what a
+    /// peer holding the pipe open does.
+    struct StalledReader;
+
+    impl std::io::Read for StalledReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn stdin_read_gives_up_instead_of_hanging_forever() {
+        let started = std::time::Instant::now();
+        let result = read_limited_with_timeout(
+            StalledReader,
+            STDIN_CAP,
+            std::time::Duration::from_millis(150),
+        );
+        let err = result.expect_err("a stalled stdin must not read successfully");
+        assert!(
+            err.to_string().contains("did not close"),
+            "error should name the timeout, got: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "returned in {:?} — the whole point is not to wait",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_prompt_payload_still_reads_normally() {
+        let payload = r#"{"tool_name":"Bash"}"#;
+        let got = read_limited_with_timeout(
+            std::io::Cursor::new(payload.as_bytes().to_vec()),
+            STDIN_CAP,
+            std::time::Duration::from_secs(5),
+        )
+        .expect("a normal payload must read");
+        assert_eq!(got, payload);
+    }
+
+    #[test]
+    fn oversized_stdin_is_still_rejected() {
+        let big = vec![b'x'; 64];
+        let err = read_limited_with_timeout(
+            std::io::Cursor::new(big),
+            16,
+            std::time::Duration::from_secs(5),
+        )
+        .expect_err("over-cap input must be rejected");
+        assert!(err.to_string().contains("byte limit"), "got: {err}");
+    }
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
