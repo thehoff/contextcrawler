@@ -2,6 +2,7 @@
 
 use crate::cmds::system::intent as intent_extractor;
 use crate::cmds::system::json_cmd;
+use crate::cmds::system::read_cache;
 use crate::core::config;
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::tracking;
@@ -20,6 +21,7 @@ pub fn run(
     tail_lines: Option<usize>,
     line_numbers: bool,
     intent: Option<&str>,
+    force: bool,
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -34,6 +36,26 @@ pub fn run(
 
     let read_config = config::read();
     let ext = file.extension().and_then(|e| e.to_str());
+
+    if let Some(stub) = repeat_read_stub(
+        file,
+        &content,
+        force,
+        line_numbers,
+        max_lines,
+        tail_lines,
+        intent,
+        &read_config,
+    ) {
+        print!("{}", stub);
+        timer.track(
+            &format!("cat {}", file.display()),
+            "contextcrawler read",
+            &content,
+            &stub,
+        );
+        return Ok(());
+    }
 
     // Detect language from extension
     let lang = file
@@ -52,9 +74,9 @@ pub fn run(
     // try surgical extraction first. Falls back to the regular render path
     // when the extractor returns None (small file, no matching sections,
     // unsupported format, etc.).
-    let filtered = if let Some(extracted) = intent.and_then(|i| {
-        intent_extractor::extract_for_intent(&content, ext, lang, i, &display_path)
-    }) {
+    let filtered = if let Some(extracted) = intent
+        .and_then(|i| intent_extractor::extract_for_intent(&content, ext, lang, i, &display_path))
+    {
         extracted
     } else {
         render_output(
@@ -118,9 +140,9 @@ pub fn run_stdin(
         eprintln!("Language: {:?} (stdin has no extension)", lang);
     }
 
-    let filtered = if let Some(extracted) = intent.and_then(|i| {
-        intent_extractor::extract_for_intent(&content, None, lang, i, "(stdin)")
-    }) {
+    let filtered = if let Some(extracted) = intent
+        .and_then(|i| intent_extractor::extract_for_intent(&content, None, lang, i, "(stdin)"))
+    {
         extracted
     } else {
         render_output(
@@ -148,7 +170,12 @@ pub fn run_stdin(
     };
     print!("{}", ctxcrl_output);
 
-    timer.track("cat - (stdin)", "contextcrawler read -", &content, &ctxcrl_output);
+    timer.track(
+        "cat - (stdin)",
+        "contextcrawler read -",
+        &content,
+        &ctxcrl_output,
+    );
     Ok(())
 }
 
@@ -208,6 +235,59 @@ pub(crate) fn render_output(
     apply_line_window(&filtered, max_lines, tail_lines, &lang)
 }
 
+/// #236: decide whether this session has already been shown this exact file,
+/// returning the recovery marker if so — and recording the read if not.
+///
+/// Restricted to plain whole-file reads. A windowed (`--max-lines`,
+/// `--tail-lines`), numbered or intent-scoped read renders something other
+/// than the file's full text, so a hash of the file alone would not describe
+/// what the agent actually received; treating those as "already seen" would
+/// withhold content the agent has never had.
+///
+/// Returns `None` — meaning emit in full — for every disabled, absent or
+/// changed case, so a failure anywhere in the cache degrades to today's
+/// behaviour rather than to silence.
+#[allow(clippy::too_many_arguments)]
+fn repeat_read_stub(
+    file: &Path,
+    content: &str,
+    force: bool,
+    line_numbers: bool,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    intent: Option<&str>,
+    read_config: &config::ReadConfig,
+) -> Option<String> {
+    if !read_config.repeat_read_stub {
+        return None;
+    }
+    let plain_whole_file =
+        max_lines.is_none() && tail_lines.is_none() && intent.is_none() && !line_numbers;
+    if !plain_whole_file {
+        return None;
+    }
+    let session = read_cache::session_id()?;
+    let key = read_cache::cache_key(file);
+    let sha = read_cache::content_sha(content);
+    let tokens = tracking::estimate_tokens(content);
+    let prior = read_cache::load(&session, &key);
+    match read_cache::decide(
+        prior.as_ref(),
+        &sha,
+        tokens,
+        force,
+        read_config.repeat_read_min_tokens,
+    ) {
+        read_cache::Verdict::Stub(entry) => {
+            Some(read_cache::render_stub(&file.display().to_string(), &entry))
+        }
+        read_cache::Verdict::Emit => {
+            read_cache::record(&session, &key, &sha, tokens);
+            None
+        }
+    }
+}
+
 fn filter_content(content: &str, ext: Option<&str>, lang: Language, level: FilterLevel) -> String {
     let filter = filter::get_filter(level);
 
@@ -261,8 +341,7 @@ fn should_apply_unknown_extension_cap(
 ) -> bool {
     // Cap applies to truly unknown extensions AND to large prose/data files
     // that the language filter leaves untouched (markdown/txt/lock).
-    let cappable = *lang == Language::Unknown
-        || ext.is_some_and(is_prose_cappable_extension);
+    let cappable = *lang == Language::Unknown || ext.is_some_and(is_prose_cappable_extension);
     if !allow_unknown_cap
         || !cappable
         || max_lines.is_some()
@@ -326,7 +405,13 @@ fn apply_unknown_extension_cap(
         format_tokens(input_tokens),
         display_path,
     ));
-    result.extend(lines.iter().skip(total_lines - tail).copied().map(str::to_string));
+    result.extend(
+        lines
+            .iter()
+            .skip(total_lines - tail)
+            .copied()
+            .map(str::to_string),
+    );
 
     let mut output = result.join("\n");
     if content.ends_with('\n') {
@@ -379,7 +464,16 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, None, 0)?;
+        run(
+            file.path(),
+            FilterLevel::Minimal,
+            None,
+            None,
+            false,
+            None,
+            false,
+            0,
+        )?;
         Ok(())
     }
 
@@ -580,17 +674,15 @@ fn main() {{
 
         // Both shapes must reach the same passthrough decision.
         for cfg in [&cfg_no_dot, &cfg_with_dot] {
-            assert!(
-                !should_apply_unknown_extension_cap(
-                    Some("zig"),
-                    &Language::Unknown,
-                    None,
-                    None,
-                    10_000,
-                    cfg,
-                    true,
-                )
-            );
+            assert!(!should_apply_unknown_extension_cap(
+                Some("zig"),
+                &Language::Unknown,
+                None,
+                None,
+                10_000,
+                cfg,
+                true,
+            ));
         }
     }
 
@@ -623,7 +715,11 @@ fn main() {{
             - (tracking::estimate_tokens(&output) as f64
                 / tracking::estimate_tokens(&input) as f64
                 * 100.0);
-        assert!(saved > 60.0, "expected >60% savings on capped md, got {:.1}%", saved);
+        assert!(
+            saved > 60.0,
+            "expected >60% savings on capped md, got {:.1}%",
+            saved
+        );
     }
 
     #[test]
@@ -768,7 +864,11 @@ fn main() {{
         writeln!(f2, "charlie\ndelta").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), &f2.path().to_string_lossy()])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                &f2.path().to_string_lossy(),
+            ])
             .output()
             .expect("failed to run ctxcrl read");
 
@@ -788,15 +888,199 @@ fn main() {{
         writeln!(f1, "valid content").unwrap();
 
         let output = std::process::Command::new(&bin)
-            .args(["read", &f1.path().to_string_lossy(), "/tmp/ctxcrl_nonexistent_file.txt"])
+            .args([
+                "read",
+                &f1.path().to_string_lossy(),
+                "/tmp/ctxcrl_nonexistent_file.txt",
+            ])
             .output()
             .expect("failed to run ctxcrl read");
 
-        assert!(!output.status.success(), "should exit non-zero on missing file");
+        assert!(
+            !output.status.success(),
+            "should exit non-zero on missing file"
+        );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stdout.contains("valid content"), "valid file should still be printed");
-        assert!(stderr.contains("ctxcrl_nonexistent_file"), "should report missing file on stderr");
+        assert!(
+            stdout.contains("valid content"),
+            "valid file should still be printed"
+        );
+        assert!(
+            stderr.contains("ctxcrl_nonexistent_file"),
+            "should report missing file on stderr"
+        );
+    }
+
+    // --- #236 repeat-read elimination, at the gate `run()` actually calls ---
+
+    mod repeat_read {
+        use super::super::repeat_read_stub;
+        use crate::cmds::system::read_cache::TestCacheEnv;
+        use crate::core::config::ReadConfig;
+        use std::io::Write;
+
+        /// A file comfortably over the 500-token floor.
+        fn big_file(dir: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
+            let path = dir.path().join(name);
+            let mut f = std::fs::File::create(&path).expect("create");
+            for i in 0..400 {
+                writeln!(f, "fn f{i}() {{ println!(\"line {i}\"); }}").expect("write");
+            }
+            path
+        }
+
+        fn stub(
+            path: &std::path::Path,
+            content: &str,
+            force: bool,
+            cfg: &ReadConfig,
+        ) -> Option<String> {
+            repeat_read_stub(path, content, force, false, None, None, None, cfg)
+        }
+
+        #[test]
+        fn second_identical_read_is_stubbed_first_is_not() {
+            let _env = TestCacheEnv::new("sess-repeat-1");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            assert!(
+                stub(&path, &content, false, &cfg).is_none(),
+                "a first read must always emit in full"
+            );
+            let second = stub(&path, &content, false, &cfg).expect("second read stubs");
+            assert!(second.contains("unchanged since your earlier read"));
+            assert!(
+                second.contains("--force"),
+                "stub must carry the recovery command"
+            );
+        }
+
+        #[test]
+        fn changed_content_is_never_stubbed() {
+            let _env = TestCacheEnv::new("sess-repeat-2");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            stub(&path, &content, false, &cfg);
+            let edited = format!("{content}\n// edited");
+            assert!(
+                stub(&path, &edited, false, &cfg).is_none(),
+                "the agent has not seen the edited file — it must be emitted"
+            );
+            // ...and the new content is what is now remembered.
+            assert!(
+                stub(&path, &edited, false, &cfg).is_some(),
+                "the edited content becomes the new baseline"
+            );
+        }
+
+        #[test]
+        fn force_emits_and_refreshes() {
+            let _env = TestCacheEnv::new("sess-repeat-3");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            stub(&path, &content, false, &cfg);
+            assert!(
+                stub(&path, &content, true, &cfg).is_none(),
+                "--force must always emit"
+            );
+        }
+
+        #[test]
+        fn windowed_and_intent_reads_are_never_stubbed() {
+            let _env = TestCacheEnv::new("sess-repeat-4");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            // Prime the cache with a full read.
+            stub(&path, &content, false, &cfg);
+            stub(&path, &content, false, &cfg).expect("precondition: plain read stubs");
+
+            for (label, out) in [
+                (
+                    "--max-lines",
+                    repeat_read_stub(&path, &content, false, false, Some(20), None, None, &cfg),
+                ),
+                (
+                    "--tail-lines",
+                    repeat_read_stub(&path, &content, false, false, None, Some(20), None, &cfg),
+                ),
+                (
+                    "--intent",
+                    repeat_read_stub(&path, &content, false, false, None, None, Some("x"), &cfg),
+                ),
+                (
+                    "--line-numbers",
+                    repeat_read_stub(&path, &content, false, true, None, None, None, &cfg),
+                ),
+            ] {
+                assert!(
+                    out.is_none(),
+                    "{label} renders different output than a whole-file read, so it must not be stubbed"
+                );
+            }
+        }
+
+        #[test]
+        fn small_files_are_never_stubbed() {
+            let _env = TestCacheEnv::new("sess-repeat-5");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = dir.path().join("tiny.rs");
+            std::fs::write(&path, "fn tiny() {}\n").expect("write");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            assert!(stub(&path, &content, false, &cfg).is_none());
+            assert!(
+                stub(&path, &content, false, &cfg).is_none(),
+                "a file under the token floor is not worth a recovery turn"
+            );
+        }
+
+        #[test]
+        fn disabled_in_config_never_stubs() {
+            let _env = TestCacheEnv::new("sess-repeat-6");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig {
+                repeat_read_stub: false,
+                ..ReadConfig::default()
+            };
+
+            assert!(stub(&path, &content, false, &cfg).is_none());
+            assert!(
+                stub(&path, &content, false, &cfg).is_none(),
+                "repeat_read_stub = false must restore verbatim behaviour"
+            );
+        }
+
+        #[test]
+        fn without_a_session_id_nothing_is_stubbed() {
+            let env = TestCacheEnv::new("sess-repeat-7");
+            env.clear_session();
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            assert!(stub(&path, &content, false, &cfg).is_none());
+            assert!(
+                stub(&path, &content, false, &cfg).is_none(),
+                "no host session id means the feature stays inert"
+            );
+        }
     }
 
     #[test]

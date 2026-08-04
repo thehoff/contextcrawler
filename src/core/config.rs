@@ -372,6 +372,24 @@ pub struct ReadConfig {
     /// `[".svelte", ".astro", ".zig"]`.
     #[serde(default)]
     pub passthrough_extensions: Vec<String>,
+    /// Replace a repeated whole-file read with a recovery marker when the
+    /// content has not changed within the session (#236). Set `false` to
+    /// always emit full content.
+    #[serde(default = "default_repeat_read_stub")]
+    pub repeat_read_stub: bool,
+    /// Files below this many tokens are always emitted in full, even on a
+    /// repeat read — see `read_cache::DEFAULT_MIN_TOKENS` for the measurement
+    /// behind the default.
+    #[serde(default = "default_repeat_read_min_tokens")]
+    pub repeat_read_min_tokens: usize,
+}
+
+fn default_repeat_read_stub() -> bool {
+    true
+}
+
+fn default_repeat_read_min_tokens() -> usize {
+    crate::cmds::system::read_cache::DEFAULT_MIN_TOKENS
 }
 
 impl Default for ReadConfig {
@@ -381,6 +399,8 @@ impl Default for ReadConfig {
             head_lines: 80,
             tail_lines: 80,
             passthrough_extensions: Vec::new(),
+            repeat_read_stub: default_repeat_read_stub(),
+            repeat_read_min_tokens: default_repeat_read_min_tokens(),
         }
     }
 }

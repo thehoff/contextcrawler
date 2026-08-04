@@ -315,7 +315,7 @@ Source: `src/cmds/system/`.
 |---|---|---|
 | `ls` | Compact tree-style listing. | Estimate 65%. |
 | `tree` | Proxies native `tree`, auto-excludes noise directories via `-I` unless `-a` is given. | Estimate 70%. |
-| `read <files>` | Reads source files with optional language-aware filtering (`--level none\|minimal\|aggressive`), `--max-lines` / `--tail-lines`, `--line-numbers`, and `--intent "<terms>"` surgical extraction (scores heading-anchored sections, returns top matches plus head/tail bookends; only for files over 5 KB with 3+ sections). | Estimate 60%. Verified floor 60% (intent path 50 to 80%). |
+| `read <files>` | Reads source files with optional language-aware filtering (`--level none\|minimal\|aggressive`), `--max-lines` / `--tail-lines`, `--line-numbers`, `--intent "<terms>"` surgical extraction (scores heading-anchored sections, returns top matches plus head/tail bookends; only for files over 5 KB with 3+ sections), and `--force` to bypass repeat-read elimination. | Estimate 60%. Verified floor 60% (intent path 50 to 80%). |
 | `cat`, `head`, `tail` | Mapped to `contextcrawler read`. `head -3 file`, `head -n 3 file`, `head --lines N file` and the `tail` equivalents are recognised. See coverage gaps below. | Estimate 60%. |
 | `grep`, `rg` | Groups matches by file instead of one line per match. | Estimate 75%. Verified floor 60%. |
 | `find` | Groups files by directory. | Estimate 70%. |
@@ -330,6 +330,47 @@ Source: `src/cmds/system/`.
 The conservative system utilities (`du`, `df`, `ps`, `systemctl status`, plus
 build/lint tools like `make`, `shellcheck`, `yamllint`, `markdownlint`,
 `hadolint`, `pre-commit`) sit at the 60 to 65% estimate band.
+
+### Repeat-read elimination
+
+`read` defaults to `--level none`, so a whole-file read returns the file
+verbatim. Across a 153k-command tracking corpus that made `read` the single
+largest token sink, and roughly 40% of that spend was the *same file read
+again* inside one session.
+
+When a session reads a file it has already been shown, and the content has not
+changed, `read` substitutes a marker instead of the text:
+
+```text
+[contextcrawler] src/cli.rs unchanged since your earlier read this session.
+  50931 tokens · sha256 4f2a1c9b8e7d
+  full content: contextcrawler read src/cli.rs --force
+```
+
+The content is never lost. The marker names the exact command that returns it,
+so the cost of a wrong guess is one extra turn rather than a missing file.
+
+Full content is always emitted when:
+
+- the content changed since the last read (compared by SHA-256)
+- `--force` is passed
+- the file is under `read.repeat_read_min_tokens` (default 500)
+- the read is windowed or scoped (`--max-lines`, `--tail-lines`,
+  `--line-numbers`, `--intent`) — those render something other than the whole
+  file, so "already seen" would not be true
+- the host exports no `CLAUDE_CODE_SESSION_ID`, which disables the feature
+- `read.repeat_read_stub = false` in the config
+
+State lives in `read_cache.db` alongside the tracking database, keyed by
+session and canonical path, and entries are pruned after seven days. The
+tracking database itself is never written by this feature.
+
+Turn it off entirely with:
+
+```toml
+[read]
+repeat_read_stub = false
+```
 
 ## Pipe mode
 

@@ -117,6 +117,10 @@ pub(crate) enum Commands {
         /// render path. See issue #151.
         #[arg(long)]
         intent: Option<String>,
+        /// Always emit full content, even if this session has already read
+        /// this file unchanged. See issue #236.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -3208,6 +3212,7 @@ fn run_cli() -> Result<i32> {
             tail_lines,
             line_numbers,
             intent,
+            force,
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
@@ -3252,6 +3257,7 @@ fn run_cli() -> Result<i32> {
                         tail_lines,
                         line_numbers,
                         intent_ref,
+                        force,
                         cli.verbose,
                     )
                 };
@@ -3690,7 +3696,9 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_copilot(ctx)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
-                    anyhow::bail!("Kilo Code is project-scoped. Use: contextcrawler init --agent kilocode");
+                    anyhow::bail!(
+                        "Kilo Code is project-scoped. Use: contextcrawler init --agent kilocode"
+                    );
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
@@ -4543,13 +4551,10 @@ mod tests {
             }
         ));
 
-        assert!(Cli::try_parse_from([
-            "contextcrawler",
-            "security",
-            "--explain",
-            "--scrub-logs",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["contextcrawler", "security", "--explain", "--scrub-logs",])
+                .is_err()
+        );
     }
 
     #[test]
