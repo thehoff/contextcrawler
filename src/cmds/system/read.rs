@@ -261,13 +261,14 @@ fn repeat_read_stub(
     if !read_config.repeat_read_stub {
         return None;
     }
-    let plain_whole_file =
-        max_lines.is_none() && tail_lines.is_none() && intent.is_none() && !line_numbers;
-    if !plain_whole_file {
-        return None;
-    }
+    let mode = read_cache::RenderMode {
+        line_numbers,
+        max_lines,
+        tail_lines,
+        intent: intent.map(str::to_string),
+    };
     let session = read_cache::session_id()?;
-    let key = read_cache::cache_key(file);
+    let key = read_cache::cache_key_with_mode(file, &mode);
     let sha = read_cache::content_sha(content);
     let tokens = tracking::estimate_tokens(content);
     let prior = read_cache::load(&session, &key);
@@ -995,15 +996,17 @@ fn main() {{
             );
         }
 
+        /// A differently-rendered read must never inherit a plain read's cache
+        /// entry — it produces different text, so the agent has not seen it.
         #[test]
-        fn windowed_and_intent_reads_are_never_stubbed() {
+        fn a_plain_read_never_satisfies_a_differently_rendered_one() {
             let _env = TestCacheEnv::new("sess-repeat-4");
             let dir = tempfile::tempdir().expect("dir");
             let path = big_file(&dir, "a.rs");
             let content = std::fs::read_to_string(&path).expect("read");
             let cfg = ReadConfig::default();
 
-            // Prime the cache with a full read.
+            // Prime the cache with a plain whole-file read.
             stub(&path, &content, false, &cfg);
             stub(&path, &content, false, &cfg).expect("precondition: plain read stubs");
 
@@ -1027,9 +1030,50 @@ fn main() {{
             ] {
                 assert!(
                     out.is_none(),
-                    "{label} renders different output than a whole-file read, so it must not be stubbed"
+                    "{label} renders different text than the plain read that primed the cache"
                 );
             }
+        }
+
+        /// The 84x `nl -ba` case: repeats of the *same* rendering are the whole
+        /// point, and the first cut of #236 missed them by refusing to cache
+        /// anything but a plain read.
+        #[test]
+        fn identical_line_numbered_reads_are_stubbed() {
+            let _env = TestCacheEnv::new("sess-repeat-8");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            let first = repeat_read_stub(&path, &content, false, true, None, None, None, &cfg);
+            assert!(first.is_none(), "first --line-numbers read emits in full");
+            let second = repeat_read_stub(&path, &content, false, true, None, None, None, &cfg);
+            assert!(
+                second.is_some(),
+                "a repeated --line-numbers read of unchanged content must be stubbed"
+            );
+        }
+
+        #[test]
+        fn different_windows_do_not_share_a_cache_entry() {
+            let _env = TestCacheEnv::new("sess-repeat-9");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            repeat_read_stub(&path, &content, false, false, Some(20), None, None, &cfg);
+            assert!(
+                repeat_read_stub(&path, &content, false, false, Some(20), None, None, &cfg)
+                    .is_some(),
+                "the same window repeated is a repeat"
+            );
+            assert!(
+                repeat_read_stub(&path, &content, false, false, Some(50), None, None, &cfg)
+                    .is_none(),
+                "a wider window shows lines the agent has not seen"
+            );
         }
 
         #[test]

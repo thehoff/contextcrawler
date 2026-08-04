@@ -120,6 +120,55 @@ pub fn cache_key(path: &Path) -> String {
         .to_string()
 }
 
+/// How a read was rendered. Two reads of the same file only count as the same
+/// read when they were rendered the same way.
+///
+/// The first cut of #236 simply refused to cache anything other than a plain
+/// whole-file read. That was too blunt: telemetry shows one file fetched via
+/// `nl -ba` (which maps to `--line-numbers`) 84 times, and none of those would
+/// have been caught. Folding the mode into the key means every identical
+/// repeat is eligible, while a differently-rendered read is still never
+/// mistaken for one the agent has already seen.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderMode {
+    pub line_numbers: bool,
+    pub max_lines: Option<usize>,
+    pub tail_lines: Option<usize>,
+    pub intent: Option<String>,
+}
+
+impl RenderMode {
+    /// Stable discriminator appended to the path in the cache key.
+    pub fn discriminator(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.line_numbers {
+            parts.push("ln".to_string());
+        }
+        if let Some(n) = self.max_lines {
+            parts.push(format!("max{n}"));
+        }
+        if let Some(n) = self.tail_lines {
+            parts.push(format!("tail{n}"));
+        }
+        if let Some(i) = &self.intent {
+            // Hash rather than embed: intent strings are free text and can be
+            // long enough to bloat the key.
+            parts.push(format!("intent{:.16}", content_sha(i)));
+        }
+        if parts.is_empty() {
+            "plain".to_string()
+        } else {
+            parts.join("+")
+        }
+    }
+}
+
+/// Full cache key: canonical path plus how it was rendered. The unit separator
+/// cannot occur in a path, so the two halves can never collide.
+pub fn cache_key_with_mode(path: &Path, mode: &RenderMode) -> String {
+    format!("{}\u{1f}{}", cache_key(path), mode.discriminator())
+}
+
 /// Env override for the cache DB location (tests, and anyone who wants it
 /// elsewhere). Deliberately a *separate* file from the tracking history DB —
 /// this feature must never write to the user's usage database.
@@ -341,6 +390,67 @@ mod tests {
     fn content_sha_distinguishes_content() {
         assert_eq!(content_sha("a"), content_sha("a"));
         assert_ne!(content_sha("a"), content_sha("b"));
+    }
+
+    // --- render mode ---
+
+    fn mode(
+        line_numbers: bool,
+        max_lines: Option<usize>,
+        tail_lines: Option<usize>,
+        intent: Option<&str>,
+    ) -> RenderMode {
+        RenderMode {
+            line_numbers,
+            max_lines,
+            tail_lines,
+            intent: intent.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn plain_read_has_a_stable_discriminator() {
+        assert_eq!(mode(false, None, None, None).discriminator(), "plain");
+    }
+
+    #[test]
+    fn each_render_mode_is_distinct() {
+        let modes = [
+            mode(false, None, None, None),
+            mode(true, None, None, None),
+            mode(false, Some(20), None, None),
+            mode(false, Some(50), None, None),
+            mode(false, None, Some(20), None),
+            mode(false, None, None, Some("auth")),
+            mode(false, None, None, Some("logging")),
+        ];
+        let discriminators: Vec<String> = modes.iter().map(|m| m.discriminator()).collect();
+        let unique: std::collections::HashSet<&String> = discriminators.iter().collect();
+        assert_eq!(
+            unique.len(),
+            discriminators.len(),
+            "every distinct render mode needs its own key: {discriminators:?}"
+        );
+    }
+
+    #[test]
+    fn line_numbered_read_does_not_collide_with_plain_read() {
+        let path = Path::new("/tmp/x.rs");
+        assert_ne!(
+            cache_key_with_mode(path, &mode(false, None, None, None)),
+            cache_key_with_mode(path, &mode(true, None, None, None)),
+            "a --line-numbers read renders different text than a plain read"
+        );
+    }
+
+    #[test]
+    fn identical_line_numbered_reads_share_a_key() {
+        let path = Path::new("/tmp/x.rs");
+        assert_eq!(
+            cache_key_with_mode(path, &mode(true, None, None, None)),
+            cache_key_with_mode(path, &mode(true, None, None, None)),
+            "the 84x `nl -ba` case must be cacheable"
+        );
     }
 
     // --- store round-trip ---

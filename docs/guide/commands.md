@@ -355,15 +355,20 @@ Full content is always emitted when:
 - the content changed since the last read (compared by SHA-256)
 - `--force` is passed
 - the file is under `read.repeat_read_min_tokens` (default 500)
-- the read is windowed or scoped (`--max-lines`, `--tail-lines`,
-  `--line-numbers`, `--intent`) — those render something other than the whole
-  file, so "already seen" would not be true
+- the read is rendered differently from the one that primed the cache — the
+  cache key covers `--line-numbers`, `--max-lines`, `--tail-lines` and
+  `--intent`, so a plain read never satisfies a windowed one and a narrow
+  window never satisfies a wider one
 - the host exports no `CLAUDE_CODE_SESSION_ID`, which disables the feature
 - `read.repeat_read_stub = false` in the config
 
+Repeats of the *same* rendering are caught: a file fetched twice with
+`--line-numbers` is a repeat, and so is the same `--max-lines 20` window
+twice.
+
 State lives in `read_cache.db` alongside the tracking database, keyed by
-session and canonical path, and entries are pruned after seven days. The
-tracking database itself is never written by this feature.
+session, canonical path and render mode, and entries are pruned after seven
+days. The tracking database itself is never written by this feature.
 
 Turn it off entirely with:
 
