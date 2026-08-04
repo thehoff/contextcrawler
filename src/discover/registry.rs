@@ -90,6 +90,11 @@ lazy_static! {
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
+    // `nl -ba <file>` numbers every line — the same thing `read --line-numbers`
+    // produces. Deliberately narrow: bare `nl` defaults to `-bt` (non-empty
+    // lines only), and any width/separator/format flag has no read equivalent,
+    // so both are left to run raw. See #195.
+    static ref NL_BA: Regex = Regex::new(r"^nl\s+-ba\s+(\S+)$").unwrap();
     // #195: shell-wrapper prefix. Matches `sh`/`bash`/`zsh` followed by a
     // combined `-c`/`-lc`/`-ic` etc. flag whose effect is "read the script
     // from the next argument", then an opening quote. The flag class is
@@ -1010,6 +1015,10 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
             return Some(format!("contextcrawler read {} --tail-lines {}", file, n));
         }
     }
+    if let Some(caps) = NL_BA.captures(cmd) {
+        let file = caps.get(1)?.as_str();
+        return Some(format!("contextcrawler read {} --line-numbers", file));
+    }
     None
 }
 
@@ -1229,7 +1238,15 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
-    if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
+    // `nl` joins head/tail here because the only faithful mapping it has is a
+    // line-range/format one: `nl -ba <file>` → `read --line-numbers` (#195).
+    // Every other `nl` form falls out of `rewrite_line_range` as None and runs
+    // raw, which is the correct outcome — bare `nl` numbers only non-empty
+    // lines, and width/separator flags have no `read` equivalent.
+    if cmd_part.starts_with("head -")
+        || cmd_part.starts_with("tail ")
+        || cmd_part.starts_with("nl ")
+    {
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
@@ -2598,6 +2615,54 @@ mod tests {
             rewrite_command_no_prefixes("head -c 100 src/main.rs", &[]),
             None
         );
+    }
+
+    // --- nl → read --line-numbers (#195) ---
+    //
+    // `nl -ba <file>` numbers every line, which is exactly what
+    // `contextcrawler read --line-numbers` produces. Telemetry: 356 calls
+    // burning 555k tokens at 0% saving, every one of them the `-ba` form.
+
+    #[test]
+    fn test_rewrite_nl_ba_maps_to_line_numbers() {
+        assert_eq!(
+            rewrite_command_no_prefixes("nl -ba README.md", &[]),
+            Some("contextcrawler read README.md --line-numbers".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_nl_ba_absolute_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("nl -ba /home/thehoff/.codex/MEMORY.md", &[]),
+            Some("contextcrawler read /home/thehoff/.codex/MEMORY.md --line-numbers".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_nl_default_body_numbering_skipped() {
+        // Bare `nl file` numbers only non-empty lines (-bt is the default), so
+        // it is NOT equivalent to --line-numbers. Leave it alone.
+        assert_eq!(rewrite_command_no_prefixes("nl README.md", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_nl_other_flags_skipped() {
+        // Anything that changes the numbering format or separator has no
+        // equivalent in `read --line-numbers`.
+        for cmd in [
+            "nl -ba -w 8 README.md",
+            "nl -bt README.md",
+            "nl -s : -ba README.md",
+            "nl -ba a.md b.md",
+            "nl -nrz -ba README.md",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "must not rewrite `{cmd}` — no faithful read equivalent"
+            );
+        }
     }
 
     #[test]
