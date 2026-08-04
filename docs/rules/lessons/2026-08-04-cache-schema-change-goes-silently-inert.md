@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-04
 - **Origin:** #236, found during `cargo install` smoke test
-- **Proposed status:** ENFORCED — a schema-mismatch test per persisted store
+- **Status:** RATIFIED as [ctxcrlRules, CTX-011] on 2026-08-04
 
 ## Rule
 

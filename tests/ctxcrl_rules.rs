@@ -176,6 +176,53 @@ fn ctx_004_hook_test_fixtures_do_not_inherit_the_umask() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CTX-011 — a persisted store must repair a schema it did not write.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Stores that outlive a release, and therefore must cope with a shape an
+/// older build left behind.
+///
+/// Scoped to an explicit registry rather than scanning for `CREATE TABLE`:
+/// test fixtures create throwaway tables too (`analytics/gain.rs` builds one in
+/// a temp dir), and flagging those would train the reader to ignore the lint.
+///
+/// Origin: renaming `first_seen` to `last_seen` in the read cache passed every
+/// test and two reviews, then made every query error against an
+/// already-deployed DB. The feature failed open and went silently inert.
+const PERSISTED_STORES: &[(&str, &str)] = &[
+    (
+        "src/cmds/system/read_cache.rs",
+        "the #236 repeat-read cache",
+    ),
+    ("src/core/tracking.rs", "the command tracking history DB"),
+];
+
+/// Evidence that a file copes with a foreign schema: it inspects the live
+/// columns, migrates, or versions the schema.
+const SCHEMA_HANDLING: &[&str] = &["PRAGMA table_info", "ALTER TABLE", "user_version"];
+
+#[test]
+fn ctx_011_persisted_stores_verify_their_schema() {
+    let mut failures = Vec::new();
+    for (file, what) in PERSISTED_STORES {
+        let Ok(source) = fs::read_to_string(file) else {
+            failures.push(format!("{file}: cannot read — did {what} move?"));
+            continue;
+        };
+        if !SCHEMA_HANDLING.iter().any(|n| source.contains(n)) {
+            failures.push(format!(
+                "{file} ({what})\n    CTX-011: creates a persisted table but never inspects or\n                     migrates an existing one. `CREATE TABLE IF NOT EXISTS` is not a\n                     migration — against a DB an older build wrote, every query errors\n                     and the feature goes silently inert."
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "CTX-011 violated (see docs/rules/RULES.md):\n\n{}\n",
+        failures.join("\n\n")
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CTX-005 — the rules document and its enforcement must stay in step.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -187,7 +234,7 @@ fn ctx_005_rules_document_is_tracked_and_cites_every_enforced_rule() {
     let rules = fs::read_to_string("docs/rules/RULES.md")
         .expect("docs/rules/RULES.md must exist and be tracked in git");
 
-    for id in ["CTX-001", "CTX-004", "CTX-005"] {
+    for id in ["CTX-001", "CTX-004", "CTX-005", "CTX-011"] {
         assert!(
             rules.contains(id),
             "{id} is enforced by tests/ctxcrl_rules.rs but not documented in docs/rules/RULES.md"
@@ -234,9 +281,15 @@ fn ctx_005_claude_md_lists_exactly_the_ratified_rules() {
         .collect();
     declared.sort();
     declared.dedup();
-    assert!(!declared.is_empty(), "no CTX- rules found in docs/rules/RULES.md");
+    assert!(
+        !declared.is_empty(),
+        "no CTX- rules found in docs/rules/RULES.md"
+    );
 
-    let missing: Vec<&String> = declared.iter().filter(|id| !summary.contains(*id)).collect();
+    let missing: Vec<&String> = declared
+        .iter()
+        .filter(|id| !summary.contains(*id))
+        .collect();
     assert!(
         missing.is_empty(),
         "ratified rules absent from CLAUDE.md, so no session will see them: {missing:?}"

@@ -17,6 +17,7 @@ Cite rules as `[ctxcrlRules, CTX-001]`.
 | CTX-003 | Never suppress over another layer's recovery marker. |
 | CTX-004 | Fixtures in mode-validating suites must not inherit the ambient umask. |
 | CTX-005 | Rules live where a clone can find them; ENFORCED rules name their test. |
+| CTX-011 | A persisted store must repair a schema it did not write. |
 
 **REVIEW** — no machine can check these, so they are on you:
 
@@ -26,6 +27,9 @@ Cite rules as `[ctxcrlRules, CTX-001]`.
 | CTX-007 | Check telemetry recency before quoting a number. |
 | CTX-008 | Verify an issue is still live before implementing it. |
 | CTX-009 | Bind Small+ work to an issue *before* implementing. |
+| CTX-010 | "Tests pass" must name the suite — `--lib` is not the whole suite. |
+| CTX-012 | Verify what a reproduction actually measures before trusting it. |
+| CTX-013 | A failing test is a finding until it is root-caused. |
 
 ## CTX-006 in full, because it is the one that keeps being broken
 
@@ -47,6 +51,19 @@ Before merging such a change:
 A feature that fails open can be completely inert and show no symptom at all.
 That is not a hypothetical: renaming one cache column did exactly that, passed
 every test and two reviews, and was only caught by installing the binary.
+
+## The four ways this repo has been fooled
+
+Each of these cost real time on 2026-08-04 and each is now a rule:
+
+- **Reporting green from a subset.** `cargo test --lib` was clean while
+  `cargo test` was red for the whole session (CTX-010).
+- **Trusting a reproduction.** #200's repro timed the *shell*, not the process,
+  and reported a fixed bug as broken (CTX-012).
+- **Writing off red tests.** 21 failures dismissed as "environmental" five
+  times; they were a real portability defect (CTX-013).
+- **Assuming `IF NOT EXISTS` migrates.** It does not; the feature went silently
+  inert against an older DB (CTX-011).
 
 ## Recording what you learn
 

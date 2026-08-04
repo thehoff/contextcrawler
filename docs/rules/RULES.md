@@ -153,6 +153,76 @@ Per the Hoff's git-hygiene law. Filing afterwards is not the same thing.
 
 ---
 
+## CTX-010 — "Tests pass" must name the suite
+
+**REVIEW**
+
+Never report green from a subset. `cargo test --lib` is not `cargo test`.
+State which command was run, and run the full one before claiming the tree is
+clean.
+
+**Why.** "3402 tests passing, zero failures" was reported repeatedly across a
+whole session on the strength of `cargo test --lib`, while `cargo test` was red
+the entire time — `branding_lint` had two leftover `/tmp/rtk-2286` fixtures.
+The claim was narrower than it sounded, and nobody would have known.
+
+---
+
+## CTX-011 — A persisted store must repair a schema it did not write
+
+**ENFORCED** — `ctx_011_persisted_stores_verify_their_schema` and
+`read_cache::tests::a_stale_schema_is_rebuilt_rather_than_breaking_every_query`
+
+`CREATE TABLE IF NOT EXISTS` is not a migration. Any store that outlives a
+release must detect a shape it did not write and repair it — recreate for a
+cache, migrate for anything holding user data. Register new stores in
+`PERSISTED_STORES` in `tests/ctxcrl_rules.rs`.
+
+**Why.** Renaming `first_seen` to `last_seen` passed every test and two council
+reviews. On a machine that had already run the previous build, every query then
+errored, the feature failed open, and it went **completely inert with no
+symptom** — safe, useless, invisible. Unit tests structurally cannot catch this:
+they always start from an empty database.
+
+---
+
+## CTX-012 — Verify what a reproduction actually measures
+
+**REVIEW**
+
+Before trusting a repro — yours, an issue's, or a reviewer's — confirm it
+measures the thing it claims to. A shell pipeline measures the shell.
+
+**Why.** #200's repro was
+`timeout 4 sh -lc '{ sleep 12; } | contextcrawler hook claude'` → exit 124.
+`timeout` kills the *shell*, and `sh` waits for both pipeline members, so it
+reports 124 no matter when contextcrawler exits. Timing the process itself
+(`contextcrawler hook claude < <(sleep 60)`) showed rc=0 after exactly 10s —
+already fixed. A working fix was nearly reported as broken and re-worked.
+
+The same applies to findings handed to you: a council review asserted the
+Gemini path leaked, and a first local test appeared to confirm it. Both used a
+payload shape Gemini ignores. Driven correctly, Gemini was already failing
+closed.
+
+---
+
+## CTX-013 — A failing test is a finding until it is root-caused
+
+**REVIEW**
+
+Never write off a red test as "environmental", "flaky", or "pre-existing"
+without establishing why. Say what causes it, or treat it as unexplained.
+
+**Why.** 21 hooks tests were dismissed as environmental **five separate times**
+in one session before anyone looked. They were a real portability defect: the
+suite was broken for every contributor whose umask is not 022 — the default on
+Debian/Ubuntu — and had been failing on the maintainer's own machine for
+months. Root-causing it also surfaced a second defect, a diagnostic that told
+users to fix a permission by granting one when they needed to revoke one.
+
+---
+
 ## Recording a lesson
 
 When a fix for a recurring or costly quirk is confirmed, write it to
