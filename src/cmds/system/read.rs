@@ -13,6 +13,12 @@ use std::path::Path;
 
 const JSON_MAX_DEPTH: usize = 5;
 
+/// Text that identifies output the large-file cap has truncated.
+///
+/// Shared by the renderer that writes it and the repeat-read cache that must
+/// refuse to stub over it, so the two cannot drift apart.
+const TRUNCATION_MARKER: &str = "ContextCrawler omitted middle of file";
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     file: &Path,
@@ -35,25 +41,6 @@ pub fn run(
 
     let read_config = config::read();
     let ext = file.extension().and_then(|e| e.to_str());
-
-    if let Some(stub) = repeat_read_stub(
-        file,
-        &content,
-        force,
-        line_numbers,
-        &window,
-        intent,
-        &read_config,
-    ) {
-        print!("{}", stub);
-        timer.track(
-            &format!("cat {}", file.display()),
-            "contextcrawler read",
-            &content,
-            &stub,
-        );
-        return Ok(());
-    }
 
     // Detect language from extension
     let lang = file
@@ -95,12 +82,33 @@ pub fn run(
     } else {
         filtered.clone()
     };
-    print!("{}", ctxcrl_output);
+
+    // #236 runs *after* rendering, so the cache is sized and gated by what the
+    // agent actually receives rather than by the raw file. Deciding before the
+    // render made a capped read record the full file's token count and then
+    // claim, on the next read, that the agent already had text it had never
+    // been shown.
+    let emitted = if let Some(stub) = repeat_read_stub(
+        file,
+        &content,
+        &ctxcrl_output,
+        force,
+        line_numbers,
+        &window,
+        intent,
+        &read_config,
+    ) {
+        stub
+    } else {
+        ctxcrl_output
+    };
+
+    print!("{}", emitted);
     timer.track(
         &format!("cat {}", file.display()),
         "contextcrawler read",
         &content,
-        &ctxcrl_output,
+        &emitted,
     );
     Ok(())
 }
@@ -250,6 +258,7 @@ pub(crate) fn render_output(
 fn repeat_read_stub(
     file: &Path,
     content: &str,
+    emitted: &str,
     force: bool,
     line_numbers: bool,
     window: &LineWindow,
@@ -257,6 +266,15 @@ fn repeat_read_stub(
     read_config: &config::ReadConfig,
 ) -> Option<String> {
     if !read_config.repeat_read_stub {
+        return None;
+    }
+    // A read whose own render path already truncated the file, or replaced it
+    // with an intent-scoped extract, carries its own recovery marker telling
+    // the agent how to get the rest. Layering the repeat-read marker on top
+    // would replace that guidance with a `--force` hint that re-renders the
+    // same truncated view, so the full text becomes unreachable through the
+    // route the agent is being pointed at. Leave those alone entirely.
+    if intent.is_some() || emitted_is_truncated(emitted) {
         return None;
     }
     let mode = read_cache::RenderMode {
@@ -269,8 +287,12 @@ fn repeat_read_stub(
     };
     let session = read_cache::session_id()?;
     let key = read_cache::cache_key_with_mode(file, &mode);
+    // Hash the source (so a file edit is always detected) but size the entry by
+    // what the agent actually received. Recording the raw token count made the
+    // stub claim credit for text that was never emitted — a 4,000-line file
+    // capped to 162 lines reported "65,723 tokens" withheld.
     let sha = read_cache::content_sha(content);
-    let tokens = tracking::estimate_tokens(content);
+    let tokens = tracking::estimate_tokens(emitted);
     let prior = read_cache::load(&session, &key);
     match read_cache::decide(
         prior.as_ref(),
@@ -287,6 +309,15 @@ fn repeat_read_stub(
             None
         }
     }
+}
+
+/// Whether a rendered read already carries a truncation/recovery marker.
+///
+/// Matched on the marker the cap itself emits rather than by re-deriving the
+/// cap predicate, so the two can never drift apart: if the renderer starts or
+/// stops truncating, this follows automatically.
+fn emitted_is_truncated(emitted: &str) -> bool {
+    emitted.contains(TRUNCATION_MARKER)
 }
 
 fn filter_content(content: &str, ext: Option<&str>, lang: Language, level: FilterLevel) -> String {
@@ -394,10 +425,10 @@ fn apply_unknown_extension_cap(
     // file. The escape-hatch text means an LLM that sees a capped output can
     // re-read with `contextcrawler proxy cat <path>` without needing to know
     // about the cap in advance.
-    result.push(
-        "[───────────────────────── ContextCrawler omitted middle of file ─────────────────────────]"
-            .to_string(),
-    );
+    result.push(format!(
+        "[───────────────────────── {} ─────────────────────────]",
+        TRUNCATION_MARKER
+    ));
     result.push(format!(
         "[omitted {} of {} lines ({:.1}% · ~{} tokens). Full file: `contextcrawler proxy cat {}`]",
         omitted_lines,
@@ -1032,9 +1063,10 @@ fn main() {{
     // --- #236 repeat-read elimination, at the gate `run()` actually calls ---
 
     mod repeat_read {
-        use super::super::{repeat_read_stub, LineWindow};
+        use super::super::{repeat_read_stub, LineWindow, TRUNCATION_MARKER};
         use crate::cmds::system::read_cache::TestCacheEnv;
         use crate::core::config::ReadConfig;
+        use crate::core::tracking;
         use std::io::Write;
 
         /// A file comfortably over the 500-token floor.
@@ -1055,6 +1087,7 @@ fn main() {{
         ) -> Option<String> {
             repeat_read_stub(
                 path,
+                content,
                 content,
                 force,
                 false,
@@ -1140,6 +1173,7 @@ fn main() {{
                     repeat_read_stub(
                         &path,
                         &content,
+                        &content,
                         false,
                         false,
                         &LineWindow {
@@ -1154,6 +1188,7 @@ fn main() {{
                     "--tail-lines",
                     repeat_read_stub(
                         &path,
+                        &content,
                         &content,
                         false,
                         false,
@@ -1170,6 +1205,7 @@ fn main() {{
                     repeat_read_stub(
                         &path,
                         &content,
+                        &content,
                         false,
                         false,
                         &LineWindow::default(),
@@ -1181,6 +1217,7 @@ fn main() {{
                     "--line-numbers",
                     repeat_read_stub(
                         &path,
+                        &content,
                         &content,
                         false,
                         true,
@@ -1211,6 +1248,7 @@ fn main() {{
             let first = repeat_read_stub(
                 &path,
                 &content,
+                &content,
                 false,
                 true,
                 &LineWindow::default(),
@@ -1220,6 +1258,7 @@ fn main() {{
             assert!(first.is_none(), "first --line-numbers read emits in full");
             let second = repeat_read_stub(
                 &path,
+                &content,
                 &content,
                 false,
                 true,
@@ -1244,6 +1283,7 @@ fn main() {{
             repeat_read_stub(
                 &path,
                 &content,
+                &content,
                 false,
                 false,
                 &LineWindow {
@@ -1256,6 +1296,7 @@ fn main() {{
             assert!(
                 repeat_read_stub(
                     &path,
+                    &content,
                     &content,
                     false,
                     false,
@@ -1273,6 +1314,7 @@ fn main() {{
                 repeat_read_stub(
                     &path,
                     &content,
+                    &content,
                     false,
                     false,
                     &LineWindow {
@@ -1284,6 +1326,96 @@ fn main() {{
                 )
                 .is_none(),
                 "a wider window shows lines the agent has not seen"
+            );
+        }
+
+        /// A read the large-file cap truncated must never be stubbed.
+        ///
+        /// Found by driving the real binary: a 4,000-line markdown file was
+        /// capped to 162 lines on the first read, and the second read then
+        /// claimed "unchanged since your earlier read — 65,723 tokens". The
+        /// agent had never been shown those tokens, and the `--force` command
+        /// the stub points at re-renders capped, so the full text was not
+        /// reachable by the route being advertised.
+        #[test]
+        fn a_capped_read_is_never_stubbed() {
+            let _env = TestCacheEnv::new("sess-capped");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "big.md");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            // Model what the renderer emits when the cap fires: a head/tail
+            // window carrying the truncation marker.
+            let capped = format!(
+                "line 1\n[───── {} ─────]\n[omitted 3800 of 4000 lines]\nline 4000\n",
+                TRUNCATION_MARKER
+            );
+
+            let first = repeat_read_stub(
+                &path,
+                &content,
+                &capped,
+                false,
+                false,
+                &LineWindow::default(),
+                None,
+                &cfg,
+            );
+            assert!(first.is_none(), "first read always emits");
+            let second = repeat_read_stub(
+                &path,
+                &content,
+                &capped,
+                false,
+                false,
+                &LineWindow::default(),
+                None,
+                &cfg,
+            );
+            assert!(
+                second.is_none(),
+                "a truncated read carries its own recovery marker — the \
+                 repeat-read stub must not replace it and claim the agent \
+                 already has the whole file"
+            );
+        }
+
+        /// The stub must be sized by what was emitted, not by the source file.
+        #[test]
+        fn stub_reports_emitted_tokens_not_raw_file_tokens() {
+            let _env = TestCacheEnv::new("sess-tokens");
+            let dir = tempfile::tempdir().expect("dir");
+            let path = big_file(&dir, "a.rs");
+            let content = std::fs::read_to_string(&path).expect("read");
+            let cfg = ReadConfig::default();
+
+            // A windowed read: the agent receives far less than the file holds.
+            // Wide enough to clear the 500-token floor, still well short of
+            // the whole file.
+            let window = LineWindow {
+                max_lines: Some(200),
+                ..LineWindow::default()
+            };
+            let emitted: String = content.lines().take(200).collect::<Vec<_>>().join("\n");
+            let emitted_tokens = tracking::estimate_tokens(&emitted);
+            let raw_tokens = tracking::estimate_tokens(&content);
+            assert!(
+                emitted_tokens < raw_tokens,
+                "precondition: the window is smaller than the file"
+            );
+
+            repeat_read_stub(&path, &content, &emitted, false, false, &window, None, &cfg);
+            let stub =
+                repeat_read_stub(&path, &content, &emitted, false, false, &window, None, &cfg)
+                    .expect("repeat of the same window stubs");
+            assert!(
+                stub.contains(&emitted_tokens.to_string()),
+                "stub must report what the agent received ({emitted_tokens}), got: {stub}"
+            );
+            assert!(
+                !stub.contains(&raw_tokens.to_string()),
+                "stub must not claim credit for the whole file ({raw_tokens}), got: {stub}"
             );
         }
 
