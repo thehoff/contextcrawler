@@ -32,7 +32,7 @@ One binary, one name: **`contextcrawler`**. Since 0.4.0 the same crate is
 also a small Rust **library** (see [Use as a library](#use-as-a-library)).
 
 **Built from** [rtk-ai/rtk](https://github.com/rtk-ai/rtk) (the core CLI
-proxy and 60+ command filters, tracked by rebase), [jee599/contextzip](https://github.com/jee599/contextzip)
+proxy and 60+ command filters — see [Relationship to upstream](#relationship-to-upstream)), [jee599/contextzip](https://github.com/jee599/contextzip)
 (the session compactor, stacktrace compressor, and HTML extractor, carried
 over with per-file SPDX headers), and [Tirith](https://tirith.sh) (a
 shell-syntax security gate, invoked subprocess-only). The supply-chain gate
@@ -142,11 +142,45 @@ The downstream parts of this repository are MIT.
 - Tirith is AGPL-3.0 and is **only invoked via subprocess**; no statically
   linked AGPL code in this distribution.
 
+## Relationship to upstream
+
+ContextCrawler started as a downstream fork of
+[rtk-ai/rtk](https://github.com/rtk-ai/rtk) that intended to track upstream
+by periodic rebase. **It no longer does, and calling it a rebase would be
+dishonest.** As at 2026-08-07:
+
+| | |
+|---|---|
+| Last shared commit | `d6c5647`, 2026-05-17 |
+| Commits added downstream since | 1,424 |
+| Upstream commits not merged | 490 |
+| Net diff vs the shared commit | +82,589 / −23,293 across 323 files |
+
+That is a hard fork wearing a downstream costume. Replaying 1,424 commits
+over 490 is not a maintenance task anyone will ever actually do, and
+pretending otherwise made every planning document quietly wrong.
+
+**The policy is now deliberate divergence:**
+
+- ContextCrawler is maintained as its own project. `develop` is the trunk.
+- Upstream is a **source to harvest, not a base to track**. Useful upstream
+  work is cherry-picked deliberately, reviewed as if written here, and
+  credited in the commit message. No bulk rebase is planned.
+- Upstream security fixes are the exception worth chasing on purpose. When
+  one lands, port it and note the upstream commit.
+- The filters carry rtk's lineage and rtk's licence. Attribution stays,
+  permanently, regardless of how far the code drifts.
+
+The historical rebase workflow is kept for the record at
+[`docs/contributing/archive/UPSTREAM_REBASE.md`](docs/contributing/archive/UPSTREAM_REBASE.md).
+It documents what we used to do, not what we do.
+
 ## Attribution
 
-- [rtk-ai/rtk](https://github.com/rtk-ai/rtk): upstream base. Active,
-  47K stars, current release v0.39.0. ContextCrawler tracks their tagged
-  releases.
+- [rtk-ai/rtk](https://github.com/rtk-ai/rtk): upstream base and origin of
+  the core proxy and command filters. See
+  [Relationship to upstream](#relationship-to-upstream) — this fork has
+  diverged and does not track upstream releases.
 - [jee599/contextzip](https://github.com/jee599/contextzip): source of the
   session compactor, stacktrace compressor, and HTML extractor. Each
   carried-over file has a per-file SPDX header citing this upstream.

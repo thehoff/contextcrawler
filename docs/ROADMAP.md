@@ -4,13 +4,34 @@ Living planning document. Update when scope changes; don't strip the
 history — past entries are useful when answering "why did we do it
 this way?" later.
 
-## Current line: v0.1.x
+## Current line: v0.4.x
 
-v0.1.x is the **security-hardening + maintenance-framework** line.
-We're driving down the upstream rtk-ai/rtk security gap that
-[`rtk-ai/rtk#640`](https://github.com/rtk-ai/rtk/issues/640)
-exposed, while building documentation and tooling that lets us
-maintain the fork sustainably.
+**Shipping: 0.4.9.** v0.4.x is the **library-pivot + stabilisation** line:
+the binary is a thin shim over the `contextcrawler` library crate, and the
+work is holding the command path deterministic rather than widening it.
+
+> [!NOTE]
+> **This document described v0.1.x until 2026-08-07** — nine releases after
+> that line closed. If you are adding to it, update this header in the same
+> commit. A roadmap that lies about the current version is worse than no
+> roadmap, because it gets believed.
+
+### Fork policy (set 2026-08-07)
+
+ContextCrawler no longer tracks upstream `rtk-ai/rtk` by rebase; it had
+drifted 1,424 commits ahead and 490 behind by the time anyone measured.
+Upstream is now a **source to harvest, not a base to track** — cherry-pick
+deliberately, review as if written here, credit the upstream commit. Full
+statement in [`README.md`](../README.md#relationship-to-upstream). Roadmap
+items are therefore scoped as *our* work, not as gap-closing against
+upstream.
+
+### Closed line: v0.1.x
+
+The security-hardening + maintenance-framework line. Drove down the
+upstream security gap that
+[`rtk-ai/rtk#640`](https://github.com/rtk-ai/rtk/issues/640) exposed and
+built the docs and tooling to maintain the fork. Retained for provenance.
 
 | Tag | Status | Theme |
 |---|---|---|
@@ -20,11 +41,19 @@ maintain the fork sustainably.
 | **v0.1.6** | **shipped 2026-05-15** | Build-path leak, raw-emit sweep, quality baselines, threat model, release runbook, module audits — plus the two items originally deferred to v0.1.7: global-filter trust gap **H-3** (`52b475e` SHA-256 gate + TOCTOU follow-up `97fe98e`) and tirith subprocess timeout **F-01** (`b4c93c3`). Also web SSRF block, supply-chain CVSS hardening, CI trust-token check. See `docs/sessions/2026-05-15-overnight.md`. |
 | v0.1.7 | unscoped | No carry-over from v0.1.6. Reserved for an out-of-band security patch if one needs to ship before a v0.2.0 candidate is ready. |
 
-## v0.2.0 — minor bump, end-Q3 2026
+## Backlog A — originally scoped as v0.2.0
 
-The v0.2.0 boundary is **when we change the default CLI behaviour in
-a user-visible way**. Each item below is a v0.2.0-eligible change;
-ship them when one of them is mature, not all at once.
+> [!WARNING]
+> **Overtaken by events.** This was written as "v0.2.0 — minor bump,
+> end-Q3 2026". v0.2.0, v0.3.0 and v0.4.0–v0.4.9 have all since shipped
+> without this section being revisited, so **the checkbox states below are
+> unverified** — some items may have landed under a different release.
+> Treat it as a backlog to re-triage, not as a status report. Verify against
+> the code before picking anything up [ctxcrlRules, CTX-008].
+
+The original boundary rule still holds and is worth keeping: a minor bump is
+**when we change the default CLI behaviour in a user-visible way**. Ship
+these when one is mature, not all at once.
 
 ### Security and trust
 
@@ -91,15 +120,24 @@ ship them when one of them is mature, not all at once.
       release flow — make `gpg.format = ssh` the documented default,
       no agent intermediary.
 
-## v0.3.0 — major bump, no fixed date
+## Backlog B — originally scoped as v0.3.0
 
-Reserve for things that materially change what ContextCrawler **is**.
-No items currently scoped — bumping here would mean either dropping
-the rtk-ai/rtk rebase relationship, switching the agent-hook
-protocol, or pivoting the project's role in the LLM-agent stack.
+> [!NOTE]
+> **One of this section's own trigger conditions has since fired.** It was
+> reserved for changes that materially alter what ContextCrawler *is*, and
+> named "dropping the rtk-ai/rtk rebase relationship" as an example. That
+> happened — not as a decision, but by drift: 1,424 commits ahead and 490
+> behind before anyone measured. It was ratified as policy on 2026-08-07
+> (see [Fork policy](#fork-policy-set-2026-08-07)). The v0.4.0 library
+> pivot arguably fired a second trigger.
+>
+> The lesson is the section's, not the reader's: a milestone defined by a
+> condition nobody checks is not a milestone. Re-scope this as real work or
+> delete it; do not leave it as a placeholder that already came true.
 
-If one of those happens, this section gets populated and v0.2.x
-becomes the stable LTS line.
+Reserve for things that materially change what ContextCrawler **is**:
+switching the agent-hook protocol, or pivoting the project's role in the
+LLM-agent stack.
 
 ## Tracking model
 
