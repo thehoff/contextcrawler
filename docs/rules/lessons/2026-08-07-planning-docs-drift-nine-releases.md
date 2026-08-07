@@ -2,7 +2,7 @@
 
 - **Date:** 2026-08-07
 - **Origin:** codebase review session, 2026-08-07
-- **Proposed status:** ENFORCED (a test can catch it)
+- **Status:** RATIFIED as [ctxcrlRules, CTX-014] on 2026-08-07
 
 ## Rule
 

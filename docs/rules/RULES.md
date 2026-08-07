@@ -223,6 +223,32 @@ users to fix a permission by granting one when they needed to revoke one.
 
 ---
 
+## CTX-014 — A doc that states the project's own state must be pinned by a test
+
+**ENFORCED** — `docs_currency::roadmap_current_line_matches_cargo_version`
+
+Any tracked document asserting the project's version, release line, or upstream
+posture must have a test binding it to the source of truth (`Cargo.toml`,
+`git`). A doc-update step in a runbook is not a control. If the only thing
+enforcing a claim is someone remembering, the claim will rot.
+
+**Why.** `docs/ROADMAP.md` said `## Current line: v0.1.x` while `Cargo.toml`
+shipped `0.4.9` — wrong across **nine releases**. The same doc already carried
+the process that would have caught it ("Each release: mark items shipped"),
+and that process was skipped nine consecutive times. Meanwhile `README.md`,
+`ROADMAP.md` and the project goal all claimed upstream rtk-ai/rtk was "tracked
+by rebase" while the fork sat 1,424 commits ahead and 490 behind. Three
+artefacts agreed with each other and all three were wrong — the configuration
+in which drift is hardest to notice, because cross-checking two of them
+confirms the error.
+
+Claims about the project's *own state* are the least-checked claims in any
+repo, because everyone assumes someone else checks them. Verify them against
+the source of truth the same way you would verify a claim about behaviour
+[ctxcrlRules, CTX-007].
+
+---
+
 ## Recording a lesson
 
 When a fix for a recurring or costly quirk is confirmed, write it to

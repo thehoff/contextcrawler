@@ -18,6 +18,7 @@ Cite rules as `[ctxcrlRules, CTX-001]`.
 | CTX-004 | Fixtures in mode-validating suites must not inherit the ambient umask. |
 | CTX-005 | Rules live where a clone can find them; ENFORCED rules name their test. |
 | CTX-011 | A persisted store must repair a schema it did not write. |
+| CTX-014 | A doc stating the project's own state must be pinned by a test. |
 
 **REVIEW** — no machine can check these, so they are on you:
 
