@@ -80,3 +80,7 @@ package-lock.json
 # Was tracked until 2026-08-07; it leaked the author's home directory
 # into every clone. Generated at runtime; never commit.
 cache/
+
+# Python bytecode from scripts/
+__pycache__/
+*.pyc
