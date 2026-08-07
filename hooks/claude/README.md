@@ -8,7 +8,7 @@
 - Returns `updatedInput` JSON for transparent command rewrite (agent doesn't know RTK is involved)
 - Exits silently (exit 0) on any failure: jq missing, contextcrawler missing, rewrite returns no match
 - No version guard - the hook only requires `contextcrawler` (with the `rewrite` subcommand) on PATH
-- `rtk-awareness.md` is a slim 10-line instructions file embedded into CLAUDE.md by `rtk init`
+- `rtk-awareness.md` is a slim 10-line instructions file embedded into CLAUDE.md by `contextcrawler init`
 
 ## Testing
 

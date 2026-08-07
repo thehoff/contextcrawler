@@ -122,7 +122,7 @@ On native Windows, contextcrawler falls back to CLAUDE.md injection. Your AI ass
 
 **Symptom:**
 ```
-rtk vitest --run
+contextcrawler vitest --run
 Error: program not found
 ```
 

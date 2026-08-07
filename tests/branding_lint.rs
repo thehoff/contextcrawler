@@ -1570,3 +1570,156 @@ fn branding_lint_clap_doc_comments_fail_on_rtk() {
         );
     }
 }
+
+// ─── Markdown docs: instructions that name a binary the user does not have ───
+//
+// The three tests above scan `.rs` files only. Documentation was never
+// covered, so 36 `rtk <subcommand>` invocations across 12 markdown files
+// survived every branding sweep — telling readers to run a binary that is
+// not installed. Found during the 2026-08-07 codebase review.
+//
+// This test is deliberately NARROW. It does not police the word "rtk" in
+// prose: upstream attribution ("downstream fork of rtk-ai/rtk"), historical
+// rebrand records under `docs/contributing/archive/`, and the vendored
+// upstream README are all legitimate and must stay readable. It fails only
+// on `rtk <known-subcommand>` — the shape of a command someone will paste
+// into a terminal and watch fail.
+//
+// Enforces: [ctxcrlRules, CTX-005] — rules live where a clone can find them.
+
+/// Doc trees whose `rtk` references are historical records or upstream
+/// attribution, not instructions. Keep this list short and justified.
+const DOC_LINT_SKIPPED_PREFIXES: &[&str] = &[
+    // Release history: past entries describe past behaviour verbatim.
+    "CHANGELOG.md",
+    // Vendored copy of the upstream project's own README.
+    "docs/upstream/",
+    // Historical rebrand-audit records; rewriting them destroys the audit.
+    "docs/contributing/archive/",
+    // Migration guide: must name the old commands to explain the migration.
+    "docs/MIGRATING_FROM_CONTEXTZIP.md",
+    // Gitignored personal/AI workspace (see .gitignore: "never publish").
+    "local/",
+];
+
+/// Subcommands and proxied verbs that make `rtk <word>` a runnable
+/// instruction rather than incidental prose.
+const DOC_LINT_SUBCOMMANDS: &[&str] = &[
+    "git", "cargo", "npm", "pnpm", "gh", "glab", "docker", "kubectl", "aws",
+    "vitest", "pytest", "ruff", "mypy", "tsc", "eslint", "biome", "go",
+    "dotnet", "terraform", "ls", "tree", "find", "grep", "wc", "read", "cat",
+    "head", "tail", "env", "json", "log", "deps", "init", "rewrite", "hook",
+    "proxy", "gain", "discover", "security", "session", "verify", "trust",
+    "run", "wget", "curl", "psql", "playwright", "prisma", "next", "prettier",
+    "rake", "rspec", "rubocop", "golangci-lint", "pip", "make", "test",
+];
+
+#[test]
+fn branding_lint_no_rtk_command_instructions_in_docs() {
+    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut failures: Vec<String> = Vec::new();
+
+    for entry in WalkDir::new(&repo_root)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            // Depth 0 is the repo root itself — always descend.
+            if e.depth() == 0 {
+                return true;
+            }
+            // Skip build output, dependency trees and worktrees.
+            if name == "target" || name == "node_modules" || name == ".worktrees" {
+                return false;
+            }
+            // Skip every dot-directory. `.git`, `.claude/`, `.council/`,
+            // `.github/` and friends are gitignored working state that never
+            // reaches a clone, so their `rtk` references mislead nobody. This
+            // lint polices shipped documentation only.
+            if e.file_type().is_dir() && name.starts_with('.') {
+                return false;
+            }
+            true
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|s| s == "md")
+                .unwrap_or(false)
+        })
+    {
+        let rel = entry
+            .path()
+            .strip_prefix(&repo_root)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if DOC_LINT_SKIPPED_PREFIXES.iter().any(|p| rel.starts_with(p)) {
+            continue;
+        }
+
+        let Ok(content) = fs::read_to_string(entry.path()) else {
+            continue; // unreadable/binary-ish: not this test's business
+        };
+
+        for (idx, line) in content.lines().enumerate() {
+            if line.trim_end().ends_with(ALLOW_MARKER) {
+                continue;
+            }
+            for cmd in DOC_LINT_SUBCOMMANDS {
+                let needle = format!("rtk {}", cmd);
+                for (pos, _) in line.match_indices(&needle) {
+                    // Reject `contextcrawler-rtk git`, `./rtk git`, `myrtk git`:
+                    // only a bare `rtk` token counts as an instruction.
+                    let preceded_ok = pos == 0
+                        || !line[..pos]
+                            .chars()
+                            .next_back()
+                            .map(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+                            .unwrap_or(false);
+                    // Reject `rtk gitfoo`: the subcommand must end cleanly.
+                    let after = pos + needle.len();
+                    let followed_ok = line[after..]
+                        .chars()
+                        .next()
+                        .map(|c| !(c.is_alphanumeric() || c == '_' || c == '-'))
+                        .unwrap_or(true);
+
+                    if preceded_ok && followed_ok {
+                        failures.push(format!(
+                            "  {}:{}\n    {}",
+                            rel,
+                            idx + 1,
+                            line.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        failures.sort();
+        failures.dedup();
+        panic!(
+            "\n\n--- branding-lint (docs) failures ---\n\
+             {} markdown line(s) instruct the reader to run `rtk <subcommand>`, \
+             a binary this project does not install:\n\n{}\n\n\
+             FIX OPTIONS:\n\
+             1. Rebrand to `contextcrawler <subcommand>` (preferred — this is \
+                a runnable instruction a reader will paste and watch fail).\n\
+             2. If the line is a historical record rather than an instruction, \
+                append `{}` to it, or add the doc tree to \
+                DOC_LINT_SKIPPED_PREFIXES with a justification comment.\n\n\
+             This test does NOT police the word \"rtk\" in prose. Upstream \
+             attribution and the `docs/contributing/archive/` rebrand records \
+             are legitimate and intentionally untouched.\n",
+            failures.len(),
+            failures.join("\n"),
+            ALLOW_MARKER,
+        );
+    }
+}

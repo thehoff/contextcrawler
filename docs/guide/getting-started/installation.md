@@ -74,7 +74,7 @@ first:
 
 ```bash
 # If you still have the old binary, use its own uninstall.
-rtk init -g --uninstall 2>/dev/null || true
+contextcrawler init -g --uninstall 2>/dev/null || true
 
 # Then check (and remove leftovers manually) in:
 #   ~/.claude/settings.json        — PreToolUse hook entry

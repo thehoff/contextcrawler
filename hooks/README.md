@@ -2,9 +2,25 @@
 
 ## Scope
 
-**Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
+**Deployed hook artifacts** — the files installed on user machines by `contextcrawler init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, ask the binary for a decision, format the agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 7 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode).
+> [!IMPORTANT]
+> **Two decision entrypoints exist; only one is installed by default.**
+>
+> - **`contextcrawler hook <agent>`** — the live path. The binary reads the
+>   agent's JSON on stdin and emits the agent's response format directly.
+>   This is what `contextcrawler init` writes into `settings.json` today.
+> - **`contextcrawler rewrite <cmd>`** — the legacy path. Returns a rewritten
+>   command string for a shell delegate to wrap. Still supported and still
+>   shipped (`hooks/claude/rtk-rewrite.sh`, `hooks/cursor/rtk-rewrite.sh`),
+>   but no longer what a fresh install uses.
+>
+> Both run the Tirith and supply-chain gates on the **raw** command before
+> deciding rewritability. The `rtk-`prefixed filenames are pre-rebrand and
+> are kept as-is deliberately: renaming them changes install paths and
+> integrity hashes.
+
+Owns: per-agent hook scripts and configuration files. `contextcrawler init` targets Claude Code, Cursor, Windsurf, Cline, Kilo Code, Antigravity, Hermes and Pi; the binary additionally serves Copilot and Gemini through `contextcrawler hook`.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -12,22 +28,28 @@ Relationship to `src/hooks/`: that component **creates** these files; this direc
 
 ## Purpose
 
-LLM agent integrations that intercept CLI commands and route them through RTK for token optimization. Each hook transparently rewrites raw commands (e.g., `git status`) to their RTK equivalents (e.g., `rtk git status`), delivering 60-90% token savings without requiring the agent or user to change their workflow.
+LLM agent integrations that intercept CLI commands and route them through ContextCrawler for token optimisation. Each hook transparently rewrites raw commands (e.g., `git status`) to their proxied equivalents (e.g., `contextcrawler git status`), delivering 60-90% token savings without requiring the agent or user to change their workflow.
 
 ## How It Works
 
 ```
 Agent runs command (e.g., "cargo test --nocapture")
   -> Hook intercepts (PreToolUse / plugin event)
-  -> Reads JSON input, extracts command string
-  -> Calls `rtk rewrite "cargo test --nocapture"`
-  -> Registry matches pattern, returns "rtk cargo test --nocapture"
-  -> Hook sends response in agent-specific JSON format
-  -> Agent executes "rtk cargo test --nocapture" instead
+  -> Binary reads JSON on stdin, extracts command string
+  -> Gates run on the RAW command (Tirith + supply-chain)
+  -> Registry matches pattern -> "contextcrawler cargo test --nocapture"
+  -> Binary emits the agent-specific JSON response
+  -> Agent executes "contextcrawler cargo test --nocapture" instead
   -> Filtered output reaches LLM (~90% fewer tokens)
 ```
 
-All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook scripts are **thin delegates** that handle agent-specific JSON formats and call `rtk rewrite` for the actual decision. This ensures a single source of truth for all 70+ rewrite patterns.
+Gate ordering is deliberate: **gates run before rewritability is decided**, so
+non-rewritable commands (`bash`, unknown subcommands) are still inspected. A
+`block` finding downgrades an auto-allow to *Ask* — never to a silent allow.
+
+All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). This
+is the single source of truth for all 70+ rewrite patterns; hook scripts never
+reimplement it.
 
 ## Directory Structure
 
@@ -46,10 +68,10 @@ Each agent subdirectory has its own README with hook-specific details:
 | Agent | Mechanism | Hook Type | Can Modify Command? |
 |-------|-----------|-----------|---------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
-| VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
-| GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
+| VS Code Copilot Chat | Rust binary (`contextcrawler hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
+| GitHub Copilot CLI | Rust binary (`contextcrawler hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
-| Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
+| Gemini CLI | Rust binary (`contextcrawler hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
@@ -73,8 +95,8 @@ Each agent subdirectory has its own README with hook-specific details:
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "allow",
-    "permissionDecisionReason": "RTK auto-rewrite",
-    "updatedInput": { "command": "rtk git status" }
+    "permissionDecisionReason": "ContextCrawler auto-rewrite",
+    "updatedInput": { "command": "contextcrawler git status" }
   }
 }
 ```
@@ -87,7 +109,7 @@ Each agent subdirectory has its own README with hook-specific details:
 ```json
 {
   "permission": "allow",
-  "updated_input": { "command": "rtk git status" }
+  "updated_input": { "command": "contextcrawler git status" }
 }
 ```
 
@@ -107,7 +129,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```json
 {
   "permissionDecision": "deny",
-  "permissionDecisionReason": "Token savings: use `rtk git status` instead"
+  "permissionDecisionReason": "Token savings: use `contextcrawler git status` instead"
 }
 ```
 
@@ -138,7 +160,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 {
   "decision": "allow",
   "hookSpecificOutput": {
-    "tool_input": { "command": "rtk git status" }
+    "tool_input": { "command": "contextcrawler git status" }
   }
 }
 ```
@@ -149,7 +171,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 
 Mutates `args.command` in-place via the zx library:
 ```typescript
-const result = await $`rtk rewrite ${command}`.quiet().nothrow()
+const result = await $`contextcrawler rewrite ${command}`.quiet().nothrow()
 const rewritten = String(result.stdout).trim()
 if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
@@ -180,13 +202,13 @@ The registry handles `&&`, `||`, `;`, `|`, and `&` operators:
 - **And/Or/Semicolon** (`&&`, `||`, `;`): Both sides rewritten independently
 - **find/fd in pipes**: Never rewritten (output format incompatible with xargs/wc/grep)
 
-Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk cargo test`
+Example: `cargo fmt --all && cargo test` becomes `contextcrawler cargo fmt --all && contextcrawler cargo test`
 
 ### Override Controls
 
-- **`RTK_DISABLED=1`**: Per-command override (`RTK_DISABLED=1 git status` runs raw)
-- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite. Matches against the full command after stripping env prefixes. Subcommand patterns work (`"git push"` excludes `git push origin main`). Patterns starting with `^` are treated as regex.
-- **Already-RTK**: `rtk git status` passes through unchanged (no `rtk rtk git`)
+- **`CTXCRL_DISABLED=1`**: Per-command override (`CTXCRL_DISABLED=1 git status` runs raw). The pre-rebrand `RTK_DISABLED=1` is still honoured but deprecated; see `is_disabled_by_env_prefix` in `src/discover/registry.rs`.
+- **`exclude_commands`**: In `~/.config/contextcrawler/config.toml`, list commands to never rewrite. Matches against the full command after stripping env prefixes. Subcommand patterns work (`"git push"` excludes `git push origin main`). Patterns starting with `^` are treated as regex.
+- **Already-proxied**: `contextcrawler git status` passes through unchanged (no `contextcrawler contextcrawler git`)
 
 ## Exit Code Contract
 
@@ -194,19 +216,15 @@ Hooks must **never block command execution**. All error paths (missing binary, b
 
 When there is no rewrite to apply, the hook must produce no output (or `{}` for Cursor, which requires JSON on all paths).
 
-### Gaps (to be fixed)
-
-- `hook_cmd.rs::run_gemini()` — exits 1 on invalid JSON input instead of exit 0
-
 ## Graceful Degradation
 
 Hooks are **non-blocking** -- they never prevent a command from executing:
 
 - jq not installed: warning to stderr, exit 0 (command runs raw)
-- rtk binary not found: warning to stderr, exit 0
+- contextcrawler binary not found: warning to stderr, exit 0
 - contextcrawler missing the `rewrite` subcommand: warning to stderr, exit 0
 - Invalid JSON input: pass through unchanged
-- `rtk rewrite` crashes: hook exits 0 (subprocess error ignored)
+- `contextcrawler hook` crashes: hook exits 0 (subprocess error ignored)
 - Filter logic error: fallback to raw command output
 
 ## Adding a New Agent Integration
@@ -223,7 +241,7 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 
 ### Eligibility
 
-RTK supports AI coding assistants that developers actually use day-to-day. To add a new agent:
+ContextCrawler supports AI coding assistants that developers actually use day-to-day. To add a new agent:
 
 - Agent has a **documented, stable hook/plugin API** (not experimental/alpha)
 - Agent is **actively maintained** (commit activity in last 3 months)
