@@ -953,10 +953,16 @@ pub(crate) enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Stash management (list, show, pop, apply, drop)
+    /// Stash management (list, show, pop, apply, drop, push)
     Stash {
         /// Subcommand: list, show, pop, apply, drop, push
         subcommand: Option<String>,
+        /// git's standard -q/--quiet global flag, accepted before the
+        /// subcommand (#239). Without this, `git stash -q` hits clap's
+        /// `unexpected argument` and falls back to raw passthrough at 0
+        /// savings, emitting the clap error text first.
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1349,6 +1355,21 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     // takes the fallback path instead of the Kubectl subcommand path.
     if let Some(code) = cloud_fallback_hardening(&args[0], &args[1..]) {
         return Ok(code);
+    }
+
+    // #238: a known subcommand that is NOT a real binary must show the clap
+    // error rather than fall back to exec. The passthrough contract assumes
+    // `args[0]` names a binary on PATH — but `contextcrawler read` is a
+    // subcommand, and `read` is a shell builtin, not a binary, so the
+    // fallback can never succeed. Before this check,
+    // `read FILE --max-lines 2 --tail-lines 3` (conflicting flags) fell
+    // through to `Command::new("read")` → "No such file or directory", and
+    // some callers reported exit 0: a total failure reported as success.
+    // Foreign subcommands (unknown to us) still fall back raw — those
+    // legitimately name external tools. Runs AFTER cloud hardening so a
+    // hardened tool's deny still fires even when the tool is not installed.
+    if !foreign && core::utils::resolve_binary(&args[0]).is_err() {
+        parse_error.exit();
     }
 
     let raw_command = args.join(" ");
@@ -3407,8 +3428,12 @@ fn run_cli() -> Result<i32> {
                     cli.verbose,
                     &global_args,
                 )?,
-                GitCommands::Stash { subcommand, args } => git::run(
-                    git::GitCommand::Stash { subcommand },
+                GitCommands::Stash {
+                    subcommand,
+                    args,
+                    quiet,
+                } => git::run(
+                    git::GitCommand::Stash { subcommand, quiet },
                     &args,
                     None,
                     cli.verbose,

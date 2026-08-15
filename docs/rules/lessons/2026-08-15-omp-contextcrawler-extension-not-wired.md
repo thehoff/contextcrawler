@@ -1,11 +1,15 @@
-# OMP contextcrawler extension was not wired — now installed (2026-08-15)
+# OMP contextcrawler extension was not wired — installed & verified (2026-08-15)
 
 - **Date:** 2026-08-15
 - **Origin:** OMP extension dir inspection + isolated-runtime verification
 - **Proposed status:** REVIEW
 - **Resolution:** installed `hooks/pi/rtk-extension.ts` →
-  `~/.omp/agent/extensions/contextcrawler.ts` (2026-08-15). Takes effect next
-  session start. Rollback = delete that one file.
+  `~/.omp/agent/extensions/contextcrawler.ts` (2026-08-15) and **verified live
+  in the default OMP profile** the same day: a fresh default-profile session
+  issued `ls -la <repo>` and received the compacted mode-only output
+  (755/.agents/), proving discovery rule 1 picked up the file, the `bash` tool
+  was replaced, and the `contextcrawler` rewrite fired end-to-end.
+  Rollback = delete that one file.
 
 ## Observation
 

@@ -173,6 +173,10 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
             crate::git::run(
                 crate::git::GitCommand::Stash {
                     subcommand: stash_sub,
+                    // The gt alias path forwards raw args without clap
+                    // parsing, so a leading -q stays in stash_args and is
+                    // forwarded by run_stash directly.
+                    quiet: false,
                 },
                 stash_args,
                 None,

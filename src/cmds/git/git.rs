@@ -25,7 +25,10 @@ pub enum GitCommand {
     Pull,
     Branch,
     Fetch,
-    Stash { subcommand: Option<String> },
+    Stash {
+        subcommand: Option<String>,
+        quiet: bool,
+    },
     Worktree,
 }
 
@@ -139,8 +142,8 @@ pub fn run(
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
         GitCommand::Fetch => run_fetch(args, verbose, global_args),
-        GitCommand::Stash { subcommand } => {
-            run_stash(subcommand.as_deref(), args, verbose, global_args)
+        GitCommand::Stash { subcommand, quiet } => {
+            run_stash(subcommand.as_deref(), args, verbose, global_args, quiet)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
     }
@@ -1879,6 +1882,7 @@ fn run_stash(
     args: &[String],
     verbose: u8,
     global_args: &[String],
+    quiet: bool,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1886,10 +1890,20 @@ fn run_stash(
         eprintln!("git stash {:?}", subcommand);
     }
 
+    // #239: git accepts `-q`/`--quiet` after the subcommand (and bare, for
+    // push). clap now parses it as a flag on our side; forward it in the
+    // position git expects. For `show`, git rejects -q natively — the
+    // forwarding preserves that native error rather than silently dropping
+    // the user's flag.
+    let quiet_arg = if quiet { Some("-q") } else { None };
+
     match subcommand {
         Some("list") => {
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", "list"]);
+            if let Some(q) = quiet_arg {
+                cmd.arg(q);
+            }
             let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
             // Surface a failed git run raw — filtering a non-zero exit would
@@ -1932,6 +1946,9 @@ fn run_stash(
         Some("show") => {
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", "show", "-p"]);
+            if let Some(q) = quiet_arg {
+                cmd.arg(q);
+            }
             for arg in args {
                 cmd.arg(arg);
             }
@@ -1975,6 +1992,9 @@ fn run_stash(
             let sub = subcommand.unwrap();
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
+            if let Some(q) = quiet_arg {
+                cmd.arg(q);
+            }
             for arg in args {
                 cmd.arg(arg);
             }
@@ -2014,6 +2034,9 @@ fn run_stash(
             };
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
+            if let Some(q) = quiet_arg {
+                cmd.arg(q);
+            }
             if let Some(arg) = arg {
                 cmd.arg(arg);
             }

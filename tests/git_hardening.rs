@@ -601,3 +601,134 @@ fn benign_git_log_still_succeeds() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// #239: `git stash -q` (bare quiet push) and `git stash --quiet` must not
+/// hit clap's `unexpected argument` parse failure. Before the fix, `-q`
+/// before the positional `[SUBCOMMAND]` was rejected by clap, the clap
+/// error text was emitted, and the command fell back to raw passthrough at
+/// 0 savings.
+///
+/// Runs in a throwaway repo so the bare `stash -q` cannot touch the
+/// developer's real stash stack.
+#[test]
+fn git_stash_quiet_flag_parses_without_clap_error() {
+    let _guard = common::env_lock();
+    let (_repo, repo_path) = make_repo();
+
+    // Bare quiet push: no stash entries exist yet in this fresh repo, so
+    // git prints "No local changes to save" and exits 0 — the assertion is
+    // that the command ran at all, with NO clap error text.
+    let out = ccrawl_in(&repo_path)
+        .args(["git", "stash", "-q"])
+        .output()
+        .expect("contextcrawler git stash -q runs");
+    assert!(
+        out.status.success(),
+        "git stash -q must succeed, stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("unexpected argument"),
+        "stash -q must not emit a clap parse error: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Long form.
+    let out = ccrawl_in(&repo_path)
+        .args(["git", "stash", "--quiet"])
+        .output()
+        .expect("contextcrawler git stash --quiet runs");
+    assert!(
+        out.status.success(),
+        "git stash --quiet must succeed, stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("unexpected argument"),
+        "stash --quiet must not emit a clap parse error: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A stashed change must exist for list -q to be meaningful; the
+    // subcommand form routes -q through trailing args (already worked) and
+    // must keep working now that -q is also a clap flag.
+    let out = ccrawl_in(&repo_path)
+        .args(["git", "stash", "list", "-q"])
+        .output()
+        .expect("contextcrawler git stash list -q runs");
+    assert!(
+        out.status.success(),
+        "git stash list -q must succeed, stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("unexpected argument"),
+        "stash list -q must not emit a clap parse error: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// #238: a clap parse failure on a KNOWN subcommand that is not a real
+/// binary must show the clap error with a non-zero exit, never fall back
+/// to exec'ing the subcommand name as a binary.
+///
+/// `read` is a contextcrawler subcommand and a shell builtin — there is no
+/// `read` binary to fall back to, so the old path emitted
+/// "No such file or directory" and (on some paths) exited 0, reporting a
+/// total failure as success. `read FILE --max-lines 2 --tail-lines 3`
+/// triggers a clap conflict (the two window flags are mutually exclusive).
+#[test]
+fn read_parse_conflict_shows_clap_error_not_binary_exec() {
+    let _guard = common::env_lock();
+    let (_repo, repo_path) = make_repo();
+
+    let out = ccrawl_in(&repo_path)
+        .args(["read", "a.txt", "--max-lines", "2", "--tail-lines", "3"])
+        .output()
+        .expect("contextcrawler read with conflicting flags runs");
+    assert!(
+        !out.status.success(),
+        "conflicting read flags must exit non-zero, got {:?}",
+        out.status.code()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with"),
+        "clap conflict message expected, stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("No such file or directory"),
+        "must not try to exec `read` as a binary, stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("Failed to resolve"),
+        "must not take the binary-resolution fallback path, stderr={stderr}"
+    );
+}
+
+/// #238 companion: an unknown subcommand (genuinely foreign) still falls
+/// back to raw execution — the fix must not break graceful degradation
+/// for real external commands.
+#[test]
+fn foreign_subcommand_still_falls_back_to_raw_exec() {
+    let _guard = common::env_lock();
+    let (_repo, repo_path) = make_repo();
+
+    let out = ccrawl_in(&repo_path)
+        .args(["bash", "-c", "echo FOREIGN_FALLBACK_OK"])
+        .output()
+        .expect("contextcrawler bash -c runs");
+    assert!(
+        out.status.success(),
+        "foreign command must fall back to raw exec, stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("FOREIGN_FALLBACK_OK"),
+        "foreign command output must reach the caller"
+    );
+}
