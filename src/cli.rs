@@ -133,20 +133,27 @@ pub(crate) enum Commands {
         end_line: Option<usize>,
         /// Inclusive line range as `A:B` or `A-B` — the Codex/agent read-tool
         /// spelling (e.g. `read src/cli.rs --range 430:500`). Same semantics
-        /// as `--start-line A --end-line B` (#244).
-        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines", "start_line", "end_line"])]
+        /// as `--start-line A --end-line B` (#244). `--lines A:B` is the
+        /// alternate spelling evidenced in telemetry (`read README.md
+        /// --lines 24:36`).
+        #[arg(long, visible_alias = "lines", conflicts_with_all = ["max_lines", "tail_lines", "start_line", "end_line"])]
         range: Option<String>,
         /// Alias of --range (alternate agent read-tool spelling).
         #[arg(long = "line-range", conflicts_with_all = ["max_lines", "tail_lines", "start_line", "end_line"])]
         line_range: Option<String>,
-        /// Single line to show (1-indexed). Pairs with --line-limit for a
-        /// window anchored at that line (#244).
+        /// Single line to show (1-indexed). Pairs with --line-end for an
+        /// explicit bound or --line-limit for a window anchored at that
+        /// line (#244).
         #[arg(long, conflicts_with_all = ["max_lines", "tail_lines", "start_line", "end_line"])]
         line: Option<usize>,
+        /// When used with --line: last line to show (inclusive) —
+        /// `--line 10 --line-end 40` → lines 10..=40.
+        #[arg(long, requires = "line", conflicts_with = "line_limit")]
+        line_end: Option<usize>,
         /// When used with --line: number of lines to show starting at the
         /// anchor line (inclusive window: `--line 10 --line-limit 5` →
         /// lines 10..=14).
-        #[arg(long, requires = "line")]
+        #[arg(long, requires = "line", conflicts_with = "line_end")]
         line_limit: Option<usize>,
     },
 
@@ -3275,31 +3282,41 @@ fn run_cli() -> Result<i32> {
             range,
             line_range,
             line,
+            line_end,
             line_limit,
         } => {
             // #244: agent read-tool selector forms. Resolve the alias
             // spellings into the canonical start/end pair before building
-            // the window; `--range`/`--line-range` conflict with the
-            // explicit bounds at clap level so at most one source is set.
+            // the window; `--range`/`--line-range`/`--lines` conflict with
+            // the explicit bounds at clap level so at most one source is set.
             let (start_line, end_line) = match range.or(line_range) {
                 Some(spec) => {
                     let (s, e) = crate::cmds::system::read::parse_line_range(&spec)?;
                     (Some(s), Some(e))
                 }
                 None => match line {
-                    Some(anchor) => match line_limit {
-                        Some(0) => {
+                    Some(anchor) => match line_end {
+                        // `--line 10 --line-end 40` — explicit bound.
+                        Some(end) if end >= anchor => (Some(anchor), Some(end)),
+                        Some(end) => {
                             return Err(anyhow::anyhow!(
-                                "--line-limit must be >= 1 (got 0)"
+                                "--line-end {end} is before --line {anchor}"
                             ));
                         }
-                        Some(limit) => {
-                            let end = anchor.checked_add(limit - 1).ok_or_else(|| {
-                                anyhow::anyhow!("--line {} + --line-limit {limit} overflows line numbers", anchor)
-                            })?;
-                            (Some(anchor), Some(end))
-                        }
-                        None => (Some(anchor), Some(anchor)),
+                        None => match line_limit {
+                            Some(0) => {
+                                return Err(anyhow::anyhow!(
+                                    "--line-limit must be >= 1 (got 0)"
+                                ));
+                            }
+                            Some(limit) => {
+                                let end = anchor.checked_add(limit - 1).ok_or_else(|| {
+                                    anyhow::anyhow!("--line {} + --line-limit {limit} overflows line numbers", anchor)
+                                })?;
+                                (Some(anchor), Some(end))
+                            }
+                            None => (Some(anchor), Some(anchor)),
+                        },
                     },
                     None => (start_line, end_line),
                 },
@@ -5159,6 +5176,41 @@ mod tests {
                 _ => panic!("Expected Read command"),
             }
         }
+    }
+
+    #[test]
+    fn test_read_line_with_line_end_parses() {
+        // `--line 10 --line-end 40` — explicit bound pairing (#244).
+        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--line", "10", "--line-end", "40"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Read { line, line_end, .. } => {
+                    assert_eq!(line, Some(10));
+                    assert_eq!(line_end, Some(40));
+                }
+                _ => panic!("Expected Read command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_lines_range_alias_parses() {
+        // `--lines 24:36` is the telemetry-evidenced alias for --range.
+        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--lines", "24:36"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Read { range, .. } => assert_eq!(range.as_deref(), Some("24:36")),
+                _ => panic!("Expected Read command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_line_end_requires_line() {
+        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--line-end", "40"]);
+        assert!(result.is_err(), "--line-end requires --line");
     }
 
     #[test]
