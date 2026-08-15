@@ -804,8 +804,32 @@ fn rotate_downgrades_log_at(path: &std::path::Path, cap: u64) {
     let rotated = path.with_file_name("downgrades.jsonl.1");
     // Replacing the previous rotated generation bounds disk to ~2× the cap
     // (active + one rotated), matching tee's keep-N semantics.
-    let _ = std::fs::remove_file(&rotated);
+    //
+    // Atomicity: `rename(2)` atomically replaces the destination on Unix,
+    // so there is no remove-then-rename window where a concurrent writer
+    // could observe the destination missing (or clobber a half-rotated
+    // state). Windows has no atomic-replace rename, so the explicit
+    // remove is kept there.
+    //
+    // Known concurrency limits (accepted: this is best-effort telemetry):
+    // - A writer that opened the active file before rotation holds the
+    //   pre-rename inode; its append lands in `.1` after rotation.
+    // - A LATER rotation atomically replaces `.1`, discarding that
+    //   inode — and any record appended to it through the held fd —
+    //   before a reader necessarily saw it. Telemetry records can be
+    //   lost under concurrent writers.
+    // - Two writers passing the size check before either renames can each
+    //   rotate a different active state to `.1`.
+    // A lock would close all three; the log's contract is best-effort
+    // audit data, and a lost downgrade record is not worth a mutex on the
+    // gate hot path.
+    #[cfg(unix)]
     let _ = std::fs::rename(path, rotated);
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(path, rotated);
+    }
 }
 
 /// Append a downgrade event to the ContextCrawler local log.
@@ -1712,13 +1736,25 @@ mod tests {
             "fresh log must contain exactly the new record: {fresh}"
         );
 
-        // A second rotation replaces the previous .1 generation: disk stays
-        // bounded.
+        // A second rotation replaces the previous .1 generation atomically
+        // (rename(2) replaces in place on Unix — no remove window) so disk
+        // stays bounded and no stale generation lingers.
         std::fs::write(&path, big_record.repeat(10)).expect("grow again");
+        let stale_marker = "STALE_FIRST_GENERATION";
+        std::fs::write(dir.join("downgrades.jsonl.1"), stale_marker).expect("older .1 in place");
         rotate_downgrades_log_at(&path, cap_at);
+        let replaced = std::fs::read_to_string(dir.join("downgrades.jsonl.1")).unwrap();
         assert!(
-            dir.join("downgrades.jsonl.1").exists(),
-            "second rotation produces a .1 again"
+            !replaced.contains(stale_marker),
+            "second rotation must replace the older .1, not leave it: {replaced}"
+        );
+        assert!(
+            replaced.contains("aaaa"),
+            "replaced .1 must hold the newly rotated generation"
+        );
+        assert!(
+            !path.exists(),
+            "after rotation the active log is gone (recreated on next write)"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
