@@ -487,6 +487,33 @@ impl LineWindow {
     }
 }
 
+/// Parse an agent read-tool line-range spelling (`A:B` or `A-B`) into
+/// 1-indexed inclusive bounds — the Codex `--range 430:500` /
+/// `--line-range 1:260` forms that were hard-failing before #244.
+///
+/// Returns `(start, end)`; rejects empty sides and inverted ranges. Both
+/// bounds are required — a one-sided range is better written with
+/// `--start-line` / `--end-line`, which already express it.
+pub(crate) fn parse_line_range(spec: &str) -> Result<(usize, usize)> {
+    let (a, b) = match spec.split_once(':').or_else(|| spec.split_once('-')) {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => return Err(anyhow::anyhow!("range must be 'A:B' or 'A-B': '{spec}'")),
+    };
+    let start: usize = a
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid range start '{a}'"))?;
+    let end: usize = b
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid range end '{b}'"))?;
+    if start == 0 {
+        return Err(anyhow::anyhow!("range start must be >= 1"));
+    }
+    if end < start {
+        return Err(anyhow::anyhow!("inverted range: {start} > {end}"));
+    }
+    Ok((start, end))
+}
+
 /// Take a 1-indexed, inclusive line range, `sed -n 'A,Bp'` style.
 ///
 /// Either bound may be omitted: start-only runs to EOF, end-only starts at
@@ -650,6 +677,25 @@ fn main() {{
     fn line_range_start_zero_is_treated_as_line_one() {
         // `--start 0` is a user slip, not a reason to return nothing.
         assert_eq!(range("a\nb\nc\n", Some(0), Some(2)), "a\nb\n");
+    }
+
+    // --- #244: agent read-tool range spellings (`--range A:B`) ---
+
+    #[test]
+    fn parse_line_range_accepts_colon_and_dash() {
+        assert_eq!(parse_line_range("430:500").unwrap(), (430, 500));
+        assert_eq!(parse_line_range("430-500").unwrap(), (430, 500));
+        assert_eq!(parse_line_range("1:1").unwrap(), (1, 1));
+    }
+
+    #[test]
+    fn parse_line_range_rejects_bad_shapes() {
+        assert!(parse_line_range("430").is_err(), "no separator");
+        assert!(parse_line_range(":500").is_err(), "empty start");
+        assert!(parse_line_range("430:").is_err(), "empty end");
+        assert!(parse_line_range("500:100").is_err(), "inverted");
+        assert!(parse_line_range("0:10").is_err(), "zero start");
+        assert!(parse_line_range("abc:def").is_err(), "non-numeric");
     }
 
     #[test]

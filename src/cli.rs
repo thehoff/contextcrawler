@@ -123,12 +123,31 @@ pub(crate) enum Commands {
         force: bool,
         /// First line to show (1-indexed, inclusive). Pairs with --end-line;
         /// on its own it runs to end of file. `sed -n 'A,Bp'` semantics (#207).
-        #[arg(long, visible_alias = "start", conflicts_with_all = ["max_lines", "tail_lines"])]
+        /// May combine with --max-lines: the cap turns into an end bound so
+        /// `--start 2 --max-lines 3` means lines 2..=4, not 2..=EOF (#244).
+        #[arg(long, visible_alias = "start", conflicts_with = "tail_lines")]
         start_line: Option<usize>,
         /// Last line to show (1-indexed, inclusive). On its own it starts at
         /// line 1.
-        #[arg(long, visible_alias = "end", conflicts_with_all = ["max_lines", "tail_lines"])]
+        #[arg(long, visible_alias = "end", conflicts_with = "tail_lines")]
         end_line: Option<usize>,
+        /// Inclusive line range as `A:B` or `A-B` — the Codex/agent read-tool
+        /// spelling (e.g. `read src/cli.rs --range 430:500`). Same semantics
+        /// as `--start-line A --end-line B` (#244).
+        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines", "start_line", "end_line"])]
+        range: Option<String>,
+        /// Alias of --range (alternate agent read-tool spelling).
+        #[arg(long = "line-range", conflicts_with_all = ["max_lines", "tail_lines", "start_line", "end_line"])]
+        line_range: Option<String>,
+        /// Single line to show (1-indexed). Pairs with --line-limit for a
+        /// window anchored at that line (#244).
+        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines", "start_line", "end_line"])]
+        line: Option<usize>,
+        /// When used with --line: number of lines to show starting at the
+        /// anchor line (inclusive window: `--line 10 --line-limit 5` →
+        /// lines 10..=14).
+        #[arg(long, requires = "line")]
+        line_limit: Option<usize>,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -3253,7 +3272,55 @@ fn run_cli() -> Result<i32> {
             force,
             start_line,
             end_line,
+            range,
+            line_range,
+            line,
+            line_limit,
         } => {
+            // #244: agent read-tool selector forms. Resolve the alias
+            // spellings into the canonical start/end pair before building
+            // the window; `--range`/`--line-range` conflict with the
+            // explicit bounds at clap level so at most one source is set.
+            let (start_line, end_line) = match range.or(line_range) {
+                Some(spec) => {
+                    let (s, e) = crate::cmds::system::read::parse_line_range(&spec)?;
+                    (Some(s), Some(e))
+                }
+                None => match line {
+                    Some(anchor) => match line_limit {
+                        Some(0) => {
+                            return Err(anyhow::anyhow!(
+                                "--line-limit must be >= 1 (got 0)"
+                            ));
+                        }
+                        Some(limit) => {
+                            let end = anchor.checked_add(limit - 1).ok_or_else(|| {
+                                anyhow::anyhow!("--line {} + --line-limit {limit} overflows line numbers", anchor)
+                            })?;
+                            (Some(anchor), Some(end))
+                        }
+                        None => (Some(anchor), Some(anchor)),
+                    },
+                    None => (start_line, end_line),
+                },
+            };
+            // `--start A --max-lines N` composes to a finite range
+            // (A..=A+N-1) instead of running A..=EOF while ignoring the cap
+            // — the false conflict was removed from clap for #244.
+            let (max_lines, end_line) = match (start_line, max_lines, end_line) {
+                (Some(s), Some(0), None) => {
+                    return Err(anyhow::anyhow!(
+                        "--max-lines must be >= 1 (got 0)"
+                    ));
+                }
+                (Some(s), Some(n), None) => {
+                    let end = s.checked_add(n - 1).ok_or_else(|| {
+                        anyhow::anyhow!("--start {s} + --max-lines {n} overflows line numbers")
+                    })?;
+                    (None, Some(end))
+                }
+                (_, max, end) => (max, end),
+            };
             let window = crate::cmds::system::read::LineWindow {
                 max_lines,
                 tail_lines,
@@ -5051,6 +5118,68 @@ mod tests {
         // `--port` without `--web` is a clap error, not silent acceptance.
         let result = Cli::try_parse_from(["rtk", "gain", "--port", "8765"]);
         assert!(result.is_err(), "--port requires --web");
+    }
+
+    #[test]
+    fn test_read_range_colon_parses() {
+        let result = Cli::try_parse_from(["rtk", "read", "src/cli.rs", "--range", "430:500"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Read { range, .. } => assert_eq!(range.as_deref(), Some("430:500")),
+                _ => panic!("Expected Read command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_line_range_parses() {
+        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--line-range", "1:260"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Read { line_range, .. } => {
+                    assert_eq!(line_range.as_deref(), Some("1:260"))
+                }
+                _ => panic!("Expected Read command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_line_with_limit_parses() {
+        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--line", "937", "--line-limit", "25"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Read { line, line_limit, .. } => {
+                    assert_eq!(line, Some(937));
+                    assert_eq!(line_limit, Some(25));
+                }
+                _ => panic!("Expected Read command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_line_limit_requires_line() {
+        // `--line-limit` without `--line` is a clap error (clap `requires`).
+        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--line-limit", "25"]);
+        assert!(result.is_err(), "--line-limit requires --line");
+    }
+
+    #[test]
+    fn test_read_start_with_max_lines_no_longer_conflicts() {
+        // #244: `--start 2 --max-lines 3` was a hard clap conflict; the DB
+        // showed real agent calls hitting it. Now composes to a range.
+        let result = Cli::try_parse_from(["rtk", "read", "r.txt", "--start", "2", "--max-lines", "3"]);
+        assert!(result.is_ok(), "--start + --max-lines must parse");
+    }
+
+    #[test]
+    fn test_read_range_conflicts_with_start_line() {
+        let result = Cli::try_parse_from(["rtk", "read", "x", "--range", "1:10", "--start-line", "2"]);
+        assert!(result.is_err(), "--range conflicts with --start-line");
     }
 
     #[test]
