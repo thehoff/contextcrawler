@@ -1238,22 +1238,33 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
-    // `nl` joins head/tail here because the only faithful mapping it has is a
+// `nl` joins head/tail here because the only faithful mapping it has is a
     // line-range/format one: `nl -ba <file>` → `read --line-numbers` (#195).
     // Every other `nl` form falls out of `rewrite_line_range` as None and runs
     // raw, which is the correct outcome — bare `nl` numbers only non-empty
     // lines, and width/separator flags have no `read` equivalent.
-    if cmd_part.starts_with("head -")
-        || cmd_part.starts_with("tail ")
-        || cmd_part.starts_with("nl ")
+    //
+    // #244: normalise the abs path (`/usr/bin/head -c 200 f` → `head -c 200
+    // f`) BEFORE the guard. Without this the abs form fell past the guard
+    // into the generic rule rewrite, which preserved the flag verbatim →
+    // `contextcrawler read -c 200 f`, a clap hard-fail (52 rows in
+    // parse_failures). Same class: `/usr/bin/tail -f f` → `read -f f`,
+    // `/usr/bin/cat -v f` → `read -v f`, `/usr/bin/tail -n 6 f` →
+    // `read -n 6 f` (the `-n` meaning inverts!). The guard now sees the
+    // exact same string a bare `head`/`tail`/`nl` invocation would, so the
+    // precise mapping (or raw passthrough) applies uniformly.
+    let cmd_sans_abs = strip_absolute_path(cmd_part);
+    if cmd_sans_abs.starts_with("head -")
+        || cmd_sans_abs.starts_with("tail ")
+        || cmd_sans_abs.starts_with("nl ")
     {
-        return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+        return rewrite_line_range(&cmd_sans_abs).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than ctxcrl read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `ctxcrl read -n`. Skip rewrite for any other flag.
-    if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
+    if let Some(cmd_args) = cmd_sans_abs.strip_prefix("cat ") {
         let args = cmd_args.trim_start();
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
             return None;
@@ -2740,6 +2751,58 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("tail -20 a.log b.log", &[]),
             None
+        );
+    }
+
+    // --- #244: abs-path head/tail/nl/cat must route through the precise
+    // guard, not the generic rule rewrite (which preserved flags verbatim).
+    // `/usr/bin/head -c 200 f` used to become `read -c 200 f` — a clap
+    // hard-fail with no fallback (52 rows in parse_failures). The abs path
+    // now strips to the bare name first, so byte-count `-c`, follow `-f`,
+    // and cat display flags all pass through raw instead of being mangled.
+
+    #[test]
+    fn test_rewrite_abs_path_head_bytes_flag_passes_through() {
+        // `head -c N` reads N BYTES — no read equivalent; must run raw.
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/head -c 200 src/main.rs", &[]),
+            None
+        );
+        // Bare form already had this behaviour; keep it locked.
+        assert_eq!(rewrite_command_no_prefixes("head -c 200 src/main.rs", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_abs_path_tail_follow_passes_through() {
+        // `tail -f` blocks forever; read has no follow mode. Rewriting it
+        // to `read -f` was both a parse failure AND a semantics break.
+        assert_eq!(rewrite_command_no_prefixes("/usr/bin/tail -f app.log", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("tail -f app.log", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_abs_path_cat_display_flag_passes_through() {
+        // `cat -v` shows control chars; read has no equivalent. Must not
+        // become `read -v`.
+        assert_eq!(rewrite_command_no_prefixes("/usr/bin/cat -v file.txt", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_abs_path_tail_n_still_maps_linewise() {
+        // The good abs-path case still rewrites after the strip: `-n 6`
+        // means tail 6 LINES and must become --tail-lines, never `read -n 6`
+        // (where `-n` means line-numbers and `6` becomes a file argument).
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/tail -n 6 src/main.rs", &[]),
+            Some("contextcrawler read src/main.rs --tail-lines 6".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_abs_path_head_numeric_still_rewrites() {
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/head -20 src/main.rs", &[]),
+            Some("contextcrawler read src/main.rs --max-lines 20".into())
         );
     }
 
