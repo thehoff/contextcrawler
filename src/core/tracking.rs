@@ -657,6 +657,17 @@ impl Tracker {
             .optional()?)
     }
 
+    /// Every recorded release boundary, newest first, as `(version,
+    /// installed_at)` pairs. The `gain --web` dashboard maps these into its
+    /// own response DTOs rather than leaking core types (#162).
+    pub fn all_release_boundaries(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT version, installed_at FROM release_boundaries ORDER BY id DESC")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Create an isolated in-memory tracker for tests.
     #[cfg(test)]
     pub fn new_in_memory() -> Result<Self> {

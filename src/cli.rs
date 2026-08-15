@@ -496,6 +496,15 @@ pub(crate) enum Commands {
         /// Skip confirmation prompt when resetting
         #[arg(long, requires = "reset")]
         yes: bool,
+        /// Boot the local read-only dashboard server (#162)
+        #[arg(long)]
+        web: bool,
+        /// Port for --web (default: kernel-assigned free port).
+        #[arg(long, requires = "web")]
+        port: Option<u16>,
+        /// Suppress auto-opening the browser for --web (use for ssh / headless).
+        #[arg(long = "no-browser", requires = "web")]
+        no_browser: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (contextcrawler) analysis
@@ -3809,7 +3818,14 @@ fn run_cli() -> Result<i32> {
             all_time,
             reset,
             yes,
+            web,
+            port,
+            no_browser,
         } => {
+            if web {
+                analytics::gain_web::run(port, no_browser)?;
+                return Ok(0);
+            }
             analytics::gain::run(
                 project, // added: pass project flag
                 graph,
@@ -4993,6 +5009,48 @@ mod tests {
                 _ => panic!("Expected Gain command"),
             }
         }
+    }
+
+    #[test]
+    fn test_gain_web_flag_parses_with_port() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--web", "--port", "8765"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain {
+                    web, port, no_browser, ..
+                } => {
+                    assert!(web);
+                    assert_eq!(port, Some(8765));
+                    assert!(!no_browser);
+                }
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_web_no_browser_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--web", "--no-browser"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain {
+                    web, no_browser, ..
+                } => {
+                    assert!(web);
+                    assert!(no_browser);
+                }
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_port_requires_web() {
+        // `--port` without `--web` is a clap error, not silent acceptance.
+        let result = Cli::try_parse_from(["rtk", "gain", "--port", "8765"]);
+        assert!(result.is_err(), "--port requires --web");
     }
 
     #[test]
