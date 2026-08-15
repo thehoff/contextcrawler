@@ -26,6 +26,10 @@ contextcrawler config --create   # create config file with defaults
 enabled = true              # enable/disable token tracking
 history_days = 90           # retention in days (auto-cleanup)
 database_path = "/custom/path/history.db"   # optional override
+# Size cap (bytes) for the Tirith downgrade log. When downgrades.jsonl
+# exceeds this it rotates to downgrades.jsonl.1 (replacing the older
+# generation); bounds disk to ~2x the cap. Default: 5 MiB (#240).
+downgrade_log_max_bytes = 5242880
 
 [display]
 colors = true               # colored output

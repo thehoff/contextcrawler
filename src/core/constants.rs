@@ -15,3 +15,11 @@ pub const DEFAULT_HISTORY_DAYS: i64 = 90;
 /// ~30_000 characters, ~7_500 tokens at contextcrawler's chars/4 estimate.
 /// Override via `[tracking] host_truncation_tokens` in config.toml.
 pub const DEFAULT_HOST_TRUNCATION_TOKENS: usize = 7_500;
+
+/// #240: size cap for `downgrades.jsonl`. Once the active log exceeds this,
+/// it is rotated to `downgrades.jsonl.1` (replacing any older rotated file)
+/// and a fresh log starts, bounding disk to ~2× the cap. Records are ~1.9KB
+/// each (full tirith verdict embedded), so 5 MiB is ~2,600 events — roughly
+/// three weeks at the July 2026 rate, or a year+ at post-suppression rates.
+/// Override via `[tracking] downgrade_log_max_bytes` in config.toml.
+pub const DEFAULT_DOWNGRADE_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;

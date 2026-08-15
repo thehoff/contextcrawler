@@ -11,6 +11,7 @@
 //!
 //! Subprocess-only invocation; no statically-linked AGPL code.
 
+use crate::core::constants::DEFAULT_DOWNGRADE_LOG_MAX_BYTES;
 use crate::discover::lexer::{strip_quotes, tokenize, TokenKind};
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -773,6 +774,40 @@ fn is_dotfile_target(s: &str) -> bool {
         || trimmed.starts_with('.')
 }
 
+/// #240: size cap check + rotation for the downgrades log.
+///
+/// Called before each append. When the active `downgrades.jsonl` has grown
+/// past the configured cap (default [`DEFAULT_DOWNGRADE_LOG_MAX_BYTES`]),
+/// it is renamed to `downgrades.jsonl.1` (replacing any older rotated file)
+/// so the next write starts a fresh bounded log.
+///
+/// Best-effort and fail-open: any I/O error or missing cap leaves the log
+/// untouched and append proceeds — a logging feature must never block the
+/// gate decision it records.
+fn rotate_downgrades_log_if_needed(path: &std::path::Path) {
+    let cap = crate::core::config::Config::load()
+        .map(|c| c.tracking.downgrade_log_max_bytes)
+        .unwrap_or(DEFAULT_DOWNGRADE_LOG_MAX_BYTES);
+    rotate_downgrades_log_at(path, cap);
+}
+
+/// Core of the rotation check: when `path` exists and is at least `cap`
+/// bytes, rename it to `downgrades.jsonl.1` (replacing an older rotated
+/// generation) so the next append starts fresh.
+fn rotate_downgrades_log_at(path: &std::path::Path, cap: u64) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return; // no active log yet — first write
+    };
+    if meta.len() < cap {
+        return;
+    }
+    let rotated = path.with_file_name("downgrades.jsonl.1");
+    // Replacing the previous rotated generation bounds disk to ~2× the cap
+    // (active + one rotated), matching tee's keep-N semantics.
+    let _ = std::fs::remove_file(&rotated);
+    let _ = std::fs::rename(path, rotated);
+}
+
 /// Append a downgrade event to the ContextCrawler local log.
 /// Path: $XDG_DATA_HOME/contextcrawler/downgrades.jsonl
 /// (or platform equivalent via dirs::data_local_dir).
@@ -786,8 +821,7 @@ pub fn log_downgrade(cmd: &str, reason: &'static str, tirith_json: Option<&str>)
         return;
     }
     let path = dir.join("downgrades.jsonl");
-
-    // Scrub credentials before the cmd lands on disk. See issue #180.
+    rotate_downgrades_log_if_needed(&path);
     let safe_cmd = crate::core::secret_redact::redact(cmd);
     // The tirith blob frequently echoes the command (and any inline
     // credentials) back in its findings, so scrub it too. The redactor is
@@ -823,6 +857,7 @@ pub fn log_permission_downgrade(cmd: &str, profile: &str, reason: &str) {
         return;
     };
     let path = dir.join("downgrades.jsonl");
+    rotate_downgrades_log_if_needed(&path);
     let timestamp = chrono::Utc::now().to_rfc3339();
     let record = permission_downgrade_record(cmd, profile, reason, &timestamp);
     append_private_jsonl(&path, &record);
@@ -1030,7 +1065,14 @@ pub fn scrub_logs_in(log_dir: &std::path::Path, dry_run: bool) -> anyhow::Result
         Ok(())
     }
 
-    let targets = ["downgrades.jsonl", "supply_chain.jsonl"];
+    // #240: the rotated downgrades generation carries the same class of data
+    // as the active log, so it gets the same scrub pass (credentials leak in
+    // old records too).
+    let targets = [
+        "downgrades.jsonl",
+        "downgrades.jsonl.1",
+        "supply_chain.jsonl",
+    ];
     let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let mut report = ScrubReport::default();
 
@@ -1113,9 +1155,15 @@ const DOWNGRADES_TAIL_BYTES: u64 = 256 * 1024;
 /// recent records. Each returned `String` is one VALID JSON record
 /// (re-serialised compactly via `serde_json` to ensure parseability).
 ///
+/// Reads the active `downgrades.jsonl` first, then the rotated
+/// `downgrades.jsonl.1` generation (#240), preserving chronological order
+/// (older rotated records first, newest active records last) and returning
+/// the most recent `limit` of the combined set. If only one generation
+/// exists, that generation alone is read.
+///
 /// SEC-I4 hardening:
 ///
-/// - The read is capped to the last [`DOWNGRADES_TAIL_BYTES`] of the file
+/// - Each read is capped to the last [`DOWNGRADES_TAIL_BYTES`] of the file
 ///   instead of slurping the whole file with `read_to_string`. An attacker
 ///   who grows the log can no longer force an unbounded allocation.
 /// - Records are parsed line-by-line (`log_downgrade` always writes
@@ -1124,34 +1172,45 @@ const DOWNGRADES_TAIL_BYTES: u64 = 256 * 1024;
 ///
 /// Behaviour is identical for well-formed single-line logs.
 pub fn read_recent_downgrades(limit: usize) -> Vec<String> {
-    let path = match downgrades_log_path() {
-        Some(p) if p.exists() => p,
-        _ => return Vec::new(),
+    let Some(dir) = dirs::data_local_dir().map(|d| d.join("contextcrawler")) else {
+        return Vec::new();
     };
+    read_recent_downgrades_in(&dir, limit)
+}
 
-    let content = match read_file_tail(&path, DOWNGRADES_TAIL_BYTES) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    // Parse line-by-line. A capped read may have sliced the first line in
-    // half — skip any line that does not round-trip through serde_json.
-    // Re-serialised form is canonical (compact, single-line) so JSON
-    // consumers can rely on one record == one line.
-    let records: Vec<String> = content
-        .lines()
-        .filter_map(|line| {
+/// Dir-parameterised core of [`read_recent_downgrades`], lifted out so tests
+/// can drive it against a tempdir instead of the real data dir.
+fn read_recent_downgrades_in(dir: &std::path::Path, limit: usize) -> Vec<String> {
+    let mut all: Vec<String> = Vec::new();
+    for name in ["downgrades.jsonl.1", "downgrades.jsonl"] {
+        let path = dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let content = match read_file_tail(&path, DOWNGRADES_TAIL_BYTES) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        // Parse line-by-line. A capped read may have sliced the first line
+        // in half — skip any line that does not round-trip through
+        // serde_json. Re-serialised form is canonical (compact,
+        // single-line) so JSON consumers can rely on one record == one line.
+        for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
-                return None;
+                continue;
             }
-            let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-            serde_json::to_string(&v).ok()
-        })
-        .collect();
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if let Ok(serialised) = serde_json::to_string(&v) {
+                all.push(serialised);
+            }
+        }
+    }
 
-    let start = records.len().saturating_sub(limit);
-    records[start..].to_vec()
+    let start = all.len().saturating_sub(limit);
+    all[start..].to_vec()
 }
 
 /// Read at most the last `max_bytes` of `path` as a UTF-8 string.
@@ -1606,6 +1665,103 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn downgrades_log_rotates_when_it_hits_the_cap() {
+        // #240: the active log must not grow without bound. At the cap the
+        // file rotates to `.1` and the next write starts a fresh log.
+        let dir = std::env::temp_dir().join(format!("ctxcrl-rotation-cap-{}", std::process::id()));
+        let path = dir.join("downgrades.jsonl");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        // Prime the log past the cap.
+        let big_record = format!(
+            "{{\"ts\":\"x\",\"reason\":\"r\",\"cmd\":\"{}\"}}\n",
+            "a".repeat(2000)
+        );
+        std::fs::write(&path, big_record.repeat(10)).expect("write over-cap log");
+
+        // First: with a cap above the current size, no rotation happens.
+        let cap_big = std::fs::metadata(&path).unwrap().len() + 1;
+        rotate_downgrades_log_at(&path, cap_big);
+        assert!(path.exists(), "log below cap must stay in place");
+        assert!(
+            !dir.join("downgrades.jsonl.1").exists(),
+            "no rotation below the cap"
+        );
+
+        // At (or under) the cap, the log rotates; the next write starts a
+        // new active file.
+        let cap_at = std::fs::metadata(&path).unwrap().len();
+        rotate_downgrades_log_at(&path, cap_at);
+        assert!(
+            dir.join("downgrades.jsonl.1").exists(),
+            "over-cap log must rotate to .1"
+        );
+        assert!(
+            !path.exists(),
+            "active log must be gone after rotation (next write recreates)"
+        );
+        append_private_jsonl(&path, r#"{"profile":"standard","reason":"after_rotate"}"#);
+        let fresh = std::fs::read_to_string(&path).expect("fresh log written");
+        assert!(
+            fresh.contains("after_rotate") && fresh.lines().count() == 1,
+            "fresh log must contain exactly the new record: {fresh}"
+        );
+
+        // A second rotation replaces the previous .1 generation: disk stays
+        // bounded.
+        std::fs::write(&path, big_record.repeat(10)).expect("grow again");
+        rotate_downgrades_log_at(&path, cap_at);
+        assert!(
+            dir.join("downgrades.jsonl.1").exists(),
+            "second rotation produces a .1 again"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_recent_downgrades_spans_both_generations_in_order() {
+        // #240: after rotation the reader must surface the older `.1`
+        // records first and the active ones last, newest-limited at `limit`.
+        let dir = std::env::temp_dir().join(format!("ctxcrl-rotation-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create dir");
+
+        let mk = |ts: &str| format!(r#"{{"ts":"{}","reason":"r","cmd":"{}"}}"#, ts, ts);
+        std::fs::write(
+            dir.join("downgrades.jsonl.1"),
+            vec![mk("2026-07-01T00:00:00Z"), mk("2026-07-02T00:00:00Z")].join("\n"),
+        )
+        .expect("rotated generation");
+        std::fs::write(
+            dir.join("downgrades.jsonl"),
+            vec![mk("2026-08-01T00:00:00Z"), mk("2026-08-02T00:00:00Z")].join("\n"),
+        )
+        .expect("active generation");
+
+        let all = read_recent_downgrades_in(&dir, usize::MAX);
+        let last2 = read_recent_downgrades_in(&dir, 2);
+
+        assert_eq!(all.len(), 4, "all four records across both generations");
+        assert!(
+            all[0].contains("2026-07-01") && all[1].contains("2026-07-02"),
+            "rotated (older) records come first: {all:?}"
+        );
+        assert!(
+            all[2].contains("2026-08-01") && all[3].contains("2026-08-02"),
+            "active (newer) records come last: {all:?}"
+        );
+        assert_eq!(last2.len(), 2, "limit applies to the combined set");
+        assert!(
+            last2[0].contains("2026-08-01") && last2[1].contains("2026-08-02"),
+            "limit keeps the newest records: {last2:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2326,7 +2482,20 @@ mod tests {
         let report = scrub_logs_in(dir.path(), false).unwrap();
         assert_eq!(report.grand_total, 2);
         assert_eq!(report.grand_changed, 2, "both lines must be scrubbed");
-        assert!(report.files.iter().all(|f| f.backup_path.is_some()));
+        // Three targets: active log, rotated generation, supply chain. The
+        // rotated file is absent in this fixture, so it is skipped (pushed
+        // with no backup); the two present files are scrubbed and backed up.
+        assert_eq!(report.files.len(), 3);
+        let present: Vec<_> = report.files.iter().filter(|f| !f.skipped).collect();
+        assert_eq!(present.len(), 2, "active + supply_chain present");
+        assert!(
+            present.iter().all(|f| f.backup_path.is_some()),
+            "present files must get backups"
+        );
+        assert!(
+            report.files.iter().any(|f| f.skipped),
+            "absent rotated generation must be reported as skipped"
+        );
 
         let down_new = std::fs::read_to_string(&down).unwrap();
         let supply_new = std::fs::read_to_string(&supply).unwrap();

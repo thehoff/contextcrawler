@@ -1,7 +1,8 @@
 //! Reads user settings from config.toml.
 
 use super::constants::{
-    CONFIG_TOML, DEFAULT_HISTORY_DAYS, DEFAULT_HOST_TRUNCATION_TOKENS, RTK_DATA_DIR,
+    CONFIG_TOML, DEFAULT_DOWNGRADE_LOG_MAX_BYTES, DEFAULT_HISTORY_DAYS,
+    DEFAULT_HOST_TRUNCATION_TOKENS, RTK_DATA_DIR,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -264,10 +265,21 @@ pub struct TrackingConfig {
     /// limit; defaults to [`DEFAULT_HOST_TRUNCATION_TOKENS`].
     #[serde(default = "default_host_truncation_tokens")]
     pub host_truncation_tokens: usize,
+
+    /// #240: size cap (bytes) for the Tirith downgrade log. When
+    /// `downgrades.jsonl` exceeds this on a write, it rotates to
+    /// `downgrades.jsonl.1` and a fresh log starts, bounding disk growth.
+    /// Defaults to [`DEFAULT_DOWNGRADE_LOG_MAX_BYTES`].
+    #[serde(default = "default_downgrade_log_max_bytes")]
+    pub downgrade_log_max_bytes: u64,
 }
 
 fn default_host_truncation_tokens() -> usize {
     DEFAULT_HOST_TRUNCATION_TOKENS
+}
+
+fn default_downgrade_log_max_bytes() -> u64 {
+    DEFAULT_DOWNGRADE_LOG_MAX_BYTES
 }
 
 impl Default for TrackingConfig {
@@ -277,6 +289,7 @@ impl Default for TrackingConfig {
             history_days: DEFAULT_HISTORY_DAYS as u32,
             database_path: None,
             host_truncation_tokens: DEFAULT_HOST_TRUNCATION_TOKENS,
+            downgrade_log_max_bytes: DEFAULT_DOWNGRADE_LOG_MAX_BYTES,
         }
     }
 }

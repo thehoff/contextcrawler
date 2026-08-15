@@ -163,7 +163,26 @@ def extract(log_path: Path) -> tuple[list[dict], Counter]:
     seen: set[str] = set()
     corpus: list[dict] = []
 
-    with log_path.open(encoding="utf-8", errors="replace") as handle:
+    # #240: the downgrades log rotates to `downgrades.jsonl.1` once it
+    # passes the size cap. Read both generations so the corpus replay does
+    # not silently lose the older records.
+    log_paths = [log_path]
+    rotated = log_path.with_name(f"{log_path.name}.1")
+    if rotated.exists():
+        log_paths.append(rotated)
+
+    for path in log_paths:
+        _extract_file(path, stats, seen, corpus)
+    return corpus, stats
+
+
+def _extract_file(
+    path: Path,
+    stats: Counter,
+    seen: set[str],
+    corpus: list[dict],
+) -> None:
+    with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
             line = line.strip()
             if not line:
