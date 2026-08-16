@@ -3,6 +3,34 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] — 2026-08-16
+
+32 commits past 0.4.9 (unreleased until this tag).
+
+### Added
+- `read --lines <range>` and `--line-end` bound — explicit line ranges no
+  longer error to raw (precise-guard read (#244), `--lines` alias).
+- `gain --web` — local read-only token-savings dashboard server (#162).
+- Replayable FP corpus for the gate — an empirical stopping criterion
+  (D2-reviewed).
+
+### Fixed
+- **Security: never auto-allow a credential read** on any host path.
+- Read-cache repairs: rebuild on the schema change, key on render mode, no
+  repeat whole-file reads within a session, no stubbing reads the
+  read-file cap truncated, no WAL sidecar leaks into `$HOME`.
+- Git: hardened `git subcommand` parse/exec, dropped the false "+N more"
+  overflow marker on `git diff`.
+- Gate: atomic downgrade-log rotation on Unix, size-bounded
+  `downgrades.jsonl`, guard on the backstop's own territory.
+- Rewrite: route abs-path `head`/`tail`/`nl`/`cat` through the precise
+  guard; map `nl -ba <file>` to `read --line-numbers`.
+
+### Docs
+- Fork declared — upstream is a source to harvest, not a base to track.
+- `ctxcrlRules` ratified with real enforcement; CLAUDE.md tracked so rules
+  load in every session.
+
 ## [0.4.9] — 2026-07-24
 
 ### Fixed
