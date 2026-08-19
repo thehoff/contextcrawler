@@ -24,10 +24,14 @@ use std::sync::Once;
 
 use super::constants::{CONFIG_TOML, FILTERS_TOML, RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 
-/// Legacy directory segment that predates the rename.
-const LEGACY_DATA_DIR: &str = "rtk"; // branding-lint: allow legacy
-/// Legacy project-local directory.
-const LEGACY_PROJECT_DIR: &str = ".rtk";
+/// Legacy directory segment from the original rtk release.
+const LEGACY_DATA_DIR_ORIG: &str = "rtk"; // branding-lint: allow legacy
+/// Legacy directory segment from the intermediate rename (rtk -> ctxcrl).
+const LEGACY_DATA_DIR_PREV: &str = "ctxcrl"; // branding-lint: allow legacy
+/// Legacy project-local directory (original).
+const LEGACY_PROJECT_DIR_ORIG: &str = ".rtk";
+/// Legacy project-local directory (intermediate rename).
+const LEGACY_PROJECT_DIR_PREV: &str = ".ctxcrl";
 
 /// Schema-stable settings files that migrate from the legacy `rtk` segment.
 /// Each basename is checked independently in BOTH the user config dir and the
@@ -46,17 +50,40 @@ pub fn migrate_legacy_dirs_once() {
 }
 
 fn run_migration() {
+    // Two legacy names migrate to the canonical name (RTK_DATA_DIR):
+    //   `rtk`     — the original dir, before the first rename.
+    //   `ctxcrl`  — the intermediate dir, after the first rename.
+    //
+    // Order matters when both legacy dirs coexist: the FIRST migration wins
+    // because the destination is created on the first move and the second
+    // is then skipped (no overwrite). The intermediate (`ctxcrl`) state is
+    // the more recent user intent in the typical upgrade path
+    // (rtk→ctxcrl→contextcrawler), so we try `ctxcrl` first and fall back
+    // to `rtk` only if the intermediate dir is absent. Per-file moves;
+    // never overwrites an existing destination.
     if let Some(config_dir) = dirs::config_dir() {
         migrate_dir_files(
-            &config_dir.join(LEGACY_DATA_DIR),
+            &config_dir.join(LEGACY_DATA_DIR_PREV),
+            &config_dir.join(RTK_DATA_DIR),
+        );
+        migrate_dir_files(
+            &config_dir.join(LEGACY_DATA_DIR_ORIG),
             &config_dir.join(RTK_DATA_DIR),
         );
     }
     if let Some(data_dir) = dirs::data_local_dir() {
-        migrate_dir_files(&data_dir.join(LEGACY_DATA_DIR), &data_dir.join(RTK_DATA_DIR));
+        migrate_dir_files(
+            &data_dir.join(LEGACY_DATA_DIR_PREV),
+            &data_dir.join(RTK_DATA_DIR),
+        );
+        migrate_dir_files(
+            &data_dir.join(LEGACY_DATA_DIR_ORIG),
+            &data_dir.join(RTK_DATA_DIR),
+        );
     }
     let project_new = format!(".{RTK_DATA_DIR}");
-    migrate_project_local(Path::new(LEGACY_PROJECT_DIR), Path::new(&project_new));
+    migrate_project_local(Path::new(LEGACY_PROJECT_DIR_PREV), Path::new(&project_new));
+    migrate_project_local(Path::new(LEGACY_PROJECT_DIR_ORIG), Path::new(&project_new));
 }
 
 /// Per-file migration of every known settings basename for one `(old, new)` pair.
@@ -404,4 +431,68 @@ mod tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // When both legacy configs coexist (`rtk/...` and `ctxcrl/...`), the
+    // migration must prefer the intermediate (`ctxcrl`) state because it
+    // represents the user's intent after the rtk→ctxcrl upgrade. The
+    // migration's first-mover wins (no overwrite), so the order of
+    // `run_migration` is the policy. This test pins that order.
+    #[test]
+    fn ctxcrl_legacy_wins_when_both_legacy_configs_coexist() {
+        let root = unique_tmp();
+        let legacy_orig = root.join(LEGACY_DATA_DIR_ORIG);
+        let legacy_prev = root.join(LEGACY_DATA_DIR_PREV);
+        let dest = root.join(RTK_DATA_DIR);
+        std::fs::create_dir_all(&legacy_orig).unwrap();
+        std::fs::create_dir_all(&legacy_prev).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        std::fs::write(legacy_orig.join(FILTERS_TOML), b"orig-content").unwrap();
+        std::fs::write(legacy_prev.join(FILTERS_TOML), b"prev-content").unwrap();
+
+        // Mirrors the order in `run_migration`: ctxcrl (intermediate) first,
+        // then the original legacy dir. The first-mover wins.
+        migrate_dir_files(&legacy_prev, &dest);
+        migrate_dir_files(&legacy_orig, &dest);
+
+        assert_eq!(
+            std::fs::read(dest.join(FILTERS_TOML)).unwrap(),
+            b"prev-content",
+            "intermediate legacy must win when both legacy configs coexist"
+        );
+        assert!(
+            legacy_orig.join(FILTERS_TOML).exists(),
+            "original legacy source is left intact when the migration is a no-op"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Project-local: when both project-local legacy dirs coexist
+    // (`.rtk` and `.ctxcrl`), the intermediate (`.ctxcrl`) state wins.
+    #[test]
+    fn project_local_ctxcrl_wins_when_both_legacy_dirs_coexist() {
+        let root = unique_tmp();
+        let legacy_orig = root.join(LEGACY_PROJECT_DIR_ORIG);
+        let legacy_prev = root.join(LEGACY_PROJECT_DIR_PREV);
+        let dest = root.join(format!(".{RTK_DATA_DIR}"));
+        std::fs::create_dir_all(&legacy_orig).unwrap();
+        std::fs::create_dir_all(&legacy_prev).unwrap();
+        std::fs::write(legacy_orig.join(FILTERS_TOML), b"orig-proj").unwrap();
+        std::fs::write(legacy_prev.join(FILTERS_TOML), b"prev-proj").unwrap();
+
+        // Mirrors the order in `run_migration`: ctxcrl (intermediate) first,
+        // then the original legacy dir. The first-mover wins.
+        migrate_project_local(&legacy_prev, &dest);
+        migrate_project_local(&legacy_orig, &dest);
+
+        assert_eq!(
+            std::fs::read(dest.join(FILTERS_TOML)).unwrap(),
+            b"prev-proj",
+            "project-local intermediate state must win when both legacy dirs coexist"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
 }

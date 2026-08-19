@@ -1758,9 +1758,16 @@ pub fn runtime_check() -> Result<()> {
 }
 
 fn runtime_check_at(hook_path: &Path, settings_path: &Path, identity_path: &Path) -> Result<()> {
-    // The modern settings registration and the legacy script are independent
-    // auto-allow surfaces. Always validate both; neither may mask the other.
-    runtime_check_binary_hook_at(settings_path, identity_path)?;
+    // The modern Claude PreToolUse registration is host-specific: gated on
+    // settings.json being present. Genuine host absence (Ok(false) only for
+    // ENOENT) is a clean uninstall — no live auto-allow hook to verify, and
+    // the orphan identity sidecar is irrelevant. Stat errors fall through
+    // to the verifier as Unsafe, so a hostile directory cannot hide behind
+    // the absence fast-path. The legacy script check below already
+    // handles NotInstalled cleanly when its parent dir is gone.
+    if path_present_nofollow(settings_path).unwrap_or(true) {
+        runtime_check_binary_hook_at(settings_path, identity_path)?;
+    }
 
     match verify_hook_at(hook_path)? {
         IntegrityStatus::Verified | IntegrityStatus::NotInstalled => {
@@ -2748,10 +2755,51 @@ mod tests {
             run_verify_at(&hook, &settings, &identity, 0).is_err(),
             "manual verification must flag removal of an installed registration"
         );
+        // Runtime gate is intentionally silent on this branch: a missing
+        // settings.json is a clean host-uninstall state, not a tamper signal.
+        // See `test_runtime_check_succeeds_when_claude_host_uninstalled`.
+    }
+
+    #[test]
+    fn test_runtime_check_succeeds_when_claude_host_uninstalled() {
+        // Regression: when Claude is uninstalled (settings.json genuinely
+        // absent) but the install identity sidecar survives, the runtime gate
+        // must NOT fail closed. The auto-allow hook is gone (there is no live
+        // PreToolUse surface to verify), so a missing settings.json is a
+        // clean host-uninstall state, not a tamper signal. The verifier and
+        // manual `verify` still flag it (they are observational), but the
+        // operational hot path must pass so the tool works on OMP / OpenCode
+        // / Pi hosts that do not install Claude.
+        let temp = secure_tempdir();
+        let hook = temp.path().join("rtk-rewrite.sh");
+        let settings = write_settings(temp.path(), "contextcrawler hook claude");
+        let identity = temp
+            .path()
+            .join("state")
+            .join(REGISTRATION_IDENTITY_FILENAME);
+        store_binary_hook_identity_at(&settings, &identity).unwrap();
+
+        fs::remove_file(&settings).unwrap();
+
+        // Verifier is observational: still flags Tampered.
+        assert!(matches!(
+            verify_binary_hook_at_with_identity(&settings, &identity),
+            BinaryHookStatus::Tampered { .. }
+        ));
+
+        // Manual verify also flags it.
         assert!(
-            runtime_check_at(&hook, &settings, &identity).is_err(),
-            "the runtime gate must flag removal of an installed registration"
+            run_verify_at(&hook, &settings, &identity, 0).is_err(),
+            "manual verification must still flag removal of an installed registration"
         );
+
+        // Runtime gate passes (the bug fix).
+        runtime_check_at(&hook, &settings, &identity).unwrap_or_else(|error| {
+            panic!(
+                "runtime gate must not fail closed on host absence: {}",
+                error
+            )
+        });
     }
 
     #[test]
