@@ -6,9 +6,12 @@ use std::fs;
 use std::path::Path;
 
 use crate::core::filter::Language;
+use crate::core::sensitive_paths;
 
 /// Heuristic-based code summarizer - no external model needed
 pub fn run(file: &Path, _model: &str, _force_download: bool, verbose: u8) -> Result<()> {
+    sensitive_paths::ensure_not_sensitive_env_path(file, "contextcrawler smart")?;
+
     if verbose > 0 {
         eprintln!("Analyzing: {}", file.display());
     }

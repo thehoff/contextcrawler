@@ -1,6 +1,6 @@
 //! Deduplicates repeated log lines and shows counts instead.
 
-use crate::core::tracking;
+use crate::core::{sensitive_paths, tracking};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -23,6 +23,8 @@ lazy_static! {
 /// Filter and deduplicate log output
 pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
+
+    sensitive_paths::ensure_not_sensitive_env_path(file, "contextcrawler log")?;
 
     if verbose > 0 {
         eprintln!("Analyzing log: {}", file.display());

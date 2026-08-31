@@ -9,6 +9,7 @@ pub mod filter;
 pub mod runner;
 pub mod output_summary;
 pub mod secret_redact;
+pub mod sensitive_paths;
 pub mod stream;
 pub mod tee;
 pub mod telemetry;
