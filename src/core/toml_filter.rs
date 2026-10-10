@@ -2,12 +2,13 @@
 ///
 /// Provides a declarative pipeline of 8 stages that can be configured
 /// via TOML files. Lookup priority (first match wins):
-///   1. `.ctxcrl/filters.toml`              — project-local, committable with the repo
-///   2. `~/.config/ctxcrl/filters.toml`  — user-global, applies to all projects
+///   1. `.contextcrawler/filters.toml`    — project-local, committable with the repo.
+///      `.ctxcrl/filters.toml` is used only when the canonical file is absent.
+///   2. `~/.config/contextcrawler/filters.toml` — user-global, applies to all projects
 ///   3. Built-in TOML                     — `src/filters/*.toml`, concatenated by build.rs and embedded at compile time
 ///   4. Passthrough                       — no match, handled by caller
 ///
-/// `ctxcrl init` generates a commented template for both levels (project or global).
+/// `contextcrawler init` generates a commented template for both levels (project or global).
 ///
 /// Environment variables:
 ///   - `CTXCRL_NO_TOML=1`     — bypass TOML engine entirely
@@ -219,15 +220,18 @@ impl TomlFilterRegistry {
     fn load() -> Self {
         let mut filters = Vec::new();
 
-        // Priority 1: project-local .ctxcrl/filters.toml (trust-gated).
+        // Priority 1: project-local filters.toml (trust-gated).
+        // Canonical `.contextcrawler/filters.toml`, else `.ctxcrl/filters.toml`
+        // when that path is absent. Trust is checked on the file opened.
         // TOCTOU-safe: read once, hash the in-memory buffer, parse the same
         // buffer if trust passes. Avoids the swap-between-hash-and-parse
         // window the two-open form left.
-        let project_filter_path = std::path::Path::new(".ctxcrl/filters.toml");
-        if project_filter_path.exists() {
-            if let Ok(bytes) = std::fs::read(project_filter_path) {
+        if let Some(project_filter_path) =
+            crate::core::path_migrate::project_filters_file(std::path::Path::new("."))
+        {
+            if let Ok(bytes) = std::fs::read(&project_filter_path) {
                 let trust_status =
-                    crate::hooks::trust::check_trust_bytes(project_filter_path, &bytes)
+                    crate::hooks::trust::check_trust_bytes(&project_filter_path, &bytes)
                         .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
 
                 match trust_status {
@@ -237,7 +241,11 @@ impl TomlFilterRegistry {
                         match Self::parse_and_compile(&content, "project") {
                             Ok(f) => filters.extend(f),
                             Err(e) => {
-                                eprintln!("[contextcrawler] warning: .ctxcrl/filters.toml: {}", e)
+                                eprintln!(
+                                    "[contextcrawler] warning: {}: {}",
+                                    project_filter_path.display(),
+                                    e
+                                )
                             }
                         }
                     }
@@ -247,13 +255,19 @@ impl TomlFilterRegistry {
                         // schema_version + comments would never apply any rule
                         // even if trusted. Skip the scary warning entirely.
                         if !Self::has_no_active_rules(&bytes) {
-                            eprintln!("[contextcrawler] WARNING: untrusted project filters (.ctxcrl/filters.toml)");
+                            eprintln!(
+                                "[contextcrawler] WARNING: untrusted project filters ({})",
+                                project_filter_path.display()
+                            );
                             eprintln!("[contextcrawler] Filters NOT applied. Run `contextcrawler trust` to review and enable.");
                         }
                     }
                     crate::hooks::trust::TrustStatus::ContentChanged { .. } => {
                         if !Self::has_no_active_rules(&bytes) {
-                            eprintln!("[contextcrawler] WARNING: .ctxcrl/filters.toml changed since trusted.");
+                            eprintln!(
+                                "[contextcrawler] WARNING: {} changed since trusted.",
+                                project_filter_path.display()
+                            );
                             eprintln!("[contextcrawler] Filters NOT applied. Run `contextcrawler trust` to re-review.");
                         }
                     }
@@ -261,7 +275,7 @@ impl TomlFilterRegistry {
             }
         }
 
-        // Priority 2: user-global ~/.config/ctxcrl/filters.toml (trust-gated).
+        // Priority 2: user-global ~/.config/contextcrawler/filters.toml (trust-gated).
         //
         // Closes GHSA-2026-CC-001 / audit finding H-3 from the 2026-05-15
         // session. Without this gate, malware that wrote a hostile
@@ -771,15 +785,17 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
         &mut tested_filter_names,
     );
 
-    // Trust-gated: only verify project-local filters if trusted (SA-2025-RTK-002)
-    let project_path = std::path::Path::new(".ctxcrl/filters.toml");
-    if project_path.exists() {
-        let trust_status = crate::hooks::trust::check_trust(project_path)
+    // Trust-gated: only verify project-local filters if trusted (SA-2025-RTK-002).
+    // Same path the loader opens.
+    if let Some(project_path) =
+        crate::core::path_migrate::project_filters_file(std::path::Path::new("."))
+    {
+        let trust_status = crate::hooks::trust::check_trust(&project_path)
             .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
         match trust_status {
             crate::hooks::trust::TrustStatus::Trusted
             | crate::hooks::trust::TrustStatus::EnvOverride => {
-                if let Ok(content) = std::fs::read_to_string(project_path) {
+                if let Ok(content) = std::fs::read_to_string(&project_path) {
                     collect_test_outcomes(
                         &content,
                         filter_name_opt,
@@ -790,7 +806,10 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
                 }
             }
             _ => {
-                eprintln!("[contextcrawler] WARNING: untrusted project filters skipped in verify");
+                eprintln!(
+                    "[contextcrawler] WARNING: untrusted project filters skipped in verify ({})",
+                    project_path.display()
+                );
             }
         }
     }

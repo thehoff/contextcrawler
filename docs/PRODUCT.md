@@ -81,8 +81,9 @@ a place on `develop`.
    a shell builtin and reporting success (#238). The user config and data
    directories are `~/.config/contextcrawler` and
    `~/.local/share/contextcrawler`, and the current release pin is
-   v0.5.0 (#242). Project-local filters are still `.ctxcrl/filters.toml`,
-   because that is the path the loader reads.
+   v0.5.0 (#242). Project-local filters load from
+   `.contextcrawler/filters.toml`, and from `.ctxcrl/filters.toml` only
+   when that file is absent. Trust is checked on the file that was opened.
 
 ## How a later idea gets in
 

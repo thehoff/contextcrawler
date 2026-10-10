@@ -230,7 +230,7 @@ Tracked by [GHSA-2cwv-rr7c-2p4c](https://github.com/thehoff/contextcrawler/secur
 
 `~/.config/contextcrawler/filters.toml` (the user-global filter file) is now
 SHA-256 pinned through the same trust store used for project-local
-`.ctxcrl/filters.toml`. Previously the global file was loaded
+`.contextcrawler/filters.toml` (or `.ctxcrl/filters.toml` when that is the file present). Previously the global file was loaded
 unconditionally, which meant malware that could write to a user's
 home directory could install a filter that silently rewrote any
 command's output before the agent saw it — including hiding security

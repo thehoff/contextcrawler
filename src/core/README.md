@@ -27,8 +27,8 @@ The TOML DSL applies 8 stages in order:
 8. **on_empty**: Return message if result is empty after all stages
 
 Three-tier filter lookup (first match wins):
-1. `.ctxcrl/filters.toml` (project-local, requires `ctxcrl trust`)
-2. `~/.config/ctxcrl/filters.toml` (user-global)
+1. `.contextcrawler/filters.toml` (project-local; `.ctxcrl/filters.toml` only if that file is absent; requires `contextcrawler trust`)
+2. `~/.config/contextcrawler/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
 
 ## Tracking Database Schema

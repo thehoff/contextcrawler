@@ -4,7 +4,7 @@
 //! Scope is deliberately limited to schema-stable user settings:
 //! - user config dir:  `config.toml`, `filters.toml`, `trusted_filters.json`
 //! - data dir:         (same basenames, in case they live there)
-//! - project-local:    `./.rtk`  ->  `./.ctxcrl`
+//! - project-local:    `./.rtk` and `./.ctxcrl` -> `./.contextcrawler`
 //!
 //! The tracking database (`history.db`) is **intentionally NOT migrated**. The
 //! DB is a complete reset: a fresh database with the current schema is created
@@ -32,6 +32,30 @@ const LEGACY_DATA_DIR_PREV: &str = "ctxcrl"; // branding-lint: allow legacy
 const LEGACY_PROJECT_DIR_ORIG: &str = ".rtk";
 /// Legacy project-local directory (intermediate rename).
 const LEGACY_PROJECT_DIR_PREV: &str = ".ctxcrl";
+
+/// Project-local `filters.toml` the loader should open.
+///
+/// Canonical is `.contextcrawler/filters.toml`, which is where this module
+/// moves a legacy project dir. `.ctxcrl/filters.toml` is returned only when
+/// the canonical path has no directory entry. Presence is `symlink_metadata`,
+/// not `exists`, so a dangling or unreadable canonical file does not fall
+/// through to the legacy file. Trust is the caller's job, on this path.
+pub fn project_filters_file(base: &Path) -> Option<std::path::PathBuf> {
+    for rel in project_filters_rel_paths() {
+        let path = base.join(&rel);
+        if path.symlink_metadata().is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn project_filters_rel_paths() -> [std::path::PathBuf; 2] {
+    [
+        std::path::PathBuf::from(format!(".{RTK_DATA_DIR}")).join(FILTERS_TOML),
+        std::path::PathBuf::from(LEGACY_PROJECT_DIR_PREV).join(FILTERS_TOML),
+    ]
+}
 
 /// Schema-stable settings files that migrate from the legacy `rtk` segment.
 /// Each basename is checked independently in BOTH the user config dir and the
@@ -209,7 +233,10 @@ mod tests {
         std::fs::create_dir_all(&old_dir).unwrap();
         std::fs::write(old_dir.join(CONFIG_TOML), b"data").unwrap();
 
-        assert!(migrate_file(&old_dir, &new_dir, CONFIG_TOML), "should migrate");
+        assert!(
+            migrate_file(&old_dir, &new_dir, CONFIG_TOML),
+            "should migrate"
+        );
         assert!(!old_dir.join(CONFIG_TOML).exists(), "old gone after rename");
         assert!(new_dir.join(CONFIG_TOML).exists(), "payload moved");
 
@@ -271,7 +298,10 @@ mod tests {
         let new_dir = root.join("ctxcrl");
         std::fs::create_dir_all(&root).unwrap();
 
-        assert!(!migrate_file(&old_dir, &new_dir, CONFIG_TOML), "nothing to do");
+        assert!(
+            !migrate_file(&old_dir, &new_dir, CONFIG_TOML),
+            "nothing to do"
+        );
         assert!(!new_dir.join(CONFIG_TOML).exists());
 
         std::fs::remove_dir_all(&root).ok();
@@ -419,13 +449,12 @@ mod tests {
 
         migrate_project_local(&old_dir, &new_dir);
 
-        assert!(!new_dir.exists(), "symlinked legacy dir must not be migrated");
         assert!(
-            old_dir
-                .symlink_metadata()
-                .unwrap()
-                .file_type()
-                .is_symlink(),
+            !new_dir.exists(),
+            "symlinked legacy dir must not be migrated"
+        );
+        assert!(
+            old_dir.symlink_metadata().unwrap().file_type().is_symlink(),
             "the planted symlink is left untouched"
         );
 
@@ -495,4 +524,53 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    #[test]
+    fn project_filters_file_prefers_canonical_then_legacy() {
+        let root = unique_tmp();
+        assert!(project_filters_file(&root).is_none());
+
+        let legacy_dir = root.join(LEGACY_PROJECT_DIR_PREV);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join(FILTERS_TOML);
+        std::fs::write(&legacy, b"old").unwrap();
+        assert_eq!(
+            project_filters_file(&root).as_deref(),
+            Some(legacy.as_path())
+        );
+
+        let canonical_dir = root.join(format!(".{RTK_DATA_DIR}"));
+        std::fs::create_dir_all(&canonical_dir).unwrap();
+        let canonical = canonical_dir.join(FILTERS_TOML);
+        std::fs::write(&canonical, b"new").unwrap();
+        assert_eq!(
+            project_filters_file(&root).as_deref(),
+            Some(canonical.as_path()),
+            "canonical file wins when both are present"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_filters_file_keeps_dangling_canonical_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = unique_tmp();
+        let canonical_dir = root.join(format!(".{RTK_DATA_DIR}"));
+        std::fs::create_dir_all(&canonical_dir).unwrap();
+        let link = canonical_dir.join(FILTERS_TOML);
+        symlink(root.join("missing-target"), &link).unwrap();
+
+        let legacy_dir = root.join(LEGACY_PROJECT_DIR_PREV);
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(legacy_dir.join(FILTERS_TOML), b"old").unwrap();
+
+        assert_eq!(
+            project_filters_file(&root).as_deref(),
+            Some(link.as_path()),
+            "a present canonical entry must not fall through to the legacy file"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

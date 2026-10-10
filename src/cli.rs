@@ -777,8 +777,8 @@ pub(crate) enum Commands {
         /// List all trusted projects
         #[arg(long)]
         list: bool,
-        /// Operate on the user-global `~/.config/ctxcrl/filters.toml`
-        /// instead of project-local `.ctxcrl/filters.toml`. Closes the H-3
+        /// Operate on the user-global `~/.config/contextcrawler/filters.toml`
+        /// instead of the project-local filters file. Closes the H-3
         /// audit gap (v0.1.6) by exposing the global trust gate to the CLI.
         #[arg(long)]
         global: bool,

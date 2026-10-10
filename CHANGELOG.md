@@ -21,8 +21,10 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Docs that still called the user config and data directories `ctxcrl`,
-  or pinned v0.4.0 as the current release (#242). The loader's
-  project-local filter path is still `.ctxcrl/filters.toml`.
+  or pinned v0.4.0 as the current release (#242).
+- Project-local filters load from `.contextcrawler/filters.toml`.
+  `.ctxcrl/filters.toml` is used only when the canonical file is absent,
+  and trust is checked on the file that was opened.
 
 ## [0.5.0] — 2026-08-16
 

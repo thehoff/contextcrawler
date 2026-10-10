@@ -225,9 +225,9 @@ schema_version = 1
 # on_empty = "my-tool: ok"
 "#;
 
-/// Template for user-global filters (~/.config/ctxcrl/filters.toml).
+/// Template for user-global filters (~/.config/contextcrawler/filters.toml).
 const FILTERS_GLOBAL_TEMPLATE: &str = r#"# User-global ContextCrawler filters — apply to all your projects.
-# Project-local .ctxcrl/filters.toml takes precedence over these.
+# Project-local .contextcrawler/filters.toml takes precedence over these.
 # Trust gate: run `contextcrawler trust --global` after editing.
 # Docs: https://github.com/thehoff/contextcrawler#custom-filters
 schema_version = 1
@@ -1551,7 +1551,7 @@ fn run_default_mode(
         }
     }
 
-    // 6. Generate user-global filters template (~/.config/ctxcrl/filters.toml)
+    // 6. Generate user-global filters template (~/.config/contextcrawler/filters.toml)
     generate_global_filters_template(ctx)?;
 
     if !dry_run {
@@ -1704,29 +1704,32 @@ fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use_array.len() < original_len
 }
 
-/// Generate .ctxcrl/filters.toml template in the current directory if not present.
+/// Generate the project-local filters.toml template when neither candidate exists.
 fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
-    let ctxcrl_dir = std::path::Path::new(".ctxcrl");
-    let path = ctxcrl_dir.join("filters.toml");
-
-    if path.exists() {
+    if let Some(existing) =
+        crate::core::path_migrate::project_filters_file(std::path::Path::new("."))
+    {
         if verbose > 0 {
-            eprintln!(".ctxcrl/filters.toml already exists, skipping template");
+            eprintln!("{} already exists, skipping template", existing.display());
         }
         return Ok(());
     }
 
+    let project_dir =
+        std::path::PathBuf::from(format!(".{}", crate::core::constants::RTK_DATA_DIR));
+    let path = project_dir.join(crate::core::constants::FILTERS_TOML);
+
     if dry_run {
         println!(
-            "[dry-run] would create .ctxcrl/filters.toml template: {}",
+            "[dry-run] would create project filters template: {}",
             path.display()
         );
         return Ok(());
     }
 
-    fs::create_dir_all(ctxcrl_dir)
-        .with_context(|| format!("Failed to create directory: {}", ctxcrl_dir.display()))?;
+    fs::create_dir_all(&project_dir)
+        .with_context(|| format!("Failed to create directory: {}", project_dir.display()))?;
     fs::write(&path, FILTERS_TEMPLATE)
         .with_context(|| format!("Failed to write {}", path.display()))?;
 
@@ -1737,7 +1740,7 @@ fn generate_project_filters_template(ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-/// Generate ~/.config/ctxcrl/filters.toml template if not present.
+/// Generate ~/.config/contextcrawler/filters.toml template if not present.
 fn generate_global_filters_template(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));

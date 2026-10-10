@@ -402,23 +402,33 @@ fn detect_hook_type() -> String {
 fn count_custom_toml_filters() -> usize {
     let mut count = 0;
 
-    // Project-local: .ctxcrl/filters/*.toml
+    // Project-local custom filters: canonical dir, then the pre-migration dir.
     if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(entries) = std::fs::read_dir(cwd.join(".ctxcrl/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
+        for rel in [
+            format!(".{}/filters", crate::core::constants::RTK_DATA_DIR),
+            ".ctxcrl/filters".to_string(),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(cwd.join(rel)) {
+                count += entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+                    .count();
+            }
         }
     }
 
-    // Global: ~/.config/ctxcrl/filters/*.toml
+    // User-global custom filters: canonical config dir, then the pre-migration dir.
     if let Some(config_dir) = dirs::config_dir() {
-        if let Ok(entries) = std::fs::read_dir(config_dir.join("ctxcrl/filters")) {
-            count += entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
-                .count();
+        for rel in [
+            format!("{}/filters", crate::core::constants::RTK_DATA_DIR),
+            "ctxcrl/filters".to_string(),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(config_dir.join(rel)) {
+                count += entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+                    .count();
+            }
         }
     }
 

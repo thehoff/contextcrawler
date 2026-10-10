@@ -1,6 +1,8 @@
 //! Controls which project-local TOML filters are allowed to run.
 //!
-//! `.ctxcrl/filters.toml` is loaded from CWD with highest priority. An attacker
+//! `.contextcrawler/filters.toml` is loaded from the working directory with
+//! highest priority. `.ctxcrl/filters.toml` is used only when the canonical
+//! file is absent. An attacker
 //! can commit this file to a public repo to control what an LLM sees — hiding
 //! malicious code, suppressing security scanner output, or rewriting command
 //! output entirely via `replace` and `match_output` primitives.
@@ -753,7 +755,7 @@ pub fn list_trusted() -> Result<HashMap<String, TrustEntry>> {
 // ---------------------------------------------------------------------------
 
 /// Run `contextcrawler trust` — review and trust project-local filters.
-/// Resolve the global filter path (`~/.config/ctxcrl/filters.toml` on Linux,
+/// Resolve the global filter path (`~/.config/contextcrawler/filters.toml` on Linux,
 /// platform equivalent elsewhere). Returns None if dirs can't locate
 /// a config directory.
 fn global_filter_path() -> Option<std::path::PathBuf> {
@@ -817,11 +819,14 @@ pub fn run_trust(list: bool, global: bool) -> Result<()> {
         let label = format!("{}", p.display());
         (p, label)
     } else {
-        let p = std::path::PathBuf::from(".ctxcrl/filters.toml");
-        if !p.exists() {
-            anyhow::bail!("No .ctxcrl/filters.toml found in current directory");
-        }
-        (p, ".ctxcrl/filters.toml".to_string())
+        let p = crate::core::path_migrate::project_filters_file(std::path::Path::new("."))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No project filter file found (looked for .contextcrawler/filters.toml, then .ctxcrl/filters.toml)"
+                )
+            })?;
+        let label = p.display().to_string();
+        (p, label)
     };
 
     // Read ONCE to prevent TOCTOU: display + hash from same buffer.
@@ -872,10 +877,13 @@ pub fn run_untrust(global: bool) -> Result<()> {
         let label = format!("{}", p.display());
         (p, label)
     } else {
-        (
-            std::path::PathBuf::from(".ctxcrl/filters.toml"),
-            ".ctxcrl/filters.toml".to_string(),
-        )
+        let p = crate::core::path_migrate::project_filters_file(std::path::Path::new("."))
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(format!(".{}", crate::core::constants::RTK_DATA_DIR))
+                    .join(crate::core::constants::FILTERS_TOML)
+            });
+        let label = p.display().to_string();
+        (p, label)
     };
 
     // If file doesn't exist, untrust by canonical path lookup won't work.

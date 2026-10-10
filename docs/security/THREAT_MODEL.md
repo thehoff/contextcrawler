@@ -28,7 +28,7 @@ defend against a fully compromised local account.
 | The local shell session | The terminal contextcrawler runs in | Auto-approved commands execute here with the user's privileges. |
 | `tracking.db` | `~/.local/share/contextcrawler/` (linux) / `~/Library/Application Support/contextcrawler/` (macOS) | 90-day command log that feeds `gain --history` back into the agent's context. Secrets persisted here re-leak on every read. |
 | The hook integrity hash | `~/.local/share/contextcrawler/` | The SHA-256 of the agent-side rewrite hook. Tampering = silent command injection. |
-| Trusted project filters | `.ctxcrl/filters.toml` per project | A trusted filter can rewrite *any* command's output before the agent sees it (hide vulnerabilities, redirect URLs). |
+| Trusted project filters | `.contextcrawler/filters.toml` per project (`.ctxcrl/filters.toml` only if that file is absent) | A trusted filter can rewrite *any* command's output before the agent sees it (hide vulnerabilities, redirect URLs). |
 | Tirith and supply-chain gate decisions | Subprocess + local cache | Gate downgrades are advisory; bypass undoes downstream defence-in-depth. |
 
 ## Trust zones
@@ -73,7 +73,7 @@ channel.
 | Malicious tool output | Anything reachable via a shell tool the agent runs (curl, npm install, git fetch, file contents…) | Push instructions into the agent's context to make it run something the user wouldn't approve, or exfiltrate secrets via the agent's response. |
 | Malicious upstream package | A dependency the agent installs in response to a user request | Same as above, plus persistence: cron, hook tampering, etc. |
 | Compromised npm postinstall / build script | Runs at install time | Modify `~/.claude/hooks/`, `tracking.db`, contextcrawler binary itself. |
-| Adversarial repo content | `.ctxcrl/filters.toml` shipped in a public repo | Auto-load on cd into the repo and hide security findings or rewrite command output. |
+| Adversarial repo content | `.contextcrawler/filters.toml` shipped in a public repo (or `.ctxcrl/filters.toml` when the canonical file is absent) | Auto-load on cd into the repo and hide security findings or rewrite command output. |
 | Compromised LLM provider | The model itself returns adversarial outputs | Out of scope here — host agent is the controller. |
 | Other users on a shared host | None at our layer | Out of scope — single-user CLI by design. |
 
@@ -140,7 +140,7 @@ SECURITY.md.
 
 ### Surface 4: project-local TOML filters
 
-`.ctxcrl/filters.toml` in a repo can rewrite any command's output via
+`.contextcrawler/filters.toml` in a repo (or `.ctxcrl/filters.toml` when the canonical file is absent) can rewrite any command's output via
 `replace` / `match_output` primitives. A malicious public repo could
 ship a filter that silently hides security warnings or rewrites URLs
 in command output.
@@ -217,13 +217,11 @@ v0.1.x. Each has a tracking note elsewhere; re-evaluate at v0.2.0.
    time. Tracked in `docs/quality/BASELINE.md`.
 4. **`fxhash` unmaintained advisory** is allow-listed in `deny.toml`.
    No active CVE. Re-evaluate when `scraper` upgrades.
-5. **Global TOML filter trust check not yet inherited.** Project-local
-   `.ctxcrl/filters.toml` is trust-gated (SA-2025-RTK-002 fix is in), but
-   `~/.config/ctxcrl/filters.toml` at `src/core/toml_filter.rs:218` loads
-   without an integrity check. Upstream PR #1068 fixed this in contextcrawler; we
-   need to either cherry-pick it or wrap the global load with the same
-   `hooks::trust` check. Surfaced during the 2026-05-15 audit's Codex
-   re-review; do not carry into v0.2.0.
+5. **Global TOML filter trust.** Project-local filters
+   (`.contextcrawler/filters.toml`, or `.ctxcrl/filters.toml` when that
+   file is absent) and `~/.config/contextcrawler/filters.toml` are both
+   SHA-256 gated in `src/core/toml_filter.rs`. An untrusted file is skipped.
+   The 2026-05-15 note that the global file loaded without a check is closed.
 6. **Claude Code subagents do not inherit the parent PreToolUse hook**
    (#204, upstream rtk#1820). A subagent's Bash calls run raw: no
    rewrite and no gate. OMP rebinds its extension into child sessions,
