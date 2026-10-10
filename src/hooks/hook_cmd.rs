@@ -278,38 +278,45 @@ fn handle_vscode(cmd: &str) -> Result<()> {
     }
 }
 
+/// Copilot CLI JSON for a resolved handler action.
+///
+/// `None` is a silent pass-through (empty stdout). Every other action is a
+/// `deny`: Copilot has no ask mode, so a review and a rewrite suggestion
+/// both stop the current call. The prefix on an already-rewritten command
+/// is not a trust mark — that case is `Passthrough` only when the permission
+/// check itself did not ask or deny (#241).
+fn copilot_cli_output(action: HandlerAction) -> Option<Value> {
+    let reason = match action {
+        HandlerAction::Passthrough => return None,
+        HandlerAction::Deny { reason } => reason,
+        HandlerAction::Ask { command } => {
+            format!("contextcrawler: review required before running `{command}`")
+        }
+        HandlerAction::Allow { rewritten } => {
+            format!("Token savings: use `{rewritten}` instead (contextcrawler saves 60-90% tokens)")
+        }
+    };
+    Some(json!({
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason
+    }))
+}
+
 fn handle_copilot_cli(cmd: &str) -> Result<()> {
     // The Copilot CLI protocol uses `deny` + a reason to steer the agent to a
     // replacement command; a security block also uses `deny` but with a
     // block reason. #225: gate the raw command and honour Ask/Deny.
-    let emit = |reason: String| -> Result<()> {
-        let output = json!({
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason
-        });
-        writeln!(io::stdout(), "{output}").context("failed to write Copilot hook decision")
-    };
-    match handler_action(cmd) {
-        HandlerAction::Passthrough => Ok(()),
-        HandlerAction::Deny { reason } => {
-            audit_log("deny", cmd, "");
-            emit(reason)
-        }
-        HandlerAction::Ask { command } => {
-            // Copilot has no "ask"; surface a deny+reason so the agent stops
-            // and the human reviews, rather than silently auto-running.
-            audit_log("ask", cmd, &command);
-            emit(format!(
-                "contextcrawler: review required before running `{command}`"
-            ))
-        }
-        HandlerAction::Allow { rewritten } => {
-            audit_log("rewrite", cmd, &rewritten);
-            emit(format!(
-                "Token savings: use `{rewritten}` instead (contextcrawler saves 60-90% tokens)"
-            ))
-        }
+    let action = handler_action(cmd);
+    match &action {
+        HandlerAction::Passthrough => return Ok(()),
+        HandlerAction::Deny { .. } => audit_log("deny", cmd, ""),
+        HandlerAction::Ask { command } => audit_log("ask", cmd, command),
+        HandlerAction::Allow { rewritten } => audit_log("rewrite", cmd, rewritten),
     }
+    let Some(output) = copilot_cli_output(action) else {
+        return Ok(());
+    };
+    writeln!(io::stdout(), "{output}").context("failed to write Copilot hook decision")
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -988,6 +995,21 @@ fn process_claude_payload_with_gate(
         ti
     };
 
+    // #241: an Allow on the typed command answers "is this command safe?".
+    // It does not answer "should the host skip its own check of the command
+    // that will actually run?". Inspect the rewritten command with the same
+    // checker. A deny rule that matches only the rewrite (for example
+    // `contextcrawler *` while `git *` allows `git status`) must still block.
+    let rewritten_verdict = check(&rewritten);
+    if rewritten_verdict == PermissionVerdict::Deny {
+        return PayloadAction::Deny {
+            reason: "contextcrawler: rewritten command blocked by permission deny rule; denying"
+                .to_string(),
+            audit_tag: "deny:rewritten_deny_rule",
+            cmd: rewritten,
+        };
+    }
+
     // #206/#241: never auto-allow a read of a credential-bearing file.
     // Rewriting `cat .env` to `contextcrawler read .env` and returning `allow`
     // made the read MORE permitted than it would have been without
@@ -998,19 +1020,16 @@ fn process_claude_payload_with_gate(
     // `Bash(contextcrawler:*)` allow rule would run it unattended if no
     // decision were emitted.
     //
-    // #241: also inspect the REWRITTEN command. The rewrite can carry the
-    // secret even when the original does not (and vice versa), and the check
-    // must run for every non-`Allow` verdict — including `Default`, which
-    // previously omitted a decision entirely. An `Allow` verdict is left
-    // alone: it comes from the permission engine, which relaxes
-    // `FindingReason::SecretRead` only under the `Unrestricted` opt-out, and
-    // the hook must not override that deliberate relaxation.
-    let secret_hint = if verdict == PermissionVerdict::Allow {
-        None
-    } else {
-        crate::hooks::secret_paths::touches_secret_path(cmd)
-            .or_else(|| crate::hooks::secret_paths::touches_secret_path(&rewritten))
-    };
+    // The secret check runs on both commands whenever either verdict is not
+    // Allow. Both Allow is the Unrestricted opt-out (`FindingReason::SecretRead`
+    // relaxed there, and only there); the hook does not override it.
+    let secret_hint =
+        if verdict == PermissionVerdict::Allow && rewritten_verdict == PermissionVerdict::Allow {
+            None
+        } else {
+            crate::hooks::secret_paths::touches_secret_path(cmd)
+                .or_else(|| crate::hooks::secret_paths::touches_secret_path(&rewritten))
+        };
 
     // When a gate flagged this (rewritable) command, surface the tailored
     // trust hint (#197) as the reason the user sees in the Ask prompt;
@@ -1030,20 +1049,27 @@ fn process_claude_payload_with_gate(
         "updatedInput": updated_input
     });
 
-    // Emit explicit host decisions for both Allow and Ask. In particular, an
-    // Ask carrying a rewritten command must not fall back through the host's
-    // broad `Bash(contextcrawler:*)` allow rule and auto-run unattended.
-    // `Default` omits a decision so the host applies its normal rules — unless
-    // a secret path was found (#241), in which case we emit `ask`: a missing
-    // decision would let `Bash(contextcrawler:*)` run the credential read.
-    // `secret_hint` is only ever `Some` for a non-`Allow` verdict, so this
-    // never turns an `Allow` (e.g. the `Unrestricted` opt-out) into an `ask`.
+    // `permissionDecision: "allow"` only when the rewritten command itself is
+    // Allow (#241). An allow rule that matches `git status` but not
+    // `contextcrawler git status` leaves the field unset, and the host applies
+    // its own rules to the command it will run. Ask, a gate flag, or a secret
+    // on a non-Allow verdict is an explicit `ask`: omitting it would let
+    // `Bash(contextcrawler:*)` run the credential read. Both verdicts Allow
+    // is the only auto-allow, so the Unrestricted opt-out stays an allow.
     // `hook_output` is a `json!` object literal, so `as_object_mut` is always
     // `Some`; keep the checked branch so malformed future edits cannot panic.
     if let Some(obj) = hook_output.as_object_mut() {
-        if verdict == PermissionVerdict::Allow && !gate_ask {
+        if verdict == PermissionVerdict::Allow
+            && rewritten_verdict == PermissionVerdict::Allow
+            && !gate_ask
+            && secret_hint.is_none()
+        {
             obj.insert("permissionDecision".into(), json!("allow"));
-        } else if verdict == PermissionVerdict::Ask || gate_ask || secret_hint.is_some() {
+        } else if verdict == PermissionVerdict::Ask
+            || rewritten_verdict == PermissionVerdict::Ask
+            || gate_ask
+            || secret_hint.is_some()
+        {
             obj.insert("permissionDecision".into(), json!("ask"));
         }
     }
@@ -1484,6 +1510,78 @@ mod tests {
         );
     }
 
+    /// #241 Copilot two-step. The panel's claim was that `cat .env` is denied
+    /// with a rewrite suggestion, the agent re-invokes `contextcrawler read .env`,
+    /// and that second call passes through because the prefix is trusted.
+    ///
+    /// On Standard the prefix is not a trust mark: the secret read asks on
+    /// both calls, and Copilot turns ask into a deny. Unrestricted still
+    /// passes the second call through, because `FindingReason::SecretRead` is
+    /// relaxed there — that is the profile opt-out, not a prefix bypass.
+    #[test]
+    fn copilot_prefixed_secret_read_is_not_trusted() {
+        let standard = |candidate: &str| {
+            permissions::check_command_with_rules_profile(
+                candidate,
+                &[],
+                &[],
+                &["*".to_string()],
+                crate::core::config::SecurityProfile::Standard,
+            )
+        };
+        let unrestricted = |candidate: &str| {
+            permissions::check_command_with_rules_profile(
+                candidate,
+                &[],
+                &[],
+                &["*".to_string()],
+                crate::core::config::SecurityProfile::Unrestricted,
+            )
+        };
+        let reason = |output: Option<Value>| -> String {
+            output
+                .as_ref()
+                .and_then(|v| v.get("permissionDecisionReason"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+
+        let first = copilot_cli_output(handler_action_with("cat .env", standard, |_| {
+            GateDecision::Proceed
+        }));
+        let first_reason = reason(first);
+        assert!(
+            first_reason.contains("review required"),
+            "standard must not steer a secret read into an unattended rewrite, got {first_reason}"
+        );
+        assert!(
+            first_reason.contains("contextcrawler read"),
+            "the review must name the rewritten read, got {first_reason}"
+        );
+
+        let second = copilot_cli_output(handler_action_with(
+            "contextcrawler read .env",
+            standard,
+            |_| GateDecision::Proceed,
+        ));
+        let second_reason = reason(second);
+        assert!(
+            second_reason.contains("review required"),
+            "an already-prefixed secret read must not pass through, got {second_reason}"
+        );
+
+        assert!(
+            copilot_cli_output(handler_action_with(
+                "contextcrawler read .env",
+                unrestricted,
+                |_| GateDecision::Proceed,
+            ))
+            .is_none(),
+            "Unrestricted relaxes SecretRead; the prefix is not what allows it"
+        );
+    }
+
     #[test]
     fn handler_action_rewrites_known_command() {
         let _env = crate::hooks::test_env::TrustEnvGuard::untrusted();
@@ -1707,6 +1805,49 @@ mod tests {
         // Baseline: an evaluable allowed command DOES auto-allow.
         assert!(auto_allowed_on_live_path("git status"));
         assert!(auto_allowed_on_live_path("git status 2>&1"));
+    }
+
+    /// #241: Allow on the typed command is not permission to skip the host's
+    /// check of the rewritten command. `git status` matches this rule;
+    /// `contextcrawler git status` does not, so the decision is omitted.
+    /// A rule that allows the rewritten command still auto-allows.
+    #[test]
+    fn test_allow_rule_on_the_typed_command_does_not_skip_the_host_check() {
+        assert_eq!(
+            permission_decision_for_live_path("git status", vec!["git status".to_string()]),
+            None,
+            "an allow rule for the typed command must not auto-allow the rewrite"
+        );
+        assert_eq!(
+            permission_decision_for_live_path("git status", vec!["*".to_string()]),
+            Some("allow".to_string()),
+            "a rule that also allows the rewritten command still auto-allows"
+        );
+    }
+
+    /// #241: a deny rule that matches only the rewritten command must block,
+    /// even when the typed command is allowed.
+    #[test]
+    fn test_rewritten_command_deny_rule_is_not_auto_allowed() {
+        let check = |candidate: &str| {
+            permissions::check_command_with_rules(
+                candidate,
+                &["contextcrawler *".to_string()],
+                &[],
+                &["git *".to_string()],
+            )
+        };
+        let v: Value = serde_json::from_str(&claude_input("git status")).unwrap();
+        match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
+            PayloadAction::Deny { audit_tag, cmd, .. } => {
+                assert_eq!(audit_tag, "deny:rewritten_deny_rule");
+                assert!(
+                    cmd.contains("contextcrawler git status"),
+                    "deny must name the rewritten command, got {cmd}"
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
     }
 
     fn permission_decision_for_live_path(cmd: &str, allow: Vec<String>) -> Option<String> {

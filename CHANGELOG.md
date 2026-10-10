@@ -38,6 +38,11 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - SQLite `CREATE TABLE` dumps and `PRAGMA table_info` headers pass through
   compaction instead of being read as grep hits (#246).
 - `.pgpass`, `.kube/config`, and `*.kdbx` count as credential files.
+- Claude `permissionDecision: "allow"` is emitted only when the rewritten
+  command is itself Allow (#241). An allow rule for `git status` no longer
+  skips the host check of `contextcrawler git status`. A deny rule that
+  matches only the rewrite still blocks. Copilot does not treat an
+  already-prefixed `contextcrawler read .env` as trusted on Standard.
 
 ## [0.5.0] — 2026-08-16
 

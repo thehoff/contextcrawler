@@ -158,10 +158,11 @@ get the same SHA-256 baseline + warning treatment as project filters
 
 ### Surface 5: hook tampering
 
-The PreToolUse hook auto-approves rewritten commands via
-`permissionDecision: allow`. Any process that can write to
-`~/.claude/hooks/contextcrawler-rewrite.sh` can inject arbitrary
-auto-approved commands.
+The PreToolUse hook emits `permissionDecision: allow` only when the
+rewritten command itself matches an allow rule. A rule that matches only
+the typed command does not skip the host's check (#241). Any process that
+can write to `~/.claude/hooks/contextcrawler-rewrite.sh` can inject
+arbitrary auto-approved commands.
 
 | Mitigation | Layer | Status |
 |---|---|---|
