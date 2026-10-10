@@ -15,6 +15,9 @@
 //! 3. `rg [-n|-i|-A 3|...] PATTERN [PATH]` — standard grouped-by-file grep
 //!    output via `grep_cmd::run`.
 //!
+//! Ignore policy is ripgrep's, not grep's (#201). `.gitignore` and binary
+//! files stay out. `contextcrawler grep` still searches gitignored files.
+//!
 //! If the invocation can't be cleanly mapped (no detectable pattern, unknown
 //! flag layout), we emit a one-line stderr note and fall through to raw rg —
 //! the user gets correct output, just unfiltered. Never block the user.
@@ -111,23 +114,33 @@ fn flag_takes_value(arg: &str) -> bool {
     matches!(
         arg,
         "-A" | "--after-context"
-            | "-B" | "--before-context"
-            | "-C" | "--context"
-            | "-e" | "--regexp"
-            | "-f" | "--file"
-            | "-g" | "--glob"
+            | "-B"
+            | "--before-context"
+            | "-C"
+            | "--context"
+            | "-e"
+            | "--regexp"
+            | "-f"
+            | "--file"
+            | "-g"
+            | "--glob"
             | "--iglob"
-            | "-m" | "--max-count"
-            | "-t" | "--type"
-            | "-T" | "--type-not"
+            | "-m"
+            | "--max-count"
+            | "-t"
+            | "--type"
+            | "-T"
+            | "--type-not"
             | "--type-add"
             | "--max-columns"
             | "--max-depth"
             | "--max-filesize"
-            | "--replace" | "-r"
+            | "--replace"
+            | "-r"
             | "--sort"
             | "--sortr"
-            | "--encoding" | "-E"
+            | "--encoding"
+            | "-E"
             | "--engine"
             | "--field-context-separator"
             | "--field-match-separator"
@@ -277,12 +290,13 @@ fn run_search_mode(parsed: &ParsedRg, args: &[String], verbose: u8) -> Result<i3
     grep_cmd::run(
         pattern,
         &parsed.path,
-        80,                              // max_line_len — same default as Commands::Grep
-        200,                             // max_results — same default as Commands::Grep
-        false,                           // context_only
+        80,    // max_line_len — same default as Commands::Grep
+        200,   // max_results — same default as Commands::Grep
+        false, // context_only
         parsed.file_type.as_deref(),
         &parsed.extra_args,
         verbose,
+        grep_cmd::VcsPolicy::Ripgrep,
     )
 }
 
@@ -306,6 +320,7 @@ fn run_format_flag_mode(parsed: &ParsedRg, args: &[String], verbose: u8) -> Resu
         parsed.file_type.as_deref(),
         &parsed.extra_args,
         verbose,
+        grep_cmd::VcsPolicy::Ripgrep,
     )
 }
 
@@ -362,7 +377,11 @@ fn filter_files_output(raw: &str) -> String {
             .parent()
             .map(|p| {
                 let s = p.to_string_lossy().to_string();
-                if s.is_empty() { ".".to_string() } else { s }
+                if s.is_empty() {
+                    ".".to_string()
+                } else {
+                    s
+                }
             })
             .unwrap_or_else(|| ".".to_string());
         let name = path
@@ -416,7 +435,10 @@ fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
     let raw_cmd = format!("rg {}", args.join(" "));
     match status {
         Ok(s) => {
-            timer.track_passthrough(&raw_cmd, &format!("contextcrawler rg (passthrough): {}", raw_cmd));
+            timer.track_passthrough(
+                &raw_cmd,
+                &format!("contextcrawler rg (passthrough): {}", raw_cmd),
+            );
             Ok(s.code().unwrap_or(1))
         }
         Err(e) => {
@@ -531,8 +553,10 @@ mod tests {
         assert_eq!(p.pattern.as_deref(), Some("-l"));
         assert_eq!(p.path, "src/");
         // -l was consumed as the `-e` value, not parsed as a format flag.
-        assert!(!p.extra_args.contains(&"-l".to_string()),
-            "-l after -e must be the pattern value, not a format flag");
+        assert!(
+            !p.extra_args.contains(&"-l".to_string()),
+            "-l after -e must be the pattern value, not a format flag"
+        );
     }
 
     #[test]
@@ -593,9 +617,12 @@ mod tests {
         // raw. Assert the framing never more than doubles output — the
         // contract that matters is "does not regress catastrophically".
         // Savings test at scale lives in `test_filter_files_per_dir_cap_overflow_marker`.
-        assert!(filt_tokens <= raw_tokens * 2,
+        assert!(
+            filt_tokens <= raw_tokens * 2,
             "files-mode framing should never more than double raw (raw={}, filtered={})",
-            raw_tokens, filt_tokens);
+            raw_tokens,
+            filt_tokens
+        );
     }
 
     // Fixture-backed: real `rg --files src/` output captured at fixture
@@ -611,9 +638,12 @@ mod tests {
         // realistic 60-file lists the filter shouldn't balloon the output.
         let raw_bytes = raw.len();
         let filt_bytes = filtered.len();
-        assert!(filt_bytes <= raw_bytes * 2,
+        assert!(
+            filt_bytes <= raw_bytes * 2,
             "filtered output should never more than 2x raw (raw={}, filt={})",
-            raw_bytes, filt_bytes);
+            raw_bytes,
+            filt_bytes
+        );
     }
 
     #[test]
@@ -624,6 +654,10 @@ mod tests {
             raw.push_str(&format!("src/file_{:02}.rs\n", i));
         }
         let out = filter_files_output(&raw);
-        assert!(out.contains("[+5 more]"), "overflow marker missing: {}", out);
+        assert!(
+            out.contains("[+5 more]"),
+            "overflow marker missing: {}",
+            out
+        );
     }
 }

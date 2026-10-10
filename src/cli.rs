@@ -3807,6 +3807,7 @@ fn run_cli() -> Result<i32> {
             file_type.as_deref(),
             &extra_args,
             cli.verbose,
+            grep_cmd::VcsPolicy::Grep,
         )?,
 
         // Issue #165A: `rg` is no longer a 0% fallback. Parse rg-native

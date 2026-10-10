@@ -28,6 +28,8 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - OMP guidance no longer tells the model to replace native `read`, `find`,
   and `grep` with shell proxies (#248). Those tools stay native. A large
   `grep` or `glob` result is compacted after the tool returns (#247).
+- `contextcrawler rg` keeps ripgrep's `.gitignore` and binary skipping (#201).
+  `contextcrawler grep` still searches gitignored files, matching `grep -r`.
 
 ## [0.5.0] — 2026-08-16
 

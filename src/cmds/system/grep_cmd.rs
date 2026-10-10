@@ -12,8 +12,27 @@ use crate::core::utils::{check_forbidden_rg_args, secure_rg_command};
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::ffi::OsString;
 use std::collections::HashMap;
+use std::ffi::OsString;
+
+/// Whose ignore rules the search keeps.
+///
+/// `Grep` matches `grep -r`: gitignored files are searched. `Ripgrep`
+/// matches `rg`: `.gitignore` is honored and binary files stay skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VcsPolicy {
+    Grep,
+    Ripgrep,
+}
+
+fn apply_search_flags(cmd: &mut std::process::Command, policy: VcsPolicy) {
+    cmd.args(["-n", "-H", "--no-heading", "--null"]);
+    if policy == VcsPolicy::Grep {
+        // Match grep -r. `.ignore` / `.rgignore` still apply; only VCS
+        // exclude files are bypassed.
+        cmd.arg("--no-ignore-vcs");
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -25,6 +44,7 @@ pub fn run(
     file_type: Option<&str>,
     extra_args: &[String],
     verbose: u8,
+    policy: VcsPolicy,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -46,11 +66,6 @@ pub fn run(
     // env so a tainted parent can't hijack this invocation via a config file
     // containing `--pre`. See issue #32.
     let mut rg_cmd = secure_rg_command("rg");
-    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
-    // Without this, rg returns 0 matches for files in .gitignore, causing
-    // false negatives that make AI agents draw wrong conclusions.
-    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
-    //
     // argv layout (#100, G5#1): fixed flags, then the forbidden-checked
     // `extra_args`, then a `--` boundary, then the pattern and path. The
     // `--` MUST precede `rg_pattern`/`path` so neither can be parsed as an
@@ -66,7 +81,7 @@ pub fn run(
     // be226d4 / issue #1436). --null makes the file boundary unambiguous: NUL
     // can never appear in a path, content, or line number, so the parser is
     // correct even for Windows drive letters or filenames containing `:digits:`.
-    rg_cmd.args(["-n", "-H", "--no-heading", "--null", "--no-ignore-vcs"]);
+    apply_search_flags(&mut rg_cmd, policy);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -87,12 +102,17 @@ pub fn run(
     rg_cmd.arg(&rg_pattern);
     rg_cmd.arg(path);
 
-    let result = exec_capture(&mut rg_cmd)
-        .or_else(|_| {
+    let captured = exec_capture(&mut rg_cmd);
+    let result = match (captured, policy) {
+        (Ok(result), _) => result,
+        (Err(_), VcsPolicy::Grep) => {
             // Fallback grep also needs env-sanitisation (env vars are
             // inherited the same way; grep ignores rg's vars but a future
             // grep variant could honor similar mechanisms). Use the secure
             // helper for consistency.
+            //
+            // Not used for `VcsPolicy::Ripgrep`. System grep does not honor
+            // `.gitignore`, so falling back would report the files `rg` skips.
             let mut grep_cmd = secure_rg_command("grep");
             // When we fall back to grep, include all args, not just -rn.
             // Same `--` boundary as the rg path above (#100, G5#1): the
@@ -103,9 +123,12 @@ pub fn run(
             // in content (parity with rg's -H/--null above; upstream be226d4).
             grep_cmd.args(["-rnHZ"]).args(extra_args);
             grep_cmd.arg("--").arg(pattern).arg(path);
-            exec_capture(&mut grep_cmd)
-        })
-        .context("grep/rg failed")?;
+            exec_capture(&mut grep_cmd).context("grep/rg failed")?
+        }
+        (Err(err), VcsPolicy::Ripgrep) => {
+            return Err(err).context("rg failed");
+        }
+    };
 
     // Passthrough output flags that produce output that is already small.
     if has_format_flag(extra_args) {
@@ -284,7 +307,10 @@ pub fn filter_context_output(
     }
 
     if total_groups > emitted_groups {
-        out.push_str(&format!("[+{} more groups]\n", total_groups - emitted_groups));
+        out.push_str(&format!(
+            "[+{} more groups]\n",
+            total_groups - emitted_groups
+        ));
     }
 
     (out, total_groups)
@@ -368,11 +394,7 @@ fn has_format_flag(extra_args: &[String]) -> bool {
 fn is_format_flag(arg: &str) -> bool {
     matches!(
         arg,
-        "--count"
-            | "--files-with-matches"
-            | "--files-without-match"
-            | "--only-matching"
-            | "--null"
+        "--count" | "--files-with-matches" | "--files-without-match" | "--only-matching" | "--null"
     ) || is_short_format_flag_bundle(arg)
 }
 
@@ -589,8 +611,12 @@ mod tests {
         assert!(has_format_flag_raw(&[OsString::from("-Z")]));
 
         assert!(has_format_flag_raw(&[OsString::from("--count")]));
-        assert!(has_format_flag_raw(&[OsString::from("--files-with-matches")]));
-        assert!(has_format_flag_raw(&[OsString::from("--files-without-match")]));
+        assert!(has_format_flag_raw(&[OsString::from(
+            "--files-with-matches"
+        )]));
+        assert!(has_format_flag_raw(&[OsString::from(
+            "--files-without-match"
+        )]));
         assert!(has_format_flag_raw(&[OsString::from("--only-matching")]));
         assert!(has_format_flag_raw(&[OsString::from("--null")]));
 
@@ -674,7 +700,10 @@ mod tests {
         assert!(out.contains("a.rs:2:hit"));
         assert!(out.contains("b.rs:2:hit"));
         // The third a.rs group (line 7) is dropped by the per-file cap.
-        assert!(!out.contains("a.rs:7:hit"), "per-file cap must drop 3rd a.rs group");
+        assert!(
+            !out.contains("a.rs:7:hit"),
+            "per-file cap must drop 3rd a.rs group"
+        );
         assert!(out.contains("[+1 more groups]"), "must indicate truncation");
     }
 
@@ -699,7 +728,10 @@ mod tests {
         assert_eq!(group_file("src/foo.rs:42:hit"), "src/foo.rs");
         assert_eq!(group_file("src/foo.rs-41-ctx"), "src/foo.rs");
         // First line of a multi-line group decides the file.
-        assert_eq!(group_file("src/bar.rs-1-ctx\nsrc/bar.rs:2:hit"), "src/bar.rs");
+        assert_eq!(
+            group_file("src/bar.rs-1-ctx\nsrc/bar.rs:2:hit"),
+            "src/bar.rs"
+        );
     }
 
     // Council/Codex finding (#193): group_file must bucket on the RAW path, not
@@ -708,7 +740,10 @@ mod tests {
     #[test]
     fn test_group_file_returns_raw_long_path() {
         let long = "src/a/very/deeply/nested/directory/structure/here/module_one.rs";
-        assert!(long.len() > 50, "fixture must exceed compact_path threshold");
+        assert!(
+            long.len() > 50,
+            "fixture must exceed compact_path threshold"
+        );
         assert_eq!(group_file(&format!("{}:42:hit", long)), long);
     }
 
@@ -781,8 +816,7 @@ mod tests {
         // Use a tight per-file cap (3) to model a focused agent search; the
         // default config cap is 25 but recursive same-file hits dominate here.
         let (output, _total) = filter_context_output(input, 200, 3);
-        let savings =
-            100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
             "context grep filter: expected >=60% savings, got {:.1}%",
@@ -932,5 +966,105 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    fn write_ignore_fixture(root: &std::path::Path) {
+        std::fs::create_dir_all(root.join("ignored")).unwrap();
+        std::fs::write(root.join("tracked.txt"), "NEEDLE in tracked\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::write(root.join("ignored/cache.txt"), "NEEDLE in gitignored\n").unwrap();
+        std::fs::write(root.join("ignored/blob.bin"), b"x\0NEEDLE\0\n").unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .expect("git init");
+        assert!(init.success(), "git init failed");
+    }
+
+    fn search_args(policy: super::VcsPolicy) -> Vec<String> {
+        let mut cmd = std::process::Command::new("rg");
+        super::apply_search_flags(&mut cmd, policy);
+        cmd.get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn ripgrep_policy_does_not_disable_vcs_ignore() {
+        let args = search_args(super::VcsPolicy::Ripgrep);
+        assert!(
+            !args.iter().any(|arg| arg == "--no-ignore-vcs"),
+            "rg must keep .gitignore: {args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "--null"));
+    }
+
+    #[test]
+    fn grep_policy_disables_vcs_ignore_only() {
+        let args = search_args(super::VcsPolicy::Grep);
+        assert!(args.iter().any(|arg| arg == "--no-ignore-vcs"));
+        assert!(!args.iter().any(|arg| arg == "--no-ignore" || arg == "-a"));
+    }
+
+    fn search_fixture(root: &std::path::Path, policy: super::VcsPolicy) -> String {
+        let mut cmd = crate::core::utils::secure_rg_command("rg");
+        super::apply_search_flags(&mut cmd, policy);
+        cmd.env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .arg("--")
+            .arg("NEEDLE")
+            .arg(root);
+        let result = exec_capture(&mut cmd).expect("rg");
+        result.stdout.replace('\0', ":")
+    }
+
+    #[test]
+    fn ripgrep_policy_skips_gitignored_text_and_binary() {
+        if which::which("rg").is_err() {
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("ctxcrl-rg-ignore-{}-{}", std::process::id(), "rg"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        write_ignore_fixture(&root);
+        let out = search_fixture(&root, super::VcsPolicy::Ripgrep);
+        assert!(out.contains("tracked.txt"), "tracked match missing: {out}");
+        assert!(
+            !out.contains("cache.txt") && !out.contains("gitignored"),
+            "gitignored text was searched: {out}"
+        );
+        assert!(
+            !out.contains("blob.bin"),
+            "gitignored binary was reported: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn grep_policy_still_searches_gitignored_text() {
+        if which::which("rg").is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "ctxcrl-rg-ignore-{}-{}",
+            std::process::id(),
+            "grep"
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        write_ignore_fixture(&root);
+        let out = search_fixture(&root, super::VcsPolicy::Grep);
+        assert!(out.contains("tracked.txt"), "tracked match missing: {out}");
+        assert!(
+            out.contains("cache.txt"),
+            "grep policy must still see gitignored text: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
