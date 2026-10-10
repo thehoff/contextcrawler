@@ -15,12 +15,12 @@ failing test, the panic, the error code) survives the filter verbatim.
 |---|---|--:|--:|--:|:--:|
 | cargo test (1 of 24 failed) | `cargo-test` | 648 | 133 | **79%** | PASS |
 | cargo test (20 passed, 0 failed) | `cargo-test` | 419 | 16 | **96%** | PASS |
-| pytest (1 of 38 failed) | `pytest` | 331 | 100 | **70%** | PASS |
+| pytest (1 of 38 failed) | `pytest` | 331 | 106 | **68%** | PASS |
 | tsc (10 errors, 5 files) | `tsc` | 317 | 300 | **5%** | PASS |
 | go test -json (1 fail) | `go-test` | 644 | 61 | **91%** | PASS |
 | ruff check --output json | `ruff-check` | 511 | 111 | **78%** | PASS |
-| git diff (2 files) | `git-diff` | 284 | 184 | **35%** | PASS |
+| git diff (2 files) | `git-diff` | 284 | 156 | **45%** | PASS |
 | rg search (37 hits, 3 files) | `grep` | 692 | 326 | **53%** | PASS |
-| **Total** | — | **3846** | **1231** | **68%** | — |
+| **Total** | — | **3846** | **1209** | **69%** | — |
 
-**Aggregate: 68% fewer tokens across 8 dev-command fixtures, with every critical signal preserved.**
+**Aggregate: 69% fewer tokens across 8 dev-command fixtures, with every critical signal preserved.**
