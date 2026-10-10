@@ -2040,9 +2040,7 @@ const GREP_VALUE_LONGS: &[&str] = &[
     "--binary-files",
     "--devices",
     "--directories",
-    "--include",
-    "--exclude",
-    "--exclude-dir",
+    "--exclude-from",
 ];
 
 /// True if `arg` is a `-q`/`--quiet`/`--silent` quiet flag, bare or bundled.
@@ -2105,17 +2103,95 @@ fn is_grep_bool_flag(arg: &str) -> bool {
 /// matches.
 const GREP_STRIPPABLE_SHORTS: &[u8] = &[b'r', b'R', b'E'];
 
+/// GNU grep include/exclude, rewritten to the rg `--glob` rg already
+/// understands. The translated pairs are moved to the end so clap treats
+/// them as `extra_args` and the match filter still runs. `--exclude-from`
+/// is a pattern file and is not translated.
+fn translate_grep_globs(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut globs = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some((kind, value)) = split_include_exclude(arg) {
+            globs.push("--glob".to_string());
+            globs.push(glob_for(kind, value));
+            index += 1;
+            continue;
+        }
+        if let Some(kind) = include_exclude_kind(arg) {
+            index += 1;
+            if let Some(value) = args.get(index) {
+                if !value.starts_with('-') {
+                    globs.push("--glob".to_string());
+                    globs.push(glob_for(kind, value));
+                    index += 1;
+                    continue;
+                }
+            }
+            continue;
+        }
+        out.push(arg.clone());
+        index += 1;
+    }
+    out.extend(globs);
+    out
+}
+
+fn split_include_exclude(arg: &str) -> Option<(&'static str, &str)> {
+    for (flag, kind) in [
+        ("--exclude-dir=", "exclude-dir"),
+        ("--include=", "include"),
+        ("--exclude=", "exclude"),
+    ] {
+        if let Some(value) = arg.strip_prefix(flag) {
+            return Some((kind, value));
+        }
+    }
+    None
+}
+
+fn include_exclude_kind(arg: &str) -> Option<&'static str> {
+    match arg {
+        "--include" => Some("include"),
+        "--exclude" => Some("exclude"),
+        "--exclude-dir" => Some("exclude-dir"),
+        _ => None,
+    }
+}
+
+fn glob_for(kind: &str, value: &str) -> String {
+    let value = unquote_glob(value);
+    match kind {
+        "exclude" if !value.starts_with('!') => format!("!{value}"),
+        "exclude-dir" => {
+            let name = value.trim_end_matches('/').trim_end_matches("/**");
+            format!("!{name}/**")
+        }
+        _ => value.to_string(),
+    }
+}
+
+fn unquote_glob(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let quote = bytes[0];
+        if (quote == b'\'' || quote == b'"') && bytes[bytes.len() - 1] == quote {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
 /// Two-pass pre-clap normaliser for `grep` subcommand args.
 ///
-/// Pass 1 strips behavioural-no-op short flags (`-r`/`-R`/`-E`/`-H` and
-/// `--recursive`) so clap can parse the remainder cleanly.
-/// Pass 2 detects context flags (`-A`/`-B`/`-C`, `--after-context` etc.)
-/// and routes the stripped args to passthrough so rg handles them
-/// natively. Stripping is intentionally applied to the passthrough path
-/// too — rg interprets bare `-r` as `--replace` (replacement string),
-/// not recursive, so leaving it in would silently produce wrong matches.
-/// See issues #88 and #97, and the Codex review on the original fix.
+/// Include and exclude globs are translated first. Pass 1 then strips
+/// behavioural-no-op short flags (`-r`/`-R`/`-E` and `--recursive`) so clap
+/// can parse the remainder. Pass 2 detects context flags (`-A`/`-B`/`-C`)
+/// and routes those calls to passthrough so rg keeps the surrounding lines.
+/// Stripping still applies there: rg reads bare `-r` as `--replace`.
 fn preprocess_grep_args(args: Vec<String>) -> GrepPreprocess {
+    let args = translate_grep_globs(args);
     // Pass 1: strip no-op short flags from short bundles + long forms.
     // Iterator-based; only allocate a new String when a bundle actually
     // needs rewriting. Tokens that survive untouched are moved as-is.
@@ -2658,6 +2734,31 @@ mod grep_preprocess_tests {
     }
 
     #[test]
+    fn test_preprocess_grep_include_becomes_glob() {
+        let out = preprocess_grep_args(v(&[
+            "-rn",
+            "needle",
+            "src",
+            "--include=*.rs",
+            "--exclude=*.md",
+            "--exclude-dir=target",
+        ]));
+        assert_eq!(
+            out,
+            GrepPreprocess::Stripped(v(&[
+                "needle",
+                "src",
+                "--glob",
+                "*.rs",
+                "--glob",
+                "!*.md",
+                "--glob",
+                "!target/**",
+                "-n",
+            ]))
+        );
+    }
+
     fn test_preprocess_grep_strips_bare_r() {
         let out = preprocess_grep_args(v(&["-r", "needle", "."]));
         assert_eq!(out, GrepPreprocess::Stripped(v(&["needle", "."])));
@@ -4454,6 +4555,28 @@ fn run_cli() -> Result<i32> {
                 .iter()
                 .map(|s| s.to_string_lossy().into_owned())
                 .collect();
+
+            // `proxy grep` and `proxy git` were the unfiltered leak in the
+            // tracking db: the wrapper exists, and those rows saved nothing.
+            // Run the wrapper. CONTEXTCRAWLER_PROXY_RAW=1 keeps the raw hatch.
+            if std::env::var_os("CONTEXTCRAWLER_PROXY_RAW").is_none()
+                && matches!(cmd_name_display.as_str(), "grep" | "git")
+            {
+                use std::process::Command as ProcCommand;
+                let exe = std::env::current_exe()
+                    .context("cannot find contextcrawler to re-exec the wrapped command")?;
+                let status = ProcCommand::new(exe)
+                    .arg(&cmd_name_display)
+                    .args(&cmd_args)
+                    .status()
+                    .with_context(|| {
+                        format!("Failed to run contextcrawler {}", cmd_name_display)
+                    })?;
+                return Ok(core::utils::exit_code_from_status(
+                    &status,
+                    &cmd_name_display,
+                ));
+            }
 
             if cli.verbose > 0 {
                 eprintln!(

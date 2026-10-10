@@ -87,20 +87,20 @@ pub fn run(
         rg_cmd.arg("--type").arg(ft);
     }
 
-    // `extra_args` were already screened by `check_forbidden_rg_args` above;
-    // they must stay on the option side of the `--` boundary so legitimate
-    // flags (e.g. `-i`, `-A 3`) are still parsed as options.
-    for arg in extra_args {
-        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
-        if arg == "-r" || arg == "--recursive" {
-            continue;
-        }
+    // Flags stay before `--`. A second path (`grep pat file1 file2`) is not
+    // a flag: leaving it there makes rg treat the pattern as a filename and
+    // the search fails, which is how those calls ended up on the raw proxy.
+    let (flag_args, path_args) = split_extra_search_args(extra_args);
+    for arg in &flag_args {
         rg_cmd.arg(arg);
     }
 
     rg_cmd.arg("--");
     rg_cmd.arg(&rg_pattern);
     rg_cmd.arg(path);
+    for arg in &path_args {
+        rg_cmd.arg(arg);
+    }
 
     let captured = exec_capture(&mut rg_cmd);
     let result = match (captured, policy) {
@@ -121,8 +121,10 @@ pub fn run(
             // -H: always emit the filename; -Z: NUL-separate the filename from
             // `line:content` so the parser disambiguates regardless of colons
             // in content (parity with rg's -H/--null above; upstream be226d4).
-            grep_cmd.args(["-rnHZ"]).args(extra_args);
+            let (flag_args, path_args) = split_extra_search_args(extra_args);
+            grep_cmd.args(["-rnHZ"]).args(&flag_args);
             grep_cmd.arg("--").arg(pattern).arg(path);
+            grep_cmd.args(&path_args);
             exec_capture(&mut grep_cmd).context("grep/rg failed")?
         }
         (Err(err), VcsPolicy::Ripgrep) => {
@@ -472,9 +474,82 @@ fn compact_path(path: &str) -> String {
     )
 }
 
+/// Split trailing grep args into rg flags and extra paths.
+///
+/// A token that does not start with `-` is another path (`grep pat a.rs b.rs`),
+/// unless the previous flag takes a value (`--glob *.rs`, `-A 3`, `-g *.rs`).
+/// `-r` / `--recursive` are dropped: rg is recursive, and `rg -r` means
+/// `--replace`.
+fn split_extra_search_args(extra_args: &[String]) -> (Vec<String>, Vec<String>) {
+    const TAKES_VALUE: &[&str] = &[
+        "-A",
+        "-B",
+        "-C",
+        "-e",
+        "-f",
+        "-g",
+        "-m",
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--file",
+        "--glob",
+        "--iglob",
+        "--max-count",
+        "--regexp",
+        "--type",
+    ];
+    let mut flags = Vec::new();
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index < extra_args.len() {
+        let arg = &extra_args[index];
+        if arg == "--" {
+            paths.extend(extra_args[index + 1..].iter().cloned());
+            break;
+        }
+        if arg == "-r" || arg == "--recursive" {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            let takes_value = TAKES_VALUE.contains(&arg.as_str())
+                && !arg.contains('=')
+                && !(arg.len() > 2 && arg.as_bytes()[1] != b'-');
+            flags.push(arg.clone());
+            if takes_value {
+                index += 1;
+                if let Some(value) = extra_args.get(index) {
+                    flags.push(value.clone());
+                }
+            }
+        } else {
+            paths.push(arg.clone());
+        }
+        index += 1;
+    }
+    (flags, paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extra_paths_stay_behind_the_pattern() {
+        let extra = [
+            "src/b.rs".to_string(),
+            "-n".to_string(),
+            "--glob".to_string(),
+            "*.rs".to_string(),
+        ];
+        let (flags, paths) = split_extra_search_args(&extra);
+        assert_eq!(
+            flags,
+            vec!["-n".to_string(), "--glob".to_string(), "*.rs".to_string()]
+        );
+        assert_eq!(paths, vec!["src/b.rs".to_string()]);
+    }
 
     #[test]
     fn test_clean_line() {

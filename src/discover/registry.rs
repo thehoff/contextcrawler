@@ -1311,14 +1311,13 @@ fn rewrite_segment_inner(
         }
     }
 
-    // GNU grep's --include/--exclude/--exclude-from/--exclude-dir have no
-    // equivalent in the rg-backed `contextcrawler grep`: rg rejects them with
-    // `unrecognized flag`, so rewriting turned a valid `grep --include='*.rs' .`
-    // into a failing command (#248). Leave these raw — native GNU grep handles
-    // them correctly. rg-native `-g`/`--glob` (valid on the bare `rg` source)
-    // is untouched: it is the rewrite target's own syntax.
+    // `--exclude-from=FILE` is a pattern file. Translating it would mean
+    // reading that file during rewrite. Leave the command raw. `--include`,
+    // `--exclude`, and `--exclude-dir` are translated to rg `--glob` by
+    // `preprocess_grep_args`, so the hook can claim the search and the
+    // filter still runs.
     if let Some(grep_args) = cmd_sans_abs.strip_prefix("grep ") {
-        if grep_args.contains("--include") || grep_args.contains("--exclude") {
+        if grep_args.contains("--exclude-from") {
             return None;
         }
     }
@@ -2491,23 +2490,29 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_grep_include_flags_left_raw() {
-        // #248: GNU grep's --include/--exclude have no rg equivalent in
-        // `contextcrawler grep` — rg rejects them with `unrecognized flag`, so
-        // rewriting produced a failed loop. Leave these raw: native GNU grep
-        // handles them correctly.
+    fn test_rewrite_grep_include_flags_are_claimed() {
+        // `--include` / `--exclude` used to be left raw (#248) because rg
+        // rejects those spellings. `preprocess_grep_args` now turns them
+        // into `--glob`, so the hook must claim the command. A pattern
+        // file (`--exclude-from`) still has no translation and stays raw.
         for cmd in [
             r#"grep -rn "unwrap()" --include="*.rs" ."#,
             r#"grep -rn "unwrap()" --include="*.rs" --exclude="*.md" ."#,
             r#"grep -r --include='*.rs' --exclude-dir=target foo src/"#,
             "/usr/bin/grep -rni foo --include='*.rs' .",
         ] {
-            assert_eq!(
-                rewrite_command_no_prefixes(cmd, &[]),
-                None,
-                "must leave GNU-flag grep raw so it runs correctly (#248): {cmd}"
+            let rewritten = rewrite_command_no_prefixes(cmd, &[])
+                .unwrap_or_else(|| panic!("include/exclude grep must be claimed: {cmd}"));
+            assert!(
+                rewritten.starts_with("contextcrawler grep "),
+                "got {rewritten}"
             );
         }
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn needle --exclude-from=skip.txt src", &[]),
+            None,
+            "a pattern file has no glob translation"
+        );
     }
 
     #[test]

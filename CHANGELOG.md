@@ -46,6 +46,12 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `git show -p` no longer prints the full patch in the summary and again
   in the compacted diff. The summary and the stat drop the patch flags.
   The diff step keeps them.
+- `grep --include`, `--exclude`, and `--exclude-dir` are rewritten and
+  filtered. They were left raw, and a second path made `contextcrawler grep`
+  fail, so those searches came back through `proxy` with no savings.
+  `proxy grep` and `proxy git` now run the wrapper.
+  `CONTEXTCRAWLER_PROXY_RAW=1` keeps the raw command. OMP compacts a tool
+  result from 400 characters, down from 1,500.
 - Harvested from rtk, reviewed against the two jobs:
   `case` terminators `;;` / `;&` / `;;&` stay one operator, so a rewrite
   no longer turns a fall-through into a background job (rtk 5e92ea47).
