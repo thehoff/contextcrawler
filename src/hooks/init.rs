@@ -122,8 +122,30 @@ fn agent_guidance(agent: &str) -> Result<String> {
             "If no, rewrite it.",
         ),
 
-        // PLUGIN agents: OpenCode, Hermes, and Pi use a plugin/extension, not a shell hook.
-        AGENT_OPENCODE | AGENT_HERMES | AGENT_PIDEV => concat!(
+        // OMP (Pi). Native read/find/grep are not shell-backed. Replacing them
+        // drops hashline anchors and the ranked digest (#247). Large grep/glob
+        // text is compacted after the tool returns. Do not send the model back
+        // to `contextcrawler grep` / `find` / `read` (#248).
+        AGENT_PIDEV => concat!(
+            "## How commands are rewritten\n",
+            "\n",
+            "A ContextCrawler extension rewrites shell commands automatically — ",
+            "`git status` becomes `contextcrawler git status` before the shell runs. ",
+            "Use the meta commands below directly. Do not prefix shell commands yourself.\n",
+            "\n",
+            "Bundled native tools are not shell commands, and they stay native:\n",
+            "\n",
+            "- `read` stays native. It is already byte-budgeted, and it reads images and other files the shell proxy does not.\n",
+            "- `find` stays the semantic search. Replacing it drops the ranked digest.\n",
+            "- `grep` and `glob` stay native. A large result is compacted after the tool returns. Do not re-run that search as a shell command.\n",
+            "\n",
+            "An explicit deny does not run. Any other rewritten shell command still runs.\n",
+        ),
+
+        // PLUGIN agents: OpenCode and Hermes use a plugin, not a shell hook.
+        // They do not have OMP's post-tool compactor, so repo-wide searches
+        // still go through the shell proxy.
+        AGENT_OPENCODE | AGENT_HERMES => concat!(
             "## How commands are rewritten\n",
             "\n",
             "A ContextCrawler plugin rewrites shell commands automatically — ",
@@ -5020,9 +5042,23 @@ mod tests {
 
     #[test]
     fn test_guidance_drift_guard_pidev() {
-        assert_guidance_invariants(
-            AGENT_PIDEV,
-            &agent_guidance(AGENT_PIDEV).expect("pidev guidance"),
+        let g = agent_guidance(AGENT_PIDEV).expect("pidev guidance");
+        assert_guidance_invariants(AGENT_PIDEV, &g);
+        assert!(
+            g.contains("semantic search"),
+            "Pi guidance must keep native find"
+        );
+        assert!(
+            g.contains("Do not re-run that search"),
+            "Pi guidance must not send a native search back through the shell"
+        );
+        assert!(
+            !g.contains("WRONG (native tool, truncated)"),
+            "Pi guidance must not tell the model to replace native tools"
+        );
+        assert!(
+            !g.contains("route ALL repo-wide"),
+            "Pi guidance must not route native read/search through the shell proxy"
         );
     }
 

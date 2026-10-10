@@ -57,8 +57,9 @@ a place on `develop`.
    missed, are compacted by `contextcrawler observe` after the tool
    returns (#247). `read` and semantic `find` stay as the tool returned
    them: replacing those tools drops hashline anchors and the ranked
-   digest. OMP rebinds that extension into child sessions, so OMP
-   subagents are covered. Claude Code does not inherit the parent
+   digest. The Pi guidance says the same thing (#248). OMP rebinds
+   that extension into child sessions, so OMP subagents are covered.
+   Claude Code does not inherit the parent
    PreToolUse hook into a subagent (#204); `contextcrawler session`
    counts those transcripts and the workaround is in the threat model.
 2. **Filters that currently save ~0%.** Recursive and context `grep`

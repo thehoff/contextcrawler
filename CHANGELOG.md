@@ -25,6 +25,9 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Project-local filters load from `.contextcrawler/filters.toml`.
   `.ctxcrl/filters.toml` is used only when the canonical file is absent,
   and trust is checked on the file that was opened.
+- OMP guidance no longer tells the model to replace native `read`, `find`,
+  and `grep` with shell proxies (#248). Those tools stay native. A large
+  `grep` or `glob` result is compacted after the tool returns (#247).
 
 ## [0.5.0] — 2026-08-16
 
