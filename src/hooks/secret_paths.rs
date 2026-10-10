@@ -49,6 +49,12 @@ lazy_static! {
         (Regex::new(r"(?i)(^|[\s/'\x22=])secrets?\.(json|ya?ml|toml|env)($|[\s'\x22])").unwrap(), "a secrets file"),
         (Regex::new(r"(?i)(^|[\s/'\x22=])service[-_]account[\w-]*\.json($|[\s'\x22])").unwrap(), "a service-account key"),
         (Regex::new(r"(?i)(^|[\s/'\x22=])\.htpasswd($|[\s'\x22])").unwrap(), "an .htpasswd file"),
+        (Regex::new(r"(?i)(^|[\s/'\x22=])\.pgpass($|[\s'\x22])").unwrap(), "a PostgreSQL password file"),
+        // `.kube` must be a whole path component followed by `config`:
+        // `~/.kube/config` matches, a directory merely containing "kube" does
+        // not, and `.kube/config.example` is left to the sample-suffix skip.
+        (Regex::new(r"(?i)(^|[\s'\x22=/])\.kube/config($|[\s'\x22])").unwrap(), "a kubeconfig"),
+        (Regex::new(r"(?i)[\w./-]*\.kdbx($|[\s'\x22])").unwrap(), "a KeePass database"),
     ];
 
     /// A public key is not a secret, and neither is a `.pub`.
@@ -189,6 +195,39 @@ mod tests {
             assert!(
                 touches_secret_path(cmd).is_some(),
                 "should be treated as secret: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn conventional_secret_files_are_caught() {
+        // #206 follow-up: three more conventions were slipping through.
+        for cmd in [
+            "cat ~/.pgpass",
+            "cat ~/.kube/config",
+            "cat ~/secrets/vault.kdbx",
+        ] {
+            assert!(
+                touches_secret_path(cmd).is_some(),
+                "should be treated as secret: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn kube_and_key_lookalikes_are_not_secrets() {
+        // `.kube/config.example` is the sample skip; a directory merely
+        // containing "kube" is not the kube directory.
+        for cmd in [
+            "cat .kube/config.example",
+            "cat environment.yml",
+            "cat mykey.rs",
+            "cat .env.example",
+        ] {
+            assert_eq!(
+                touches_secret_path(cmd),
+                None,
+                "must NOT be treated as secret: {cmd}"
             );
         }
     }

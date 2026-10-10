@@ -2187,6 +2187,49 @@ fn preprocess_grep_args(args: Vec<String>) -> GrepPreprocess {
     GrepPreprocess::Stripped(positionals)
 }
 
+/// Pre-clap normaliser for `read` args (#244).
+///
+/// Agent read-tools spell a tail window as a bare negative-looking token:
+/// `read -6` / `read -6 file` / `read file -50` (Cursor-style `-N` = last N
+/// lines). `files` is a plain `Vec<PathBuf>` positional with no
+/// `allow_hyphen_values`, so clap reads `-6` as an unknown flag and rejects
+/// the whole call. Rewrite the first such token into `--tail-lines N` so the
+/// documented tail semantics apply, and leave the rest of the argv (including
+/// any file paths) in place.
+///
+/// A token only matches when it is exactly `-` followed by ASCII digits with
+/// value >= 1 — so known flags stay flags (`-n`, `-l`, and any `--*` or
+/// alphabetic short flag never have a digits-only body) and `-0` is not
+/// treated as a tail count. Scanning stops at a `--` separator: tokens after
+/// it are file paths, not flags.
+///
+/// At most one token is rewritten; a second `-<digits>` is left untouched and
+/// clap reports it as it would for any unknown flag.
+fn preprocess_read_args(args: Vec<String>) -> Vec<String> {
+    for (idx, arg) in args.iter().enumerate() {
+        if arg == "--" {
+            break;
+        }
+        let Some(digits) = arg.strip_prefix('-') else {
+            continue;
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // Value must be >= 1: `-0` and `-00` are not tail counts.
+        if digits.bytes().all(|b| b == b'0') {
+            continue;
+        }
+        let mut out = Vec::with_capacity(args.len() + 1);
+        out.extend_from_slice(&args[..idx]);
+        out.push("--tail-lines".to_string());
+        out.push(digits.to_string());
+        out.extend_from_slice(&args[idx + 1..]);
+        return out;
+    }
+    args
+}
+
 /// True if any arg is a grep context flag (`-A`/`-B`/`-C` short or long).
 fn has_grep_context_flag(args: &[String]) -> bool {
     const LONG_FLAGS: &[&str] = &["--after-context", "--before-context", "--context"];
@@ -3243,6 +3286,24 @@ fn run_cli() -> Result<i32> {
             }
         }
 
+        // Pre-clap normaliser for `read`: agent read-tools spell a tail window
+        // as a bare `-<digits>` token (`read -6`, `read -6 file`,
+        // `read file -50`), which clap rejects as an unknown flag because
+        // `files` has no `allow_hyphen_values`. Rewrite the first such token
+        // into `--tail-lines N` so clap parses the cleaned form. See
+        // `preprocess_read_args` / #244.
+        if raw_args.first().map(|s| s.as_str()) == Some("read") {
+            let normalized = preprocess_read_args(raw_args[1..].to_vec());
+            if normalized.as_slice() != &raw_args[1..] {
+                let argv0 = std::env::args().next().unwrap_or_default();
+                let mut full = Vec::with_capacity(normalized.len() + 2);
+                full.push(argv0);
+                full.push("read".to_string());
+                full.extend(normalized);
+                parsed_argv = full;
+            }
+        }
+
         // Pre-clap intercept: meta flags (--version, -V, --help, -h) on
         // wrapper subcommands. Without this, `contextcrawler cargo --version`
         // falls through clap → run_fallback → raw exec, writing a
@@ -3364,7 +3425,9 @@ fn run_cli() -> Result<i32> {
             // — the false conflict was removed from clap for #244.
             let (max_lines, end_line) = match (start_line, max_lines, end_line) {
                 (Some(s), Some(0), None) => {
-                    return Err(anyhow::anyhow!("--max-lines must be >= 1 (got 0)"));
+                    return Err(anyhow::anyhow!(
+                        "--start {s} + --max-lines must be >= 1 (got 0)"
+                    ));
                 }
                 (Some(s), Some(n), None) => {
                     let end = s.checked_add(n - 1).ok_or_else(|| {
@@ -5314,6 +5377,120 @@ mod tests {
             "3",
         ]);
         assert!(result.is_err(), "--head-lines conflicts with --tail-lines");
+    }
+
+    /// Parse `read <argv>` through clap after feeding it to the pre-clap
+    /// normaliser, mirroring what `run_cli` does for the `read` subcommand.
+    fn parse_normalised_read(argv: Vec<String>) -> Commands {
+        let mut full = vec!["rtk".to_string(), "read".to_string()];
+        full.extend(preprocess_read_args(argv));
+        Cli::try_parse_from(full)
+            .expect("normalised read argv must parse")
+            .command
+    }
+
+    #[test]
+    fn test_read_bare_tail_digit_rewrites_to_tail_lines() {
+        // `read -6` → `--tail-lines 6` (#244).
+        assert_eq!(
+            preprocess_read_args(vec!["-6".to_string()]),
+            vec!["--tail-lines".to_string(), "6".to_string()]
+        );
+        match parse_normalised_read(vec!["-6".to_string()]) {
+            Commands::Read {
+                tail_lines, files, ..
+            } => {
+                assert_eq!(tail_lines, Some(6));
+                assert!(files.is_empty());
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_read_tail_digit_before_file_keeps_path() {
+        // `read -6 src/cli.rs` → tail window 6, file survives.
+        match parse_normalised_read(vec!["-6".to_string(), "src/cli.rs".to_string()]) {
+            Commands::Read {
+                tail_lines, files, ..
+            } => {
+                assert_eq!(tail_lines, Some(6));
+                assert_eq!(files, vec![PathBuf::from("src/cli.rs")]);
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_read_tail_digit_after_file_keeps_path() {
+        // `read src/cli.rs -50` → tail window 50, file survives.
+        match parse_normalised_read(vec!["src/cli.rs".to_string(), "-50".to_string()]) {
+            Commands::Read {
+                tail_lines, files, ..
+            } => {
+                assert_eq!(tail_lines, Some(50));
+                assert_eq!(files, vec![PathBuf::from("src/cli.rs")]);
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_read_short_n_is_not_rewritten() {
+        // `-n` stays line numbers, never a tail count.
+        let raw = vec!["-n".to_string(), "src/cli.rs".to_string()];
+        assert_eq!(preprocess_read_args(raw.clone()), raw);
+        match parse_normalised_read(raw) {
+            Commands::Read {
+                line_numbers,
+                tail_lines,
+                files,
+                ..
+            } => {
+                assert!(line_numbers);
+                assert_eq!(tail_lines, None);
+                assert_eq!(files, vec![PathBuf::from("src/cli.rs")]);
+            }
+            _ => panic!("Expected Read command"),
+        }
+    }
+
+    #[test]
+    fn test_read_double_dash_digit_unchanged() {
+        // After `--`, `-6` is a file path, not a flag.
+        let raw = vec!["--".to_string(), "-6".to_string()];
+        assert_eq!(preprocess_read_args(raw.clone()), raw);
+    }
+
+    #[test]
+    fn test_read_dash_zero_is_not_a_tail_count() {
+        let raw = vec!["-0".to_string()];
+        assert_eq!(preprocess_read_args(raw.clone()), raw);
+    }
+
+    #[test]
+    fn test_read_only_first_digit_token_rewritten() {
+        // At most one rewrite: a second `-<digits>` stays raw.
+        assert_eq!(
+            preprocess_read_args(vec!["-6".to_string(), "-50".to_string()]),
+            vec![
+                "--tail-lines".to_string(),
+                "6".to_string(),
+                "-50".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_read_alphabetic_short_flags_unchanged() {
+        for flag in ["-l", "-n", "--line", "--start", "--range", "--tail-lines"] {
+            let raw = vec![flag.to_string(), "src/cli.rs".to_string()];
+            assert_eq!(
+                preprocess_read_args(raw.clone()),
+                raw,
+                "flag {flag} must not be rewritten"
+            );
+        }
     }
 
     #[test]

@@ -30,6 +30,14 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `grep` or `glob` result is compacted after the tool returns (#247).
 - `contextcrawler rg` keeps ripgrep's `.gitignore` and binary skipping (#201).
   `contextcrawler grep` still searches gitignored files, matching `grep -r`.
+- `read -<digits>` is a tail count (`--tail-lines`), including when the
+  count comes before the file (#244). `-0` and `-n` stay flags.
+- A rewrite that is not an Allow asks when the original command or the
+  rewritten command reads a credential, instead of omitting the decision
+  (#241). Unrestricted still allows that read.
+- SQLite `CREATE TABLE` dumps and `PRAGMA table_info` headers pass through
+  compaction instead of being read as grep hits (#246).
+- `.pgpass`, `.kube/config`, and `*.kdbx` count as credential files.
 
 ## [0.5.0] — 2026-08-16
 

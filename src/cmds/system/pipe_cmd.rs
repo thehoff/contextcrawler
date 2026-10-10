@@ -172,6 +172,16 @@ pub(crate) fn auto_detect_filter(input: &str) -> fn(&str) -> String {
         return crate::cmds::python::mypy_cmd::filter_mypy_output_piped;
     }
 
+    // sqlite3 `.schema` dumps (`CREATE TABLE commands (original_cmd TEXT, ...)`)
+    // and `PRAGMA table_info` results (`cid|name|type|notnull|dflt_value|pk`)
+    // carry column identifiers the model needs. The grep `file:line:content`
+    // heuristic below can claim lines shaped like it and collapse the schema
+    // into a fake match list, losing `original_cmd` / `saved_tokens` (#246).
+    // A schema dump never takes that path.
+    if is_sqlite_schema_text(first_1k) {
+        return identity_filter;
+    }
+
     // grep/rg: lines matching file:number:content
     if first_1k
         .lines()
@@ -209,6 +219,27 @@ pub(crate) fn auto_detect_filter(input: &str) -> fn(&str) -> String {
 
 fn identity_filter(input: &str) -> String {
     input.to_string()
+}
+
+/// True when `text` is sqlite3 schema output: a `CREATE TABLE` DDL body, a
+/// `PRAGMA table_info` result, or a line carrying sqlite's pragma header
+/// (`cid|name|type|notnull|dflt_value|pk`). Such text lists column
+/// identifiers and must survive compaction verbatim (#246).
+pub(crate) fn is_sqlite_schema_text(text: &str) -> bool {
+    text.contains("CREATE TABLE")
+        || text.contains("PRAGMA table_info")
+        || text.lines().any(is_sqlite_pragma_header)
+}
+
+fn is_sqlite_pragma_header(line: &str) -> bool {
+    let mut cols = line.trim().split('|').map(str::trim);
+    let expected = ["cid", "name", "type", "notnull", "dflt_value", "pk"];
+    for want in expected {
+        if cols.next() != Some(want) {
+            return false;
+        }
+    }
+    cols.next().is_none()
 }
 
 pub(crate) fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
@@ -639,5 +670,43 @@ mod tests {
         let f = auto_detect_filter(input);
         let out = f(input);
         assert!(!out.is_empty());
+    }
+
+    const SQLITE_SCHEMA_FIXTURE: &str = "CREATE TABLE commands (\n  \
+        original_cmd TEXT NOT NULL,\n  \
+        saved_tokens INTEGER NOT NULL,\n  \
+        savings_pct REAL NOT NULL\n);\n";
+
+    #[test]
+    fn test_auto_detect_keeps_sqlite_schema_columns() {
+        let f = auto_detect_filter(SQLITE_SCHEMA_FIXTURE);
+        let out = f(SQLITE_SCHEMA_FIXTURE);
+        assert_eq!(out, SQLITE_SCHEMA_FIXTURE);
+        assert!(out.contains("original_cmd"), "out={out}");
+        assert!(out.contains("saved_tokens"), "out={out}");
+    }
+
+    #[test]
+    fn test_auto_detect_keeps_pragma_table_info() {
+        let input = "PRAGMA table_info(commands);\n\
+                     cid|name|type|notnull|dflt_value|pk\n\
+                     0|original_cmd|TEXT|1||0\n\
+                     1|saved_tokens|INTEGER|1||0\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert_eq!(out, input);
+        assert!(out.contains("original_cmd"), "out={out}");
+        assert!(out.contains("saved_tokens"), "out={out}");
+    }
+
+    #[test]
+    fn test_grep_shaped_lines_still_select_grep_filter() {
+        let input = "src/main.rs:42:fn main() {\nsrc/lib.rs:10:pub fn helper() {}\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert!(
+            out.contains("matches in"),
+            "grep-shaped lines must still hit the grep filter: out={out}"
+        );
     }
 }

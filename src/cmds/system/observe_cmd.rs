@@ -92,6 +92,13 @@ fn ledger_label(tool: &str, command: &str) -> String {
 /// Pipe auto-detect. Used for bash output the rewrite missed, and for a
 /// glob result that is still a flat path list.
 fn compact_captured(input: &str) -> String {
+    // sqlite3 `.schema` / `PRAGMA table_info` output lists column identifiers
+    // inside a `CREATE TABLE` body or a `cid|name|type|...` header. The pipe
+    // auto-detector can misread it as grep-shaped and drop the names (#246).
+    // Return it unchanged.
+    if pipe_cmd::is_sqlite_schema_text(input) {
+        return input.to_string();
+    }
     // `10:15:11 INFO` matches the pipe grep detector (`file:line:content`)
     // and comes back as a fake file list. A real grep line has a path
     // (`src/lib.rs:12:`) in that field. Leave the timestamp form alone.
@@ -553,5 +560,30 @@ mod tests {
         let once = compact("grep", &omp_grep(), false);
         let twice = compact("grep", &once, false);
         assert_eq!(twice, once);
+    }
+
+    const SQLITE_SCHEMA_FIXTURE: &str = "CREATE TABLE commands (\n  \
+        original_cmd TEXT NOT NULL,\n  \
+        saved_tokens INTEGER NOT NULL,\n  \
+        savings_pct REAL NOT NULL\n);\n";
+
+    #[test]
+    fn sqlite_schema_dump_survives_bash_compaction() {
+        let out = compact("bash", SQLITE_SCHEMA_FIXTURE, false);
+        assert_eq!(out, SQLITE_SCHEMA_FIXTURE);
+        assert!(out.contains("original_cmd"), "{out}");
+        assert!(out.contains("saved_tokens"), "{out}");
+    }
+
+    #[test]
+    fn sqlite_pragma_output_survives_bash_compaction() {
+        let input = "PRAGMA table_info(commands);\n\
+                     cid|name|type|notnull|dflt_value|pk\n\
+                     0|original_cmd|TEXT|1||0\n\
+                     1|saved_tokens|INTEGER|1||0\n";
+        let out = compact("bash", input, false);
+        assert_eq!(out, input);
+        assert!(out.contains("original_cmd"), "{out}");
+        assert!(out.contains("saved_tokens"), "{out}");
     }
 }

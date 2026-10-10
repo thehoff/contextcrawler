@@ -988,33 +988,40 @@ fn process_claude_payload_with_gate(
         ti
     };
 
-    // #206: never auto-allow a read of a credential-bearing file. Rewriting
-    // `cat .env` to `contextcrawler read .env` and returning `allow` made the
-    // read MORE permitted than it would have been without contextcrawler
-    // installed, and printed the secrets in full.
+    // #206/#241: never auto-allow a read of a credential-bearing file.
+    // Rewriting `cat .env` to `contextcrawler read .env` and returning `allow`
+    // made the read MORE permitted than it would have been without
+    // contextcrawler installed, and printed the secrets in full.
     //
     // Downgrade to `ask` rather than omitting the decision: the rewritten
     // command is `contextcrawler read <path>`, so a host with a broad
     // `Bash(contextcrawler:*)` allow rule would run it unattended if no
     // decision were emitted.
     //
-    // The verdict itself is decided in `permissions` via
-    // `FindingReason::SecretRead`, so the profile is honoured there. This is
-    // only the user-facing reason, shown when that finding produced an Ask.
-    let secret_hint = if verdict == PermissionVerdict::Ask {
-        crate::hooks::secret_paths::touches_secret_path(cmd)
-    } else {
+    // #241: also inspect the REWRITTEN command. The rewrite can carry the
+    // secret even when the original does not (and vice versa), and the check
+    // must run for every non-`Allow` verdict — including `Default`, which
+    // previously omitted a decision entirely. An `Allow` verdict is left
+    // alone: it comes from the permission engine, which relaxes
+    // `FindingReason::SecretRead` only under the `Unrestricted` opt-out, and
+    // the hook must not override that deliberate relaxation.
+    let secret_hint = if verdict == PermissionVerdict::Allow {
         None
+    } else {
+        crate::hooks::secret_paths::touches_secret_path(cmd)
+            .or_else(|| crate::hooks::secret_paths::touches_secret_path(&rewritten))
     };
 
     // When a gate flagged this (rewritable) command, surface the tailored
     // trust hint (#197) as the reason the user sees in the Ask prompt;
-    // otherwise it's a clean auto-rewrite.
-    let decision_reason = match (gate_ask, gate_suggestion.take(), secret_hint) {
-        (true, Some(hint), _) => hint,
-        (_, _, Some(what)) => format!(
+    // otherwise it's a clean auto-rewrite. A secret path (#206/#241) always
+    // wins the reason — the user must be told *what* is being read, even when
+    // a gate also flagged the command.
+    let decision_reason = match (secret_hint, gate_ask, gate_suggestion.take()) {
+        (Some(what), _, _) => format!(
             "contextcrawler: this reads {what} — approve only if you intend the contents in context"
         ),
+        (None, true, Some(hint)) => hint,
         _ => "contextcrawler auto-rewrite".to_string(),
     };
     let mut hook_output = json!({
@@ -1026,13 +1033,17 @@ fn process_claude_payload_with_gate(
     // Emit explicit host decisions for both Allow and Ask. In particular, an
     // Ask carrying a rewritten command must not fall back through the host's
     // broad `Bash(contextcrawler:*)` allow rule and auto-run unattended.
-    // `Default` still omits a decision so the host applies its normal rules.
+    // `Default` omits a decision so the host applies its normal rules — unless
+    // a secret path was found (#241), in which case we emit `ask`: a missing
+    // decision would let `Bash(contextcrawler:*)` run the credential read.
+    // `secret_hint` is only ever `Some` for a non-`Allow` verdict, so this
+    // never turns an `Allow` (e.g. the `Unrestricted` opt-out) into an `ask`.
     // `hook_output` is a `json!` object literal, so `as_object_mut` is always
     // `Some`; keep the checked branch so malformed future edits cannot panic.
     if let Some(obj) = hook_output.as_object_mut() {
         if verdict == PermissionVerdict::Allow && !gate_ask {
             obj.insert("permissionDecision".into(), json!("allow"));
-        } else if verdict == PermissionVerdict::Ask || gate_ask {
+        } else if verdict == PermissionVerdict::Ask || gate_ask || secret_hint.is_some() {
             obj.insert("permissionDecision".into(), json!("ask"));
         }
     }
@@ -2730,6 +2741,87 @@ mod tests {
                 );
             }
             other => panic!("expected Rewrite, got {other:?}"),
+        }
+    }
+
+    /// #241: the hook never auto-allows a secret read on the rewrite path, and
+    /// it now also inspects the REWRITTEN command. The original #206 check ran
+    /// only on the original command and only for an `Ask` verdict, so a secret
+    /// carried by the rewrite could slip past. It must NOT turn an `Allow`
+    /// verdict into an `ask`: `Unrestricted` deliberately relaxes
+    /// `FindingReason::SecretRead`, and the hook leaves that opt-out alone.
+    #[test]
+    fn test_secret_read_never_emits_allow_on_claude_path() {
+        // `cat .env` rewrites to `contextcrawler read .env`; both name a
+        // secret. A non-Allow verdict (here `Default`) must emit an explicit
+        // `ask` with the secret reason rather than omitting the decision.
+        let v: Value = serde_json::from_str(&claude_input("cat .env")).unwrap();
+        let check = |_candidate: &str| PermissionVerdict::Default;
+        match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
+            PayloadAction::Rewrite { output, .. } => {
+                assert_eq!(
+                    output.pointer("/hookSpecificOutput/permissionDecision"),
+                    Some(&json!("ask")),
+                    "a secret read must ask, never auto-allow"
+                );
+                let reason = output
+                    .pointer("/hookSpecificOutput/permissionDecisionReason")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                assert!(
+                    reason.contains("this reads"),
+                    "the secret reason must surface, got: {reason}"
+                );
+            }
+            other => panic!("expected Rewrite, got {other:?}"),
+        }
+
+        // An ordinary rewrite still auto-allows under an `Allow` verdict.
+        let v: Value = serde_json::from_str(&claude_input("git status")).unwrap();
+        let check = |candidate: &str| {
+            permissions::check_command_with_rules(candidate, &[], &[], &["*".to_string()])
+        };
+        match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
+            PayloadAction::Rewrite { output, .. } => assert_eq!(
+                output.pointer("/hookSpecificOutput/permissionDecision"),
+                Some(&json!("allow")),
+                "ordinary rewrites keep their auto-allow"
+            ),
+            other => panic!("expected Rewrite for git status, got {other:?}"),
+        }
+
+        // #241: an `Allow` verdict is NOT overridden — `Unrestricted` relaxes
+        // `FindingReason::SecretRead`, so even `cat .env` stays `allow` there.
+        let v: Value = serde_json::from_str(&claude_input("cat .env")).unwrap();
+        let check = |candidate: &str| {
+            permissions::check_command_with_rules_profile(
+                candidate,
+                &[],
+                &[],
+                &["*".to_string()],
+                crate::core::config::SecurityProfile::Unrestricted,
+            )
+        };
+        match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
+            PayloadAction::Rewrite { output, .. } => assert_eq!(
+                output.pointer("/hookSpecificOutput/permissionDecision"),
+                Some(&json!("allow")),
+                "the hook must not override the Unrestricted opt-out"
+            ),
+            other => panic!("expected Rewrite, got {other:?}"),
+        }
+
+        // A `.pub` under `.ssh/` is public, not a credential — the helper
+        // skips it, so a `Default` verdict still omits the decision.
+        let v: Value = serde_json::from_str(&claude_input("cat ~/.ssh/id_rsa.pub")).unwrap();
+        let check = |_candidate: &str| PermissionVerdict::Default;
+        match process_claude_payload_with_gate(&v, check, |_| GateDecision::Proceed) {
+            PayloadAction::Rewrite { output, .. } => assert_eq!(
+                output.pointer("/hookSpecificOutput/permissionDecision"),
+                None,
+                "a public key is not a secret read and must not be forced to ask"
+            ),
+            other => panic!("expected Rewrite for a .pub read, got {other:?}"),
         }
     }
 
