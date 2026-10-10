@@ -73,6 +73,10 @@ package-lock.json
 
 # Agent task logs / chats (transient, never commit)
 .cptr/
+.council/
+
+# Machine-local typecheck paths (absolute nvm/node_modules entries)
+tsconfig.json
 
 # macOS Finder droppings (present in hooks/ and hooks/hermes/)
 .DS_Store

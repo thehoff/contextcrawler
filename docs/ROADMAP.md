@@ -4,6 +4,9 @@ Living planning document. Update when scope changes; don't strip the
 history — past entries are useful when answering "why did we do it
 this way?" later.
 
+The current product decision is [`PRODUCT.md`](PRODUCT.md) (2026-10-10).
+Backlog A and Backlog B below are history, not the plan.
+
 ## Current line: v0.5.x
 
 **Shipping: 0.5.0** (2026-08-16). The binary is still a thin shim over the

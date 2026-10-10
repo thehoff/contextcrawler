@@ -133,7 +133,6 @@ fn route(path: &str) -> Route {
 }
 
 fn index_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    // Slice 1 stub. The full neon SPA lands in slice 3.
     let body = include_str!("assets/index.html");
     Response::from_string(body)
         .with_header(html_header())
