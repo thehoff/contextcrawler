@@ -6,12 +6,52 @@ use std::process::Command;
 use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
 
-pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
-    if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
+/// Write the payload `parts` in order, then flush.
+///
+/// Split out from [`emit_stdout`] so the broken-pipe / write-error handling
+/// can be exercised against an in-memory or deliberately failing writer.
+///
+/// Returns `Ok(true)` once everything is written, `Ok(false)` when the reader
+/// closed the pipe (`BrokenPipe` — the normal end of a piped stream), and
+/// `Err` for any other failure (EAGAIN, ENOSPC, EDQUOT, ...).
+fn write_payload<W: std::io::Write>(writer: &mut W, parts: &[&str]) -> std::io::Result<bool> {
+    for part in parts {
+        match writer.write_all(part.as_bytes()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(false),
+            Err(e) => return Err(e),
+        }
     }
+    match writer.flush() {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Emit the final payload to stdout, without panicking.
+///
+/// The std `print!`/`println!` macros panic if the write fails. We write
+/// directly so a broken pipe is reported (`Ok(false)` — the caller exits 0)
+/// and any other write error is surfaced (`Err`) instead of aborting with a
+/// backtrace.
+fn emit_stdout(parts: &[&str]) -> Result<bool> {
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    write_payload(&mut handle, parts).context("failed to write output to stdout")
+}
+
+/// Best-effort write of captured stderr to our stderr.
+///
+/// Mirrors [`emit_stdout`] without the error channel: this is supplementary
+/// output for a run whose exit code is already known, so a write failure is
+/// ignored rather than masking the result.
+fn write_stderr(text: &str) {
+    use std::io::Write;
+    let stderr = std::io::stderr();
+    let mut handle = stderr.lock();
+    let _ = handle.write_all(text.as_bytes());
+    let _ = handle.flush();
 }
 
 /// No-bloat guard: a filter must never cost more than it saves.
@@ -46,6 +86,20 @@ pub fn no_bloat<'a>(baseline: &'a str, filtered: &'a str) -> &'a str {
     }
 }
 
+/// Pick the text to emit for a capture filter.
+///
+/// Normally the [`no_bloat`] guard decides (fall back to `baseline` when the
+/// filtered form is not strictly smaller). `keep_filtered` opts out: used when
+/// the tool injected a machine-readable format the user did not request, so the
+/// filter's summary is more useful even when it is marginally longer.
+fn select_emitted<'a>(baseline: &'a str, filtered: &'a str, keep_filtered: bool) -> &'a str {
+    if keep_filtered {
+        filtered
+    } else {
+        no_bloat(baseline, filtered)
+    }
+}
+
 #[derive(Default)]
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
@@ -56,6 +110,16 @@ pub struct RunOptions<'a> {
     /// commands that can read from a pipe (e.g. `cat file | contextcrawler wc`);
     /// without it the child gets an empty stdin and reports zero.
     pub inherit_stdin: bool,
+    /// Keep the filtered form even when the no-bloat guard would fall back to
+    /// the baseline because the filtered text is not strictly shorter.
+    ///
+    /// Set only when the tool *injected* a machine-readable format the user
+    /// did not request (e.g. ruff's `--output-format=json`): the raw injected
+    /// payload (`[]`) carries less information than the filter's summary
+    /// ("Ruff: No issues found"), so the summary wins despite being longer.
+    /// When the user asked for that format themselves this stays unset and the
+    /// raw output is preserved by the guard.
+    pub keep_filtered: bool,
 }
 
 impl<'a> RunOptions<'a> {
@@ -90,6 +154,13 @@ impl<'a> RunOptions<'a> {
 
     pub fn inherit_stdin(mut self) -> Self {
         self.inherit_stdin = true;
+        self
+    }
+
+    /// Keep the filtered output even when it is not smaller than the baseline.
+    /// See [`RunOptions::keep_filtered`].
+    pub fn keep_filtered(mut self) -> Self {
+        self.keep_filtered = true;
         self
     }
 }
@@ -137,14 +208,28 @@ where
     let raw_stdout = &result.raw_stdout;
 
     if opts.skip_filter_on_failure && exit_code != 0 {
-        if !result.raw_stdout.trim().is_empty() {
-            print!("{}", result.raw_stdout);
-        }
+        // This path already forwards stderr, so the success-path forwarding
+        // below must not fire in addition to it (it returns early).
+        let stdout_result = if result.raw_stdout.trim().is_empty() {
+            Ok(true)
+        } else {
+            emit_stdout(&[result.raw_stdout.as_str()])
+        };
         if !result.raw_stderr.trim().is_empty() {
-            eprint!("{}", result.raw_stderr);
+            write_stderr(&result.raw_stderr);
         }
-        timer.track(cmd_label, &format!("contextcrawler {}", cmd_label), raw, raw);
-        return Ok(exit_code);
+        timer.track(
+            cmd_label,
+            &format!("contextcrawler {}", cmd_label),
+            raw,
+            raw,
+        );
+        return match stdout_result {
+            Ok(true) => Ok(exit_code),
+            // Reader closed the pipe: a clean end of output, not a failure.
+            Ok(false) => Ok(0),
+            Err(e) => Err(e),
+        };
     }
 
     let text_to_filter = if opts.filter_stdout_only {
@@ -160,18 +245,59 @@ where
         raw
     };
 
-    // No-bloat guard (issue #95): if the filtered output is the same
-    // size or larger than the raw it was tracked against, the filter
-    // is costing more than it saves — emit the raw output instead so
-    // print and track agree and savings never go negative.
-    let emitted = no_bloat(raw_for_tracking, &filtered);
+    // No-bloat guard (issue #95): if the filtered output is the same size or
+    // larger than the raw it was tracked against, the filter is costing more
+    // than it saves — emit the raw output instead so print and track agree and
+    // savings never go negative. `keep_filtered` (set when the tool injected a
+    // machine-readable format itself) overrides the guard so the more useful
+    // summary survives even when it is longer (e.g. ruff's injected JSON emits
+    // `[]` where `Ruff: No issues found` is clearer).
+    let emitted = select_emitted(raw_for_tracking, &filtered, opts.keep_filtered);
 
-    if let Some(label) = opts.tee_label {
-        print_with_hint(emitted, raw, label, exit_code);
+    // A stdout-only filter never sees stderr, so a child that wrote nothing to
+    // stdout but did write warnings/deprecations to stderr would otherwise lose
+    // them. On a successful run, forward captured stderr when stdout is empty.
+    // The failure path above already forwarded stderr and returned early, so
+    // this cannot double-print it.
+    let forward_stderr = opts.filter_stdout_only
+        && exit_code == 0
+        && raw_stdout.trim().is_empty()
+        && !result.raw_stderr.trim().is_empty();
+
+    let hint = opts
+        .tee_label
+        .and_then(|label| crate::core::tee::tee_and_hint(raw, label, exit_code));
+
+    // Assemble the payload (mirrors the previous print!/println! shapes:
+    // `filtered\nhint\n`, `filtered\n`, or `filtered`) and write it through the
+    // non-panicking helper. A tee label takes precedence over
+    // `no_trailing_newline`, exactly as `print_with_hint` did.
+    let mut parts: [&str; 4] = [""; 4];
+    let part_count = if opts.tee_label.is_some() {
+        if let Some(hint) = hint.as_deref() {
+            parts[0] = emitted;
+            parts[1] = "\n";
+            parts[2] = hint;
+            parts[3] = "\n";
+            4
+        } else {
+            parts[0] = emitted;
+            parts[1] = "\n";
+            2
+        }
     } else if opts.no_trailing_newline {
-        print!("{}", emitted);
+        parts[0] = emitted;
+        1
     } else {
-        println!("{}", emitted);
+        parts[0] = emitted;
+        parts[1] = "\n";
+        2
+    };
+
+    let write_result = emit_stdout(&parts[..part_count]);
+
+    if forward_stderr {
+        write_stderr(&result.raw_stderr);
     }
 
     timer.track(
@@ -180,7 +306,14 @@ where
         raw_for_tracking,
         emitted,
     );
-    Ok(exit_code)
+
+    match write_result {
+        Ok(true) => Ok(exit_code),
+        // BrokenPipe: the reader went away (e.g. `| head`); exit cleanly.
+        Ok(false) => Ok(0),
+        // EAGAIN / ENOSPC / EDQUOT / anything else: surface the real error.
+        Err(e) => Err(e),
+    }
 }
 
 pub fn run(
@@ -216,15 +349,15 @@ pub fn run(
             } else {
                 StdinMode::Null
             };
-            let result =
-                stream::run_streaming(&mut cmd, stdin_mode, FilterMode::Streaming(filter))
-                    .with_context(|| format!("Failed to run {}", tool_name))?;
+            let result = stream::run_streaming(&mut cmd, stdin_mode, FilterMode::Streaming(filter))
+                .with_context(|| format!("Failed to run {}", tool_name))?;
 
             if let Some(label) = opts.tee_label {
                 if let Some(hint) =
                     crate::core::tee::tee_and_hint(&result.raw, label, result.exit_code)
                 {
-                    println!("{}", hint);
+                    // Non-panicking write; a broken pipe here is not fatal.
+                    let _ = emit_stdout(&[hint.as_str(), "\n"]);
                 }
             }
 
@@ -241,7 +374,10 @@ pub fn run(
                 stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
                     .with_context(|| format!("Failed to run {}", tool_name))?;
 
-            timer.track_passthrough(&cmd_label, &format!("contextcrawler {} (passthrough)", cmd_label));
+            timer.track_passthrough(
+                &cmd_label,
+                &format!("contextcrawler {} (passthrough)", cmd_label),
+            );
             Ok(result.exit_code)
         }
     }
@@ -408,7 +544,7 @@ mod tests {
         // would record (0 tokens saved).
         let baseline = "abcdefgh"; // 8 bytes  -> 2 tokens
         let filtered = "abcde"; //    5 bytes  -> 2 tokens
-        // Bytes and tokens disagree on direction:
+                                // Bytes and tokens disagree on direction:
         assert!(filtered.len() < baseline.len(), "filtered is fewer bytes");
         assert_eq!(
             tracking::estimate_tokens(filtered),
@@ -425,9 +561,73 @@ mod tests {
         // Sanity: a genuine token saving still keeps the filtered output.
         let baseline = "this is a long noisy line of command output";
         let filtered = "3 lines";
-        assert!(
-            tracking::estimate_tokens(filtered) < tracking::estimate_tokens(baseline)
-        );
+        assert!(tracking::estimate_tokens(filtered) < tracking::estimate_tokens(baseline));
         assert_eq!(no_bloat(baseline, filtered), filtered);
+    }
+
+    // --- keep_filtered override (injected machine-readable format) ---
+
+    #[test]
+    fn keep_filtered_overrides_no_bloat_for_injected_format() {
+        // Clean ruff run with injected `--output-format=json`: the raw stdout
+        // is `[]`, which is shorter than the filter's summary message.
+        let raw = "[]";
+        let summary = "Ruff: No issues found";
+        // The guard alone would keep the (shorter) raw JSON…
+        assert_eq!(no_bloat(raw, summary), raw);
+        // …but the injected-format override keeps the useful summary even
+        // though it is longer.
+        assert_eq!(select_emitted(raw, summary, true), summary);
+        // Without the override the guard still governs.
+        assert_eq!(select_emitted(raw, summary, false), raw);
+    }
+
+    #[test]
+    fn select_emitted_falls_back_to_shorter_filtered_form() {
+        // No override: a genuinely shorter filtered form is kept.
+        let raw = "line one\nline two\nline three\n";
+        let filtered = "3 lines";
+        assert_eq!(select_emitted(raw, filtered, false), filtered);
+    }
+
+    // --- stdout payload emission must not panic ---
+
+    struct FailingWriter(std::io::ErrorKind);
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "boom"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_payload_writes_every_part() {
+        let mut out: Vec<u8> = Vec::new();
+        assert!(write_payload(&mut out, &["a", "\n", "b", "\n"]).unwrap());
+        assert_eq!(out, b"a\nb\n");
+    }
+
+    #[test]
+    fn write_payload_maps_broken_pipe_to_ok_false() {
+        // A downstream reader quitting (`| head`) closes the pipe: this is a
+        // clean end of output the caller turns into exit 0, never a panic.
+        let mut w = FailingWriter(std::io::ErrorKind::BrokenPipe);
+        assert!(!write_payload(&mut w, &["x"]).unwrap());
+    }
+
+    #[test]
+    fn write_payload_surfaces_other_write_errors() {
+        // EAGAIN-like and generic failures must be returned, not swallowed and
+        // not escalated to a panic.
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::Other] {
+            let mut w = FailingWriter(kind);
+            assert!(
+                write_payload(&mut w, &["x"]).is_err(),
+                "{kind:?} must surface as an error"
+            );
+        }
     }
 }

@@ -120,26 +120,21 @@ pub(crate) fn filter_pytest_output(output: &str, exit_code: i32) -> String {
                 current_failure.clear();
             }
             continue;
-        } else if trimmed.starts_with("===")
-            && (trimmed.contains("passed")
-                || trimmed.contains("failed")
-                || trimmed.contains("skipped")
-                || trimmed.contains("error"))
-        {
-            summary_line = trimmed.to_string();
-            continue;
-        // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
-        // " error" is included so a pure-error quiet summary ("3 errors in 1.23s") is captured.
-        } else if summary_line.is_empty()
-            && !trimmed.starts_with("===")
-            && !trimmed.starts_with("FAILED")
-            && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
-                || trimmed.contains(" failed")
-                || trimmed.contains(" skipped")
-                || trimmed.contains(" error"))
-            && trimmed.contains(" in ")
-        {
+        }
+
+        // Capture the pytest summary line: it may be `===`-wrapped (non-quiet)
+        // or bare (quiet mode and `--collect-only`). A test can print a
+        // lookalike ("1 passed in 0.01s") mid-run, so keep the LAST matching
+        // line — the genuine summary is always emitted at the end.
+        //
+        // `FAILED`/`ERROR` short-summary entries and traceback detail lines
+        // (`> ...`, `E   ...`) are never the run summary, even if they happen
+        // to end in a duration-like token.
+        let is_detail = trimmed.starts_with("FAILED")
+            || trimmed.starts_with("ERROR")
+            || trimmed.starts_with('>')
+            || trimmed.starts_with("E ");
+        if !is_detail && looks_like_summary_line(trimmed) {
             summary_line = trimmed.to_string();
             continue;
         }
@@ -202,17 +197,28 @@ pub(crate) fn filter_pytest_output(output: &str, exit_code: i32) -> String {
 fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[String]) -> String {
     // Parse summary line
     let (passed, failed, skipped, errors) = parse_summary_line(summary);
+    let duration = parse_duration(summary);
 
     // Success is gated on BOTH failed == 0 AND errors == 0. pytest reports
     // collection/import/fixture failures as `errors` (e.g. "5 passed, 2 errors"),
     // which must never be summarised as a clean "Pytest: N passed".
     if failed == 0 && errors == 0 && passed > 0 {
-        return format!("Pytest: {} passed", passed);
+        return match &duration {
+            Some(d) => format!("Pytest: {} passed in {}", passed, d),
+            None => format!("Pytest: {} passed", passed),
+        };
     }
 
-    // Pure-error runs (e.g. "3 errors", 0 tests collected) must surface the
-    // errors, not claim "No tests collected".
+    // `--collect-only` prints no pass/fail counts — only "<N> tests collected
+    // in <t>s". Surface the collected count instead of misreporting an empty
+    // result as "No tests collected".
     if passed == 0 && failed == 0 && skipped == 0 && errors == 0 {
+        if let Some(collected) = parse_collected_line(summary) {
+            return match &duration {
+                Some(d) => format!("Pytest: {} tests collected in {}", collected, d),
+                None => format!("Pytest: {} tests collected", collected),
+            };
+        }
         return "Pytest: No tests collected".to_string();
     }
 
@@ -223,6 +229,9 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
     }
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
+    }
+    if let Some(d) = &duration {
+        result.push_str(&format!(" in {}", d));
     }
     result.push('\n');
 
@@ -333,6 +342,55 @@ fn parse_summary_line(summary: &str) -> (usize, usize, usize, usize) {
     }
 
     (passed, failed, skipped, errors)
+}
+
+/// Does this line look like pytest's terminal summary line — a run/collection
+/// count followed by a duration (`... in <secs>s`)?
+///
+/// Covers the `===`-wrapped form (`=== 4 passed, 1 failed in 0.50s ===`), the
+/// bare quiet form (`5 failed, 1698 passed in 108.89s`), the pure-error form
+/// (`3 errors in 1.23s`), the empty-run form (`no tests ran in 0.00s`) and
+/// `--collect-only` (`3 tests collected in 0.02s`).
+fn looks_like_summary_line(line: &str) -> bool {
+    if parse_duration(line).is_none() {
+        return false;
+    }
+    let lower = line.to_ascii_lowercase();
+    lower.contains("passed")
+        || lower.contains("failed")
+        || lower.contains("skipped")
+        || lower.contains("error")
+        || lower.contains("collected")
+        || lower.contains("no tests ran")
+}
+
+/// Extract the duration token from a pytest summary line, e.g. `0.02s` from
+/// `=== 1 passed in 0.02s ===`. Returns `None` when the line has no
+/// conventional `in <seconds>s` tail.
+fn parse_duration(line: &str) -> Option<String> {
+    let idx = line.rfind(" in ")?;
+    let token = line[idx + 4..].trim().split_whitespace().next()?;
+    let seconds = token.strip_suffix('s')?;
+    if seconds.starts_with(|c: char| c.is_ascii_digit()) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract the collected-test count from a `--collect-only` summary line
+/// (`3 tests collected in 0.02s`) — the count precedes the `tests` noun.
+fn parse_collected_line(summary: &str) -> Option<usize> {
+    let words: Vec<&str> = summary.split_whitespace().collect();
+    for (i, word) in words.iter().enumerate() {
+        if word.trim_matches('=') == "collected" {
+            return words[..i]
+                .iter()
+                .rev()
+                .find_map(|w| w.parse::<usize>().ok());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -453,7 +511,10 @@ collected 0 items
 
     #[test]
     fn test_parse_summary_line() {
-        assert_eq!(parse_summary_line("=== 5 passed in 0.50s ==="), (5, 0, 0, 0));
+        assert_eq!(
+            parse_summary_line("=== 5 passed in 0.50s ==="),
+            (5, 0, 0, 0)
+        );
         assert_eq!(
             parse_summary_line("=== 4 passed, 1 failed in 0.50s ==="),
             (4, 1, 0, 0)
@@ -553,6 +614,35 @@ ERROR tests/test_bad.py - ImportError: cannot import name 'missing'
         );
     }
 
+    /// Regression (upstream rtk#4426): pytest's quiet summary
+    /// `1 passed, 1 error in 0.02s` — the line this binary asks for via `-q` —
+    /// must not collapse to a clean pass. Singular `error`, no `===` wrapper.
+    #[test]
+    fn test_filter_pytest_quiet_fixture_error() {
+        let output = r#".E                                                                   [100%]
+=== ERRORS ===
+___ ERROR at setup of test_e ___
+E   RuntimeError: fixture
+
+=== short test summary info ===
+ERROR test_e.py::test_e - RuntimeError: fixture
+1 passed, 1 error in 0.02s"#;
+
+        let result = filter_pytest_output(output, 1);
+        assert!(
+            result != "Pytest: 1 passed" && !result.contains("Pytest: 1 passed\n"),
+            "fixture error must not read as a clean pass. Got: {result}"
+        );
+        assert!(
+            result.contains("1 error"),
+            "singular error count must be kept. Got: {result}"
+        );
+        assert!(
+            result.contains("test_e") || result.contains("RuntimeError"),
+            "the fixture error itself must surface. Got: {result}"
+        );
+    }
+
     /// Regression: pure-error run (0 tests, only collection errors) must surface
     /// the errors, never claim "No tests collected".
     #[test]
@@ -605,5 +695,110 @@ INTERNALERROR> RuntimeError: boom during collection";
             "Real error must surface. Got: {}",
             result
         );
+    }
+
+    /// The success summary must carry pytest's duration, e.g. `1 passed in 0.02s`.
+    #[test]
+    fn test_filter_pytest_summary_includes_duration() {
+        let output = "=== test session starts ===\n\
+collected 1 item\n\n\
+tests/test_foo.py .                                                [100%]\n\n\
+=== 1 passed in 0.02s ===";
+
+        let result = filter_pytest_output(output, 0);
+        assert_eq!(result, "Pytest: 1 passed in 0.02s");
+    }
+
+    /// Duration must also survive on the bare quiet summary form.
+    #[test]
+    fn test_filter_pytest_quiet_summary_includes_duration() {
+        let output = "1 passed in 0.02s";
+        let result = filter_pytest_output(output, 0);
+        assert_eq!(result, "Pytest: 1 passed in 0.02s");
+    }
+
+    /// `--collect-only` (which rtk runs with `-q`) ends with
+    /// `<N> tests collected in <t>s` and no pass/fail counts. That must report
+    /// the collected count, never "No tests collected".
+    #[test]
+    fn test_filter_pytest_collect_only_reports_collected() {
+        let output = "tests/test_foo.py::test_one\n\
+tests/test_foo.py::test_two\n\
+tests/test_foo.py::test_three\n\n\
+3 tests collected in 0.01s";
+
+        let result = filter_pytest_output(output, 0);
+        assert!(
+            !result.contains("No tests collected"),
+            "--collect-only must not report 'No tests collected'. Got: {result}"
+        );
+        assert_eq!(result, "Pytest: 3 tests collected in 0.01s");
+    }
+
+    /// Same, but with the non-quiet `===`-wrapped collect-only summary line.
+    #[test]
+    fn test_filter_pytest_collect_only_wrapped() {
+        let output = "=== test session starts ===\n\
+collected 2 items\n\n\
+<Module test_foo.py>\n\
+  <Function test_one>\n\
+  <Function test_two>\n\n\
+=== 2 tests collected in 0.03s ===";
+
+        let result = filter_pytest_output(output, 0);
+        assert!(
+            !result.contains("No tests collected"),
+            "collect-only must report the collected count. Got: {result}"
+        );
+        assert_eq!(result, "Pytest: 2 tests collected in 0.03s");
+    }
+
+    /// A test that prints a summary lookalike (`1 passed in 0.01s`) mid-run
+    /// must not shadow the genuine, final summary line.
+    #[test]
+    fn test_filter_pytest_quiet_last_summary_wins() {
+        let output = "=== test session starts ===\n\
+collected 2 items\n\n\
+tests/test_foo.py ..                                               [100%]\n\
+1 passed in 0.01s\n\
+=== 2 passed in 0.05s ===";
+
+        let result = filter_pytest_output(output, 0);
+        assert_eq!(
+            result, "Pytest: 2 passed in 0.05s",
+            "the last matching summary line must win. Got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_parse_duration() {
+        assert_eq!(
+            parse_duration("=== 5 passed in 0.50s ==="),
+            Some("0.50s".to_string())
+        );
+        assert_eq!(
+            parse_duration("5 failed, 1698 passed, 2 skipped in 108.89s"),
+            Some("108.89s".to_string())
+        );
+        assert_eq!(
+            parse_duration("=== 3 errors in 1.23s ==="),
+            Some("1.23s".to_string())
+        );
+        assert_eq!(
+            parse_duration("no tests ran in 0.00s"),
+            Some("0.00s".to_string())
+        );
+        assert_eq!(parse_duration("no duration here"), None);
+    }
+
+    #[test]
+    fn test_parse_collected_line() {
+        assert_eq!(parse_collected_line("3 tests collected in 0.02s"), Some(3));
+        assert_eq!(
+            parse_collected_line("=== 12 tests collected in 0.02s ==="),
+            Some(12)
+        );
+        assert_eq!(parse_collected_line("1 passed in 0.02s"), None);
+        assert_eq!(parse_collected_line(""), None);
     }
 }

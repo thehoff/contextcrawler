@@ -9,6 +9,7 @@ use crate::core::tracking;
 use crate::core::utils::format_tokens;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 const JSON_MAX_DEPTH: usize = 5;
@@ -18,6 +19,37 @@ const JSON_MAX_DEPTH: usize = 5;
 /// Shared by the renderer that writes it and the repeat-read cache that must
 /// refuse to stub over it, so the two cannot drift apart.
 const TRUNCATION_MARKER: &str = "ContextCrawler omitted middle of file";
+
+/// Write rendered output to stdout without the panic `print!` takes on a
+/// closed pipe or a full disk.
+///
+/// A `BrokenPipe` is the reader saying it has seen enough (`… | head`) — not
+/// an error — so it is swallowed. Every other write failure (EAGAIN, ENOSPC,
+/// EDQUOT, …) is returned to the caller instead of aborting the process. The
+/// explicit flush is what makes those failures observable here rather than at
+/// process exit, where the runtime ignores them.
+fn write_stdout(text: &str) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    match lock.write_all(text.as_bytes()).and_then(|()| lock.flush()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(err).context("Failed to write to stdout"),
+    }
+}
+
+/// The label `tracking` books this read under. A head/tail read must not be
+/// recorded as `cat <file>`, or `gain` would credit it with whole-file savings
+/// it never produced.
+fn tracking_label(display_path: &str, window: &LineWindow) -> String {
+    if window.head_lines.is_some() {
+        format!("head {}", display_path)
+    } else if window.tail_lines.is_some() {
+        format!("tail {}", display_path)
+    } else {
+        format!("cat {}", display_path)
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -104,9 +136,9 @@ pub fn run(
         ctxcrl_output
     };
 
-    print!("{}", emitted);
+    write_stdout(&emitted)?;
     timer.track(
-        &format!("cat {}", file.display()),
+        &tracking_label(&display_path, &window),
         "contextcrawler read",
         &content,
         &emitted,
@@ -172,10 +204,10 @@ pub fn run_stdin(
     } else {
         filtered.clone()
     };
-    print!("{}", ctxcrl_output);
+    write_stdout(&ctxcrl_output)?;
 
     timer.track(
-        "cat - (stdin)",
+        &tracking_label("- (stdin)", &window),
         "contextcrawler read -",
         &content,
         &ctxcrl_output,
@@ -195,7 +227,28 @@ pub(crate) fn render_output(
     display_path: &str,
     verbose: u8,
 ) -> String {
+    // A leading UTF-8 BOM is an encoding artefact, not file content. Drop it
+    // before filtering and before any window so it can neither count as the
+    // first line nor survive into the rendered text.
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let input_tokens = tracking::estimate_tokens(content);
+
+    // An explicit head/tail window is a deliberate slice of the *raw* file:
+    // select the lines first, then filter, so comment stripping can neither
+    // change which lines the window lands on nor shrink its count. A lone
+    // zero bound (`--head-lines 0`) selects nothing. `--max-lines` is
+    // deliberately excluded — it keeps its post-filter `smart_truncate`.
+    if !window.has_range() && (window.head_lines.is_some() || window.tail_lines.is_some()) {
+        let sliced = apply_raw_line_window(content, window.head_lines, window.tail_lines);
+        let filtered = filter_content(&sliced, ext, lang, level);
+        // Same safety net as below: never hand back an empty render of a
+        // non-empty slice.
+        if filtered.trim().is_empty() && !sliced.trim().is_empty() {
+            return sliced;
+        }
+        return filtered;
+    }
+
     let mut filtered = filter_content(content, ext, lang, level);
 
     // Safety: if filter emptied a non-empty file, fall back to raw content.
@@ -268,6 +321,14 @@ fn repeat_read_stub(
     read_config: &config::ReadConfig,
 ) -> Option<String> {
     if !read_config.repeat_read_stub {
+        return None;
+    }
+    // `read_cache::RenderMode` carries `--max-lines`/`--tail-lines` but has no
+    // `head_lines` field, so a head read would key identically to a whole-file
+    // read and could be stubbed as one the agent never received. Until the
+    // mode carries it, head reads are always emitted (a bounded head is cheap
+    // to re-render, and a wrong withhold is not).
+    if window.head_lines.is_some() {
         return None;
     }
     // A read whose own render path already truncated the file, or replaced it
@@ -474,7 +535,13 @@ fn apply_unknown_extension_cap(
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct LineWindow {
     pub max_lines: Option<usize>,
+    /// Last N raw lines of the file (`tail -n N`). Applied to the raw content
+    /// *before* comment filtering — see `render_output`.
     pub tail_lines: Option<usize>,
+    /// First N raw lines of the file (`head -n N`). Like `tail_lines`, taken
+    /// from the raw content before filtering, and never routed through
+    /// `smart_truncate`.
+    pub head_lines: Option<usize>,
     /// 1-indexed, inclusive — `sed -n 'A,Bp'` semantics (#207).
     pub start_line: Option<usize>,
     pub end_line: Option<usize>,
@@ -539,39 +606,56 @@ fn apply_line_range(content: &str, start: Option<usize>, end: Option<usize>) -> 
     result
 }
 
+/// Take the first `head` and/or last `tail` lines of the *raw* content, before
+/// any comment filtering (`head -n` / `tail -n` semantics).
+///
+/// A `Some(0)` bound selects nothing. When both bounds are present they are
+/// concatenated; if together they cover the whole file the content is returned
+/// unchanged. The trailing-newline state is preserved so the excerpt is a
+/// faithful slice rather than a subtly reformatted one.
+fn apply_raw_line_window(content: &str, head: Option<usize>, tail: Option<usize>) -> String {
+    if head.is_none() && tail.is_none() {
+        return content.to_string();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let head_n = head.unwrap_or(0).min(total);
+    let tail_n = tail.unwrap_or(0).min(total.saturating_sub(head_n));
+
+    // An explicit zero-line window is empty even for an empty file.
+    if head_n == 0 && tail_n == 0 {
+        return String::new();
+    }
+    if head_n + tail_n >= total {
+        return content.to_string();
+    }
+
+    let mut selected: Vec<&str> = Vec::with_capacity(head_n + tail_n);
+    selected.extend(lines.iter().take(head_n).copied());
+    selected.extend(lines.iter().skip(total - tail_n).copied());
+    let mut result = selected.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 fn apply_line_window(content: &str, window: &LineWindow, lang: &Language) -> String {
     // An explicit range is the most specific instruction available, so it wins
     // over head/tail caps rather than compounding with them.
     if window.has_range() {
         return apply_line_range(content, window.start_line, window.end_line);
     }
-    apply_line_window_caps(content, window.max_lines, window.tail_lines, lang)
+    // head_lines/tail_lines are applied to the raw content in `render_output`;
+    // only `--max-lines` reaches here, as a post-filter cap.
+    apply_line_window_caps(content, window.max_lines, lang)
 }
 
-fn apply_line_window_caps(
-    content: &str,
-    max_lines: Option<usize>,
-    tail_lines: Option<usize>,
-    lang: &Language,
-) -> String {
-    if let Some(tail) = tail_lines {
-        if tail == 0 {
-            return String::new();
-        }
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(tail);
-        let mut result = lines[start..].join("\n");
-        if content.ends_with('\n') {
-            result.push('\n');
-        }
-        return result;
+fn apply_line_window_caps(content: &str, max_lines: Option<usize>, lang: &Language) -> String {
+    match max_lines {
+        Some(max) => filter::smart_truncate(content, max, lang),
+        None => content.to_string(),
     }
-
-    if let Some(max) = max_lines {
-        return filter::smart_truncate(content, max, lang);
-    }
-
-    content.to_string()
 }
 
 #[cfg(test)]
@@ -614,21 +698,165 @@ fn main() {{
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window_caps(input, None, Some(2), &Language::Unknown);
+        let output = apply_raw_line_window(input, None, Some(2));
         assert_eq!(output, "c\nd\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
         let input = "a\nb\nc\nd";
-        let output = apply_line_window_caps(input, None, Some(2), &Language::Unknown);
+        let output = apply_raw_line_window(input, None, Some(2));
         assert_eq!(output, "c\nd");
+    }
+
+    // --- head_lines / tail_lines: raw-first, post-filter ---
+    //
+    // `--head-lines` / `--tail-lines` select lines from the RAW file, then the
+    // content is comment-filtered. Doing it the other way round let comment
+    // stripping change which lines the window landed on (and how many).
+
+    #[test]
+    fn head_lines_takes_the_first_raw_lines() {
+        let output = apply_raw_line_window("a\nb\nc\nd\n", Some(2), None);
+        assert_eq!(output, "a\nb\n");
+    }
+
+    #[test]
+    fn head_lines_zero_is_empty() {
+        assert_eq!(apply_raw_line_window("a\nb\nc\n", Some(0), None), "");
+    }
+
+    #[test]
+    fn head_and_tail_are_concatenated() {
+        let output = apply_raw_line_window("a\nb\nc\nd\ne\n", Some(2), Some(1));
+        assert_eq!(output, "a\nb\ne\n");
+    }
+
+    #[test]
+    fn head_lines_applies_before_comment_filtering() {
+        // The window must land on the *raw* first two lines (`// c` and
+        // `let a = 1;`), then filter — so the comment line is dropped and
+        // `let b` (line 3) never enters the window. Filtering first would have
+        // yielded `let a` and `let b`.
+        let content = "// c\nlet a = 1;\nlet b = 2;\n";
+        let window = LineWindow {
+            head_lines: Some(2),
+            ..LineWindow::default()
+        };
+        let out = render_output(
+            content,
+            Some("rs"),
+            Language::Rust,
+            FilterLevel::Minimal,
+            &window,
+            &config::ReadConfig::default(),
+            true,
+            "f.rs",
+            0,
+        );
+        assert_eq!(out, "let a = 1;");
+    }
+
+    #[test]
+    fn tail_lines_applies_before_comment_filtering() {
+        // Raw last two lines are `b` and `// c`; filtering then drops the
+        // comment. Filtering first would have left `a` in a 2-line window.
+        let content = "let a = 1;\nlet b = 2;\n// c\n";
+        let window = LineWindow {
+            tail_lines: Some(2),
+            ..LineWindow::default()
+        };
+        let out = render_output(
+            content,
+            Some("rs"),
+            Language::Rust,
+            FilterLevel::Minimal,
+            &window,
+            &config::ReadConfig::default(),
+            true,
+            "f.rs",
+            0,
+        );
+        assert_eq!(out, "let b = 2;");
+    }
+
+    #[test]
+    fn head_lines_never_uses_smart_truncate() {
+        // A `--head-lines` window returns exactly N lines, with no synthetic
+        // "[N more lines]" marker even when N is tiny relative to the file.
+        let content = "one\ntwo\nthree\nfour\nfive\n";
+        let window = LineWindow {
+            head_lines: Some(2),
+            ..LineWindow::default()
+        };
+        let out = render_output(
+            content,
+            Some("txt"),
+            Language::Data,
+            FilterLevel::None,
+            &window,
+            &config::ReadConfig::default(),
+            true,
+            "f.txt",
+            0,
+        );
+        assert_eq!(out, "one\ntwo\n");
+        assert!(
+            !out.contains("more lines"),
+            "must not smart_truncate: {out}"
+        );
+    }
+
+    // --- BOM: a leading UTF-8 BOM is not file content ---
+
+    #[test]
+    fn leading_bom_is_stripped_before_render() {
+        let content = "\u{feff}fn main() {\n    let x = 1;\n}\n";
+        let out = render_output(
+            content,
+            Some("rs"),
+            Language::Rust,
+            FilterLevel::None,
+            &LineWindow::default(),
+            &config::ReadConfig::default(),
+            true,
+            "f.rs",
+            0,
+        );
+        assert!(
+            !out.starts_with('\u{feff}'),
+            "BOM must not survive into the output: {out:?}"
+        );
+        assert_eq!(out, "fn main() {\n    let x = 1;\n}\n");
+    }
+
+    #[test]
+    fn leading_bom_does_not_count_as_a_window_line() {
+        // `--head-lines 1` must take the real first line, not consume itself
+        // on an invisible BOM.
+        let content = "\u{feff}first\nsecond\n";
+        let window = LineWindow {
+            head_lines: Some(1),
+            ..LineWindow::default()
+        };
+        let out = render_output(
+            content,
+            Some("txt"),
+            Language::Data,
+            FilterLevel::None,
+            &window,
+            &config::ReadConfig::default(),
+            true,
+            "f.txt",
+            0,
+        );
+        assert_eq!(out, "first\n");
     }
 
     #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window_caps(input, Some(2), None, &Language::Unknown);
+        let output = apply_line_window_caps(input, Some(2), &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
     }

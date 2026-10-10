@@ -26,6 +26,7 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "audit",
     "fund",
     "exec",
+    "run-script",
     "explain",
     "why",
     "search",
@@ -43,7 +44,6 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "version",
     "prefix",
     "root",
-    "bin",
     "bugs",
     "docs",
     "home",
@@ -56,7 +56,9 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "access",
     "owner",
     "deprecate",
+    "undeprecate",
     "dist-tag",
+    "trust",
     "star",
     "stars",
     "login",
@@ -271,6 +273,13 @@ npm notice
 
         // Explicit "run" should NOT inject another "run"
         assert!(!needs_run_injection(&["run", "build"]));
+        // run-script, trust, and undeprecate are real subcommands (covered by
+        // the table loop). `bin` was removed in npm 9, so a bare `npm bin`
+        // is a script name and must inject `run`.
+        assert!(
+            needs_run_injection(&["bin"]),
+            "'npm bin' is a script name now, so it SHOULD inject 'run'"
+        );
     }
 
     #[test]

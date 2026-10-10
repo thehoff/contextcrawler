@@ -21,15 +21,30 @@ lazy_static! {
     // "TypeScript compilation completed" while hiding every error (lying success).
     static ref TSC_ERROR_PRETTY: Regex =
         Regex::new(r"^(.+?):(\d+):(\d+)\s+-\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap();
+
+    // File-less / global tsc diagnostics: config and path errors carry no
+    // `file(line,col):` position, e.g. `error TS5058: The specified path does
+    // not exist`. TSC_ERROR and TSC_ERROR_PRETTY both require a file position,
+    // so these used to be dropped from the summary entirely (and the
+    // non-streaming filter reported "compilation completed" on a failed run).
+    // Capture order: 1=severity 2=code 3=message.
+    static ref TSC_ERROR_GLOBAL: Regex =
+        Regex::new(r"^(error|warning)\s+(TS\d+):\s+(.+)$").unwrap();
 }
 
-/// Match a tsc diagnostic header in either the non-pretty `file(line,col):` or
-/// the pretty `file:line:col -` form. Both regexes share capture-group order
-/// (1=file 2=line 3=col 4=severity 5=code 6=message).
+/// Match a file-located tsc diagnostic header in either the non-pretty
+/// `file(line,col):` or the pretty `file:line:col -` form. Both regexes share
+/// capture-group order (1=file 2=line 3=col 4=severity 5=code 6=message).
 fn match_tsc_error(line: &str) -> Option<regex::Captures<'_>> {
     TSC_ERROR
         .captures(line)
         .or_else(|| TSC_ERROR_PRETTY.captures(line))
+}
+
+/// Match a file-less (global) tsc diagnostic such as `error TS5058: ...`.
+/// Capture order: 1=severity 2=code 3=message.
+fn match_global_tsc_error(line: &str) -> Option<regex::Captures<'_>> {
+    TSC_ERROR_GLOBAL.captures(line)
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
@@ -65,7 +80,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 struct TscHandler {
+    /// Total recognised diagnostics — file-located *and* file-less (global).
     error_count: usize,
+    /// File-located diagnostics only. Drives the "in N files" count and the
+    /// fallback to raw output when a failed run produced no positioned errors.
+    file_error_count: usize,
     files: HashSet<String>,
     code_counts: HashMap<String, usize>,
 }
@@ -74,6 +93,7 @@ impl TscHandler {
     fn new() -> Self {
         Self {
             error_count: 0,
+            file_error_count: 0,
             files: HashSet::new(),
             code_counts: HashMap::new(),
         }
@@ -88,8 +108,15 @@ impl BlockHandler for TscHandler {
     fn is_block_start(&mut self, line: &str) -> bool {
         if let Some(caps) = match_tsc_error(line) {
             self.error_count += 1;
+            self.file_error_count += 1;
             self.files.insert(caps[1].to_string());
             *self.code_counts.entry(caps[5].to_string()).or_insert(0) += 1;
+            true
+        } else if let Some(caps) = match_global_tsc_error(line) {
+            // File-less diagnostics (config/path errors) count toward the
+            // total and the code tally, but belong to no file.
+            self.error_count += 1;
+            *self.code_counts.entry(caps[2].to_string()).or_insert(0) += 1;
             true
         } else {
             false
@@ -101,11 +128,11 @@ impl BlockHandler for TscHandler {
     }
 
     fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String> {
-        if self.error_count == 0 {
-            // Config errors (TS5083/TS18003/TS5057) and tsc crashes carry no
-            // `file(line,col):` prefix, so they never increment error_count. On
-            // a non-zero exit with zero recognised diagnostics, surface the raw
-            // output instead of lying with "No errors found".
+        // Nothing positioned: either a clean run, or a failure with only
+        // file-less diagnostics (config errors TS5083/TS18003/TS5057, path
+        // errors TS5058, tsc crashes). In the latter case surface the raw
+        // output rather than lying with "No errors found".
+        if self.file_error_count == 0 {
             return if exit_code == 0 {
                 Some("TypeScript: No errors found\n".to_string())
             } else {
@@ -154,6 +181,8 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
     }
 
     let mut errors: Vec<TsError> = Vec::new();
+    // File-less (global) diagnostics: `error TSxxxx: message` with no position.
+    let mut global_errors: Vec<(String, String)> = Vec::new();
     let lines: Vec<&str> = output.lines().collect();
     let mut i = 0;
 
@@ -175,6 +204,7 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
                 if !next.is_empty()
                     && (next.starts_with("  ") || next.starts_with('\t'))
                     && match_tsc_error(next).is_none()
+                    && match_global_tsc_error(next).is_none()
                 {
                     err.context_lines.push(next.trim().to_string());
                     i += 1;
@@ -184,12 +214,15 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
             }
 
             errors.push(err);
+        } else if let Some(caps) = match_global_tsc_error(line) {
+            global_errors.push((caps[2].to_string(), caps[3].to_string()));
+            i += 1;
         } else {
             i += 1;
         }
     }
 
-    if errors.is_empty() {
+    if errors.is_empty() && global_errors.is_empty() {
         if output.contains("Found 0 errors") {
             return "TypeScript: No errors found".to_string();
         }
@@ -202,16 +235,21 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
         by_file.entry(err.file.clone()).or_default().push(err);
     }
 
-    // Count by error code for summary
+    // Count by error code for summary — file-located and file-less alike.
     let mut by_code: HashMap<String, usize> = HashMap::new();
     for err in &errors {
         *by_code.entry(err.code.clone()).or_insert(0) += 1;
     }
+    for (code, _) in &global_errors {
+        *by_code.entry(code.clone()).or_insert(0) += 1;
+    }
+
+    let total_errors = errors.len() + global_errors.len();
 
     let mut result = String::new();
     result.push_str(&format!(
         "TypeScript: {} errors in {} files\n",
-        errors.len(),
+        total_errors,
         by_file.len()
     ));
 
@@ -246,6 +284,16 @@ pub(crate) fn filter_tsc_output(output: &str) -> String {
             for ctx in &err.context_lines {
                 result.push_str(&format!("    {}\n", truncate(ctx, 120)));
             }
+        }
+        result.push('\n');
+    }
+
+    // File-less diagnostics have no position to group under, so list them
+    // after the per-file blocks — a config/path failure must never be dropped.
+    if !global_errors.is_empty() {
+        result.push_str("Global errors:\n");
+        for (code, message) in &global_errors {
+            result.push_str(&format!("  {} {}\n", code, truncate(message, 120)));
         }
         result.push('\n');
     }
@@ -411,8 +459,8 @@ Found 3 errors in 2 files.
     #[test]
     fn test_tsc_stream_config_error_not_reported_as_success() {
         // Regression: a tsc config error (TS5083) carries no `file(line,col):`
-        // prefix, so error_count stays 0. On a non-zero exit the filter must
-        // NOT print "No errors found" and MUST surface the real error.
+        // prefix, so file_error_count stays 0. On a non-zero exit the filter
+        // must NOT print "No errors found" and MUST surface the real error.
         let input = "error TS5083: Cannot read file 'tsconfig.json'.\n";
         let mut f = BlockStreamFilter::new(TscHandler::new());
         let result = run_block_filter(&mut f, input, 1);
@@ -445,5 +493,53 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable.
         );
         assert!(result.contains("TS2322"), "got: {}", result);
         assert!(result.contains("TS2345"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_global_error_counted() {
+        // A config/path diagnostic carries no file position (TS5058 etc.).
+        // It must be counted and surfaced, not reported as "compilation
+        // completed" — the non-streaming filter has no exit code to fall back
+        // on, so dropping the line here is a lying success.
+        let output = "error TS5058: The specified path does not exist: 'tsconfig.json'.\n";
+        let result = filter_tsc_output(output);
+        assert!(
+            result.contains("TypeScript: 1 errors in 0 files"),
+            "got: {result}"
+        );
+        assert!(result.contains("TS5058"), "got: {result}");
+        assert!(result.contains("Global errors:"), "got: {result}");
+        assert!(!result.contains("compilation completed"), "got: {result}");
+    }
+
+    #[test]
+    fn test_filter_global_and_file_errors_counted() {
+        // File-located and file-less diagnostics in one stream: the total must
+        // include both, the file count only the positioned ones.
+        let output = "\
+src/a.ts(1,1): error TS1000: file form.
+error TS5058: The specified path does not exist: 'tsconfig.json'.
+";
+        let result = filter_tsc_output(output);
+        assert!(
+            result.contains("TypeScript: 2 errors in 1 files"),
+            "got: {result}"
+        );
+        assert!(result.contains("TS1000"), "got: {result}");
+        assert!(result.contains("TS5058"), "got: {result}");
+    }
+
+    #[test]
+    fn test_tsc_stream_global_error_counted() {
+        // Streaming counterpart: a file-less diagnostic must count toward the
+        // total and its code must appear, alongside the positioned error.
+        let input = "\
+src/a.ts(1,1): error TS1000: file form.
+error TS5058: The specified path does not exist: 'tsconfig.json'.
+";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("2 errors in 1 files"), "got: {result}");
+        assert!(result.contains("TS5058"), "got: {result}");
     }
 }

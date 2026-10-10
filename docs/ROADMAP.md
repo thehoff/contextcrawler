@@ -4,11 +4,17 @@ Living planning document. Update when scope changes; don't strip the
 history — past entries are useful when answering "why did we do it
 this way?" later.
 
-## Current line: v0.4.x
+## Current line: v0.5.x
 
-**Shipping: 0.4.9.** v0.4.x is the **library-pivot + stabilisation** line:
-the binary is a thin shim over the `contextcrawler` library crate, and the
-work is holding the command path deterministic rather than widening it.
+**Shipping: 0.5.0** (2026-08-16). The binary is still a thin shim over the
+`contextcrawler` library crate. This line adds the local `gain --web`
+dashboard, precise `read` line ranges, and a replayable gate
+false-positive corpus. Detail is in `CHANGELOG.md`.
+
+### Closed line: v0.4.x
+
+Shipped 0.4.0–0.4.9 (through 2026-07-24): the library pivot, then the
+permission-profile redesign. Closed when 0.5.0 shipped.
 
 > [!NOTE]
 > **This document described v0.1.x until 2026-08-07** — nine releases after
@@ -150,10 +156,12 @@ Major / minor / patch follows the same rule as RELEASING.md:
 | Breaking change in CLI surface or default behaviour | minor (0.1.x → 0.2.0) |
 | Dropping the rtk-ai/rtk rebase relationship, hook-protocol switch | major (0.x → 1.0) |
 
-The internal `Cargo.toml` version tracks the upstream rtk version
-this fork rebases against. ContextCrawler's own version lives in
-`src/main.rs::CONTEXTCRAWLER_VERSION` and the README install commands,
-all bumped together via `scripts/bump-version.sh`.
+The shipping version is `Cargo.toml`'s `version`. Clap prints it from
+`CARGO_PKG_VERSION`; there is no separate `CONTEXTCRAWLER_VERSION`
+constant, and the crate version is not pinned to an upstream rtk tag.
+`scripts/bump-version.sh` still looks for a version string in
+`src/main.rs` and does not bump `Cargo.toml` — do not trust it until
+that is fixed.
 
 ## How this doc gets updated
 

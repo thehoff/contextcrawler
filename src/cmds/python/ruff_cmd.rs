@@ -34,19 +34,47 @@ struct RuffDiagnostic {
     fix: Option<RuffFix>,
 }
 
+/// `ruff` subcommands that are NOT `check`.
+///
+/// Ruff's default command is `check`, so a bare path (`ruff src/`) still
+/// routes to `ruff check`. An explicit subcommand must run as itself —
+/// routing `ruff server` through `ruff check server` would try to lint files
+/// named "server".
+const NON_CHECK_SUBCOMMANDS: &[&str] = &[
+    "format", "version", "rule", "linter", "clean", "server", "analyze", "config",
+];
+
+/// Whether `args` selects the default `check` command (handled by the filter
+/// path) versus an explicit subcommand that must run verbatim.
+fn is_check_invocation(args: &[String]) -> bool {
+    match args.first() {
+        None => true,
+        Some(first) => {
+            first == "check"
+                || (!first.starts_with('-') && !NON_CHECK_SUBCOMMANDS.contains(&first.as_str()))
+        }
+    }
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let is_check = args.is_empty()
-        || args[0] == "check"
-        || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");
+    let is_check = is_check_invocation(args);
 
     let is_format = args.iter().any(|a| a == "format");
+
+    // When ruff itself would not emit JSON, we inject `--output-format=json`
+    // so `filter_ruff_check_json` can parse the output. Record that injection
+    // so the no-bloat guard can keep the filter's summary over the raw `[]`
+    // payload. If the user supplied `--output-format` themselves, their
+    // requested format is what should come back, and the guard stays in charge.
+    let user_requested_output_format = args.iter().any(|a| a.starts_with("--output-format"));
+    let injected_json = is_check && !user_requested_output_format;
 
     // Strip PYTHONPATH / PYTHONSTARTUP / PIP_* from inherited env to
     // prevent sitecustomize.py / startup-file hijack. See issue #36.
     let mut cmd = secure_python_command("ruff");
 
     if is_check {
-        if !args.contains(&"--output-format".to_string()) {
+        if !user_requested_output_format {
             cmd.arg("check").arg("--output-format=json");
         } else {
             cmd.arg("check");
@@ -78,6 +106,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: ruff {}", args.join(" "));
     }
 
+    // Only the injected-JSON case opts out of the no-bloat guard: there the
+    // raw payload is a bare `[]` we caused to exist, and the filter's summary
+    // is strictly more useful. When the user asked for JSON, keep the guard so
+    // their requested output survives.
+    let opts = if injected_json {
+        runner::RunOptions::stdout_only().keep_filtered()
+    } else {
+        runner::RunOptions::stdout_only()
+    };
+
     runner::run_filtered(
         cmd,
         "ruff",
@@ -91,7 +129,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 stdout.trim().to_string()
             }
         },
-        runner::RunOptions::stdout_only(),
+        opts,
     )
 }
 
@@ -380,5 +418,46 @@ Would reformat: tests/test_utils.py
             "tests/test.py"
         );
         assert_eq!(compact_path("relative/file.py"), "file.py");
+    }
+
+    #[test]
+    fn test_is_check_invocation_defaults_to_check() {
+        // No args, an explicit `check`, or a bare path all mean `ruff check`.
+        assert!(is_check_invocation(&[]));
+        assert!(is_check_invocation(&["check".to_string()]));
+        assert!(is_check_invocation(&[
+            "check".to_string(),
+            "src/".to_string()
+        ]));
+        assert!(is_check_invocation(&[".".to_string()]));
+        assert!(is_check_invocation(&["src/main.py".to_string()]));
+        // A leading flag is left to ruff itself (unchanged behaviour).
+        assert!(!is_check_invocation(&[
+            "--select".to_string(),
+            "E501".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_is_check_invocation_excludes_subcommands() {
+        // Every non-check subcommand must run as itself, never as
+        // `ruff check <subcommand>`.
+        for sub in NON_CHECK_SUBCOMMANDS {
+            assert!(
+                !is_check_invocation(&[sub.to_string()]),
+                "`ruff {sub}` must not be routed through check"
+            );
+        }
+        assert!(!is_check_invocation(&[
+            "rule".to_string(),
+            "F401".to_string()
+        ]));
+        assert!(!is_check_invocation(&["server".to_string()]));
+        assert!(!is_check_invocation(&["clean".to_string()]));
+        assert!(!is_check_invocation(&["analyze".to_string()]));
+        assert!(!is_check_invocation(&[
+            "config".to_string(),
+            "list".to_string()
+        ]));
     }
 }

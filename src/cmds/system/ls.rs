@@ -18,55 +18,120 @@ lazy_static! {
     .unwrap();
 }
 
+/// Parse user `ls` arguments into `(flags to forward, path operands, show_all,
+/// show_long, preserve_order)`.
+///
+/// The proxy always runs `ls -la` internally, so `-l`/`-a` are dropped from
+/// what we forward; `-h` is dropped too because it would corrupt the size
+/// column we parse. Flags that must still reach the real `ls` (e.g. `-I`,
+/// `-t`, `--sort`) are preserved.
+///
+/// `-A`/`--almost-all` reveal hidden entries just like `-a` for our purposes
+/// (`.` and `..` are always dropped by the parser, so the two forms compact
+/// identically). `-I PATTERN` and its attached form `-Ipattern` consume the
+/// pattern — it is never treated as a path operand. `-t` (or `--sort=time`) is
+/// remembered so compaction can preserve ls's ordering instead of grouping
+/// directories first. Per `man ls`, the long listing is triggered by `-l` and
+/// also implied by `-g`, `-n`, `-o`, `--full-time`, or GNU `--format=long` /
+/// `--format=verbose` — in any of those cases we preserve permission info as
+/// octal.
+fn parse_args(args: &[String]) -> (Vec<String>, Vec<String>, bool, bool, bool) {
+    let mut forwarded: Vec<String> = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
+    let mut show_all = false;
+    let mut show_long = false;
+    let mut preserve_order = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+
+        // Everything after an explicit `--` is a path operand.
+        if arg == "--" {
+            paths.extend(args[i + 1..].iter().cloned());
+            break;
+        }
+
+        if let Some(long) = arg.strip_prefix("--") {
+            match long {
+                // Already implied by the proxy's internal `-la`.
+                "all" | "almost-all" => show_all = true,
+                "full-time" | "format=long" | "format=verbose" => {
+                    show_long = true;
+                    forwarded.push(arg.clone());
+                }
+                "sort=time" => {
+                    preserve_order = true;
+                    forwarded.push(arg.clone());
+                }
+                "ignore" => {
+                    // `--ignore PATTERN` takes the following argument as its value.
+                    forwarded.push(arg.clone());
+                    if i + 1 < args.len() {
+                        i += 1;
+                        forwarded.push(args[i].clone());
+                    }
+                }
+                _ => forwarded.push(arg.clone()),
+            }
+            i += 1;
+            continue;
+        }
+
+        if arg.starts_with('-') && arg.len() > 1 {
+            let cluster = &arg[1..];
+            let mut forward = String::new();
+            let mut value_follows = false;
+            for (idx, c) in cluster.char_indices() {
+                match c {
+                    'a' | 'A' => show_all = true,
+                    'l' | 'g' | 'n' | 'o' => show_long = true,
+                    'h' => {} // proxy renders its own human sizes
+                    't' => {
+                        preserve_order = true;
+                        forward.push('t');
+                    }
+                    'I' => {
+                        // Whatever follows `I` in the cluster is its pattern;
+                        // otherwise the pattern is the following argument.
+                        forward.push('I');
+                        let rest = &cluster[idx + c.len_utf8()..];
+                        if rest.is_empty() {
+                            value_follows = true;
+                        } else {
+                            forward.push_str(rest);
+                        }
+                        break;
+                    }
+                    other => forward.push(other),
+                }
+            }
+            if !forward.is_empty() {
+                forwarded.push(format!("-{}", forward));
+            }
+            if value_follows && i + 1 < args.len() {
+                i += 1;
+                forwarded.push(args[i].clone());
+            }
+            i += 1;
+            continue;
+        }
+
+        paths.push(arg.clone());
+        i += 1;
+    }
+
+    (forwarded, paths, show_all, show_long, preserve_order)
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let show_all = args
-        .iter()
-        .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
-
-    // Per `man ls`, the long listing is triggered by `-l` and also implied by
-    // `-g`, `-n`, `-o`, `--full-time`, or GNU `--format=long` / `--format=verbose`.
-    // In any of those cases we preserve permission info as octal. (The proxy
-    // always runs `ls -la` internally, so the perms field is available — this
-    // flag only gates whether the octal column is emitted.)
-    let show_long = args.iter().any(|a| {
-        if a == "--full-time" || a == "--format=long" || a == "--format=verbose" {
-            return true;
-        }
-        if a.starts_with('-') && !a.starts_with("--") {
-            return a.chars().any(|c| matches!(c, 'l' | 'g' | 'n' | 'o'));
-        }
-        false
-    });
-
-    let flags: Vec<&str> = args
-        .iter()
-        .filter(|a| a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
-    let paths: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .collect();
+    let (extra_flags, paths, show_all, show_long, preserve_order) = parse_args(args);
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
     cmd.arg("-la");
-    for flag in &flags {
-        if flag.starts_with("--") {
-            if *flag != "--all" {
-                cmd.arg(flag);
-            }
-        } else {
-            let stripped = flag.trim_start_matches('-');
-            let extra: String = stripped
-                .chars()
-                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
-                .collect();
-            if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
-            }
-        }
+    for flag in &extra_flags {
+        cmd.arg(flag);
     }
 
     // Insert a `--` boundary so a user path that begins with `-` (e.g. a file
@@ -92,7 +157,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &format!("-la {}", target_display),
         |raw| {
-            let (entries, summary, parsed_count) = compact_ls(raw, show_all, show_long);
+            let (entries, summary, parsed_count) =
+                compact_ls_inner(raw, show_all, show_long, preserve_order);
 
             // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
@@ -230,6 +296,36 @@ fn is_dotdir(line: &str) -> bool {
     line.trim().ends_with('.') || line.trim().ends_with("..")
 }
 
+/// A single entry produced from `ls -la` output, kept in encounter order.
+enum Entry {
+    Dir(String, Option<String>),
+    File(String, String, Option<String>),
+}
+
+/// Append one compact entry to `out`.
+fn push_entry(out: &mut String, entry: &Entry) {
+    match entry {
+        Entry::Dir(name, octal) => {
+            if let Some(octal) = octal {
+                out.push_str(octal);
+                out.push_str("  ");
+            }
+            out.push_str(name);
+            out.push_str("/\n");
+        }
+        Entry::File(name, size, octal) => {
+            if let Some(octal) = octal {
+                out.push_str(octal);
+                out.push_str("  ");
+            }
+            out.push_str(name);
+            out.push_str("  ");
+            out.push_str(size);
+            out.push('\n');
+        }
+    }
+}
+
 /// Parse ls -la output into compact format.
 ///
 /// Without `show_long`:
@@ -240,14 +336,24 @@ fn is_dotdir(line: &str) -> bool {
 ///   755  name/        (dirs)
 ///   644  name  size   (files)
 ///
+/// With `preserve_order` (user passed `-t` / `--sort=time`) entries are emitted
+/// in the order `ls` produced them, so the timestamp ordering is not destroyed
+/// by grouping directories first.
+///
 /// Returns (entries, summary, parsed_count) so caller can suppress summary when piped.
 /// parsed_count tracks how many non-header lines were successfully parsed.
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
-fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
+fn compact_ls_inner(
+    raw: &str,
+    show_all: bool,
+    show_long: bool,
+    preserve_order: bool,
+) -> (String, String, usize) {
     use std::collections::HashMap;
 
-    let mut dirs: Vec<(String, Option<String>)> = Vec::new(); // (name, octal_perms)
-    let mut files: Vec<(String, String, Option<String>)> = Vec::new(); // (name, size, octal_perms)
+    let mut ordered: Vec<Entry> = Vec::new();
+    let mut dir_count: usize = 0;
+    let mut file_count: usize = 0;
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
@@ -267,7 +373,7 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
         parsed_count += 1;
 
-        // Filter noise dirs unless -a
+        // Filter noise dirs unless -a / -A
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
             continue;
         }
@@ -281,7 +387,8 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
         };
 
         if file_type == 'd' {
-            dirs.push((name, octal));
+            dir_count += 1;
+            ordered.push(Entry::Dir(name, octal));
         } else {
             // Regular files, symlinks, character/block devices, pipes, sockets
             let ext = if let Some(pos) = name.rfind('.') {
@@ -290,11 +397,12 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size), octal));
+            file_count += 1;
+            ordered.push(Entry::File(name, human_size(size), octal));
         }
     }
 
-    if dirs.is_empty() && files.is_empty() {
+    if ordered.is_empty() {
         if lines_seen > 0 && parsed_count == 0 {
             if dotdirs == lines_seen {
                 // Only . and .. entries (empty directory)
@@ -308,30 +416,27 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 
     let mut entries = String::new();
 
-    // Dirs first, compact
-    for (name, octal) in &dirs {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
+    if preserve_order {
+        // Keep ls's ordering (e.g. `-t` by mtime) intact.
+        for entry in &ordered {
+            push_entry(&mut entries, entry);
         }
-        entries.push_str(name);
-        entries.push_str("/\n");
-    }
-
-    // Files with size
-    for (name, size, octal) in &files {
-        if let Some(octal) = octal {
-            entries.push_str(octal);
-            entries.push_str("  ");
+    } else {
+        // Dirs first, then files with size.
+        for entry in &ordered {
+            if matches!(entry, Entry::Dir(..)) {
+                push_entry(&mut entries, entry);
+            }
         }
-        entries.push_str(name);
-        entries.push_str("  ");
-        entries.push_str(size);
-        entries.push('\n');
+        for entry in &ordered {
+            if matches!(entry, Entry::File(..)) {
+                push_entry(&mut entries, entry);
+            }
+        }
     }
 
     // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
+    let mut summary = format!("\nSummary: {} files, {} dirs", file_count, dir_count);
     if !by_ext.is_empty() {
         let mut ext_counts: Vec<_> = by_ext.iter().collect();
         ext_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -355,6 +460,12 @@ fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shim for the pre-`preserve_order` tests: default compaction groups
+    /// directories before files.
+    fn compact_ls(raw: &str, show_all: bool, show_long: bool) -> (String, String, usize) {
+        compact_ls_inner(raw, show_all, show_long, false)
+    }
 
     #[test]
     fn test_compact_basic() {
@@ -771,5 +882,104 @@ mod tests {
         assert_eq!(parsed_count, 0);
         assert!(entries.is_empty());
         assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_parse_args_almost_all_shows_hidden() {
+        // `-A` / `--almost-all` must reveal hidden noise dirs just like `-a`.
+        let args: Vec<String> = ["-A"].iter().map(|s| s.to_string()).collect();
+        let (_flags, paths, show_all, _long, _order) = parse_args(&args);
+        assert!(show_all, "-A should enable show_all");
+        assert!(paths.is_empty());
+
+        let args: Vec<String> = ["--almost-all"].iter().map(|s| s.to_string()).collect();
+        let (_flags, _paths, show_all, _long, _order) = parse_args(&args);
+        assert!(show_all, "--almost-all should enable show_all");
+    }
+
+    #[test]
+    fn test_almost_all_reveals_noise_dirs() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .vscode\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
+        let (entries, _summary, _) = compact_ls_inner(input, true, false, false);
+        assert!(entries.contains(".git/"), "got: {entries}");
+        assert!(entries.contains(".vscode/"), "got: {entries}");
+        assert!(entries.contains("src/"));
+
+        // Without show_all they stay hidden.
+        let (entries, _summary, _) = compact_ls_inner(input, false, false, false);
+        assert!(!entries.contains(".git/"));
+        assert!(!entries.contains(".vscode/"));
+    }
+
+    #[test]
+    fn test_parse_args_dash_i_attached_is_not_a_path() {
+        let args: Vec<String> = ["-Ihello"].iter().map(|s| s.to_string()).collect();
+        let (flags, paths, _all, _long, _order) = parse_args(&args);
+        assert!(
+            paths.is_empty(),
+            "pattern must not become a path: {paths:?}"
+        );
+        assert_eq!(flags, vec!["-Ihello".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_args_dash_i_separate_consumes_pattern() {
+        let args: Vec<String> = ["-I", "target", "src"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (flags, paths, _all, _long, _order) = parse_args(&args);
+        assert_eq!(flags, vec!["-I".to_string(), "target".to_string()]);
+        assert_eq!(paths, vec!["src".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_args_dash_i_clustered_consumes_pattern() {
+        let args: Vec<String> = ["-lIhello", "src"].iter().map(|s| s.to_string()).collect();
+        let (flags, paths, _all, show_long, _order) = parse_args(&args);
+        assert!(show_long);
+        assert_eq!(flags, vec!["-Ihello".to_string()]);
+        assert_eq!(paths, vec!["src".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_args_sort_time_sets_preserve_order() {
+        let args: Vec<String> = ["-t"].iter().map(|s| s.to_string()).collect();
+        let (flags, _paths, _all, _long, preserve_order) = parse_args(&args);
+        assert!(preserve_order);
+        assert_eq!(flags, vec!["-t".to_string()]);
+
+        let args: Vec<String> = ["--sort=time"].iter().map(|s| s.to_string()).collect();
+        let (_flags, _paths, _all, _long, preserve_order) = parse_args(&args);
+        assert!(preserve_order);
+    }
+
+    #[test]
+    fn test_parse_args_pattern_t_not_mistaken_for_time_sort() {
+        // The `t` inside an -I pattern must not set preserve_order.
+        let args: Vec<String> = ["-Itarget"].iter().map(|s| s.to_string()).collect();
+        let (flags, _paths, _all, _long, preserve_order) = parse_args(&args);
+        assert!(!preserve_order, "-Itarget must not imply -t");
+        assert_eq!(flags, vec!["-Itarget".to_string()]);
+    }
+
+    #[test]
+    fn test_preserve_order_interleaves_dirs_and_files() {
+        // ls produced: dir, file, dir — with -t this exact order must survive.
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 first\n\
+                     -rw-r--r--  1 user  staff  10 Jan  1 12:00 b.txt\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 third\n";
+        let (entries, _summary, _) = compact_ls_inner(input, false, false, true);
+        let lines: Vec<&str> = entries.lines().collect();
+        assert_eq!(lines, vec!["first/", "b.txt  10B", "third/"]);
+
+        // Without the flag, directories are grouped first.
+        let (entries, _summary, _) = compact_ls_inner(input, false, false, false);
+        let lines: Vec<&str> = entries.lines().collect();
+        assert_eq!(lines, vec!["first/", "third/", "b.txt  10B"]);
     }
 }

@@ -333,7 +333,10 @@ impl BlockHandler for CargoTestHandler {
             return Some(s);
         }
 
-        None
+        // `cargo test -- --list` has no `test result:` line. Leaving this
+        // empty makes the agent think the crate has no tests (upstream
+        // rtk#4453). The names are the answer; compile noise stays dropped.
+        format_libtest_listing(raw)
     }
 }
 
@@ -967,6 +970,57 @@ fn filter_cargo_build(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// A libtest `--list` entry: `path::name: test` or `: benchmark`.
+fn is_libtest_list_entry(trimmed: &str) -> bool {
+    trimmed.ends_with(": test") || trimmed.ends_with(": benchmark")
+}
+
+/// A libtest `--list` tally: `1 test, 0 benchmarks`.
+fn is_libtest_list_tally(trimmed: &str) -> bool {
+    let Some((left, right)) = trimmed.split_once(", ") else {
+        return false;
+    };
+    count_word(left, "test", "tests") && count_word(right, "benchmark", "benchmarks")
+}
+
+fn count_word(side: &str, singular: &str, plural: &str) -> bool {
+    let mut parts = side.split_whitespace();
+    let Some(n) = parts.next() else {
+        return false;
+    };
+    let Some(word) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && n.chars().all(|c| c.is_ascii_digit())
+        && (word == singular || word == plural)
+}
+
+/// Keep a `cargo test -- --list` listing. Returns `None` when `raw` is not
+/// one, so a normal run (which has `test result:` lines) is left to the
+/// summary path.
+fn format_libtest_listing(raw: &str) -> Option<String> {
+    let raw = strip_ansi(raw);
+    let mut lines: Vec<String> = Vec::new();
+    let mut saw_listing = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_libtest_list_entry(trimmed) || is_libtest_list_tally(trimmed) {
+            lines.push(trimmed.to_string());
+            saw_listing = true;
+        } else if trimmed.starts_with("Running ") {
+            lines.push(trimmed.to_string());
+        }
+    }
+    if !saw_listing {
+        return None;
+    }
+    Some(format!("{}\n", lines.join("\n")))
+}
+
 /// Aggregated test results for compact display
 #[derive(Debug, Default, Clone)]
 struct AggregatedTestResult {
@@ -1179,6 +1233,12 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
             if build_filtered.starts_with("cargo build:") {
                 return build_filtered.replacen("cargo build:", "cargo test:", 1);
             }
+        }
+
+        // A listing has no `test result:` line. The last-five fallback below
+        // would keep only the tail of a long `--list` (upstream rtk#4453).
+        if let Some(listing) = format_libtest_listing(output) {
+            return listing.trim_end().to_string();
         }
 
         // Fallback: show last meaningful lines
@@ -2495,5 +2555,34 @@ error: could not compile `ctxcrl` (test "repro_compile_fail") due to 1 previous 
         let result = run_block_filter(&mut f, input, 1);
         assert!(result.contains("cargo test:"), "got: {}", result);
         assert!(result.contains("1 errors"), "got: {}", result);
+    }
+
+    /// `cargo test -- --list` has no `test result:` line. The stream filter
+    /// used to return nothing (upstream rtk#4453).
+    #[test]
+    fn test_cargo_test_stream_list_is_not_empty() {
+        let input = "    Finished test [unoptimized + debuginfo] target(s) in 0.01s\n     Running unittests src/lib.rs (target/debug/deps/foo-abc)\n\nok: test\n\n1 test, 0 benchmarks\n0 tests, 0 benchmarks\n";
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(result.contains("ok: test"), "listing name dropped: {result}");
+        assert!(result.contains("1 test, 0 benchmarks"), "tally dropped: {result}");
+        assert!(result.contains("0 tests, 0 benchmarks"), "second harness tally dropped: {result}");
+        assert!(result.contains("Running unittests src/lib.rs"), "target header dropped: {result}");
+        assert!(!result.contains("Finished"), "compile noise must stay dropped: {result}");
+    }
+
+    /// A long listing must not collapse to the last five lines.
+    #[test]
+    fn test_filter_cargo_test_list_keeps_every_name() {
+        let mut input = String::from("    Finished test [unoptimized + debuginfo] target(s) in 0.01s\n     Running unittests src/lib.rs (target/debug/deps/foo-abc)\n\n");
+        for i in 0..8 {
+            input.push_str(&format!("case_{i}: test\n"));
+        }
+        input.push_str("\n8 tests, 0 benchmarks\n");
+        let result = filter_cargo_test(&input);
+        assert!(result.contains("case_0: test"), "head of the listing dropped: {result}");
+        assert!(result.contains("case_7: test"), "tail of the listing dropped: {result}");
+        assert!(result.contains("8 tests, 0 benchmarks"), "tally dropped: {result}");
+        assert!(!result.contains("Finished"), "compile noise must stay dropped: {result}");
     }
 }

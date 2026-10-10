@@ -2687,8 +2687,8 @@ fn collect_rule_findings_depth(
 /// Files read (in order, later files do not override earlier ones — all are merged):
 /// 1. `$PROJECT_ROOT/.claude/settings.json`
 /// 2. `$PROJECT_ROOT/.claude/settings.local.json`
-/// 3. `~/.claude/settings.json`
-/// 4. `~/.claude/settings.local.json`
+/// 3. `$CLAUDE_CONFIG_DIR/settings.json` (defaults to `~/.claude/settings.json`)
+/// 4. `$CLAUDE_CONFIG_DIR/settings.local.json` (defaults to `~/.claude/settings.local.json`)
 ///
 /// A missing file is not applicable. Any other read, parse, or permissions
 /// schema failure is retained so the final gate can forbid auto-Allow (#216).
@@ -2816,12 +2816,26 @@ fn get_settings_paths() -> Vec<PathBuf> {
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
     }
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_JSON));
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
+    if let Some(config_dir) = user_config_dir() {
+        paths.push(config_dir.join(SETTINGS_JSON));
+        paths.push(config_dir.join(SETTINGS_LOCAL_JSON));
     }
 
     paths
+}
+
+/// Resolve the user-scoped Claude Code configuration directory.
+///
+/// `CLAUDE_CONFIG_DIR` overrides the default `~/.claude`, matching Claude
+/// Code's own resolution. An unset (or empty) variable falls back to
+/// `~/.claude`; the project-scoped `.claude` directories are unaffected.
+fn user_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    dirs::home_dir().map(|home| home.join(CLAUDE_DIR))
 }
 
 /// Locate the project root by walking up from CWD looking for a `.git` marker.
@@ -6711,5 +6725,55 @@ mod adversarial_trace {
         std::fs::create_dir_all(nested.join(CLAUDE_DIR)).expect("create nested claude dir");
 
         assert_eq!(find_project_root_from(&nested), Some(root));
+    }
+
+    /// RAII guard for `CLAUDE_CONFIG_DIR` that restores the prior value on
+    /// drop so the process env is left exactly as found.
+    struct ConfigDirGuard {
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl ConfigDirGuard {
+        fn set(value: &std::path::Path) -> Self {
+            let prior = std::env::var_os("CLAUDE_CONFIG_DIR");
+            std::env::set_var("CLAUDE_CONFIG_DIR", value);
+            Self { prior }
+        }
+    }
+
+    impl Drop for ConfigDirGuard {
+        fn drop(&mut self) {
+            match &self.prior {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_overrides_home_settings_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("custom-claude");
+        let _guard = ConfigDirGuard::set(&config_dir);
+
+        let paths = get_settings_paths();
+        assert!(
+            paths.contains(&config_dir.join(SETTINGS_JSON)),
+            "settings.json under CLAUDE_CONFIG_DIR missing: {paths:?}"
+        );
+        assert!(
+            paths.contains(&config_dir.join(SETTINGS_LOCAL_JSON)),
+            "settings.local.json under CLAUDE_CONFIG_DIR missing: {paths:?}"
+        );
+        if let Some(home) = dirs::home_dir() {
+            assert!(
+                !paths.contains(&home.join(CLAUDE_DIR).join(SETTINGS_JSON)),
+                "home .claude settings.json leaked while CLAUDE_CONFIG_DIR was set: {paths:?}"
+            );
+            assert!(
+                !paths.contains(&home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON)),
+                "home .claude settings.local.json leaked while CLAUDE_CONFIG_DIR was set: {paths:?}"
+            );
+        }
     }
 }

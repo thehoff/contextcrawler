@@ -252,6 +252,126 @@ pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
     1
 }
 
+/// Whether the captured output for `mode` still needs to be flushed if the
+/// final child `wait()` is interrupted by a signal.
+///
+/// Only [`FilterMode::CaptureOnly`] reaches that wait with output read into
+/// memory but not yet printed — its caller prints the captured text after
+/// [`run_streaming`] returns. `Buffered` already wrote its filtered text to
+/// stdout before the wait and `Streaming` wrote live through the sink, so
+/// flushing there would duplicate output.
+#[cfg(unix)]
+fn mode_needs_signal_flush(mode: &FilterMode<'_>) -> bool {
+    matches!(mode, FilterMode::CaptureOnly)
+}
+
+/// Captured buffers published for the SIGINT/SIGTERM handler installed
+/// around the final child `wait()` in [`run_streaming_with_sink`].
+///
+/// Holds raw pointers into the still-live `raw_stdout`/`raw_stderr` strings:
+/// no copy is made, and the strings are not mutated between publication and
+/// the end of the wait. The handler may only perform async-signal-safe
+/// operations, so it reads these through the [`CAPTURE_FLUSH`] atomic and
+/// writes them with `write(2)` before `_exit`.
+#[cfg(unix)]
+struct CaptureFlush {
+    stdout: (*const u8, usize),
+    stderr: (*const u8, usize),
+}
+
+#[cfg(unix)]
+static CAPTURE_FLUSH: std::sync::atomic::AtomicPtr<CaptureFlush> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// Exit code to flush-and-exit with when the final wait is interrupted.
+/// `SIGINT` → 130, `SIGTERM` → 143 (128 + signal number), matching the shell
+/// convention used by [`status_to_exit_code`] for signal deaths.
+#[cfg(unix)]
+fn capture_signal_exit_code(sig: libc::c_int) -> i32 {
+    match sig {
+        libc::SIGINT => 130,
+        libc::SIGTERM => 143,
+        other => 128 + other,
+    }
+}
+
+/// Best-effort `write(2)` loop used by the signal handler; short writes
+/// resume, any error (or zero-byte write) aborts the flush. Async-signal-safe.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+unsafe fn write_all_fd(fd: libc::c_int, mut ptr: *const u8, mut len: usize) {
+    while len > 0 {
+        let n = libc::write(fd, ptr as *const libc::c_void, len);
+        if n <= 0 {
+            return;
+        }
+        ptr = ptr.add(n as usize);
+        len -= n as usize;
+    }
+}
+
+/// Flush the published captured output with `write(2)` (async-signal-safe)
+/// and exit. Installed as the SIGINT/SIGTERM handler only for the final child
+/// wait; see [`CaptureFlushGuard`].
+#[cfg(unix)]
+#[allow(unsafe_code)]
+unsafe extern "C" fn capture_flush_signal_handler(sig: libc::c_int) {
+    let p = CAPTURE_FLUSH.load(std::sync::atomic::Ordering::SeqCst);
+    if !p.is_null() {
+        let f = &*p;
+        write_all_fd(libc::STDOUT_FILENO, f.stdout.0, f.stdout.1);
+        write_all_fd(libc::STDERR_FILENO, f.stderr.0, f.stderr.1);
+    }
+    libc::_exit(capture_signal_exit_code(sig));
+}
+
+/// RAII guard installing [`capture_flush_signal_handler`] for SIGINT/SIGTERM
+/// for the duration of the final child wait, restoring the previous handlers
+/// on drop. The flush payload (if any) is published before the handler is
+/// installed and cleared before the handlers are restored.
+#[cfg(unix)]
+struct CaptureFlushGuard {
+    prev_int: libc::sighandler_t,
+    prev_term: libc::sighandler_t,
+}
+
+#[cfg(unix)]
+impl CaptureFlushGuard {
+    #[allow(unsafe_code)]
+    fn install(payload: *mut CaptureFlush) -> Self {
+        CAPTURE_FLUSH.store(payload, std::sync::atomic::Ordering::SeqCst);
+        // nosemgrep: unsafe-block
+        unsafe {
+            Self {
+                prev_int: libc::signal(
+                    libc::SIGINT,
+                    capture_flush_signal_handler as *const () as libc::sighandler_t,
+                ),
+                prev_term: libc::signal(
+                    libc::SIGTERM,
+                    capture_flush_signal_handler as *const () as libc::sighandler_t,
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CaptureFlushGuard {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // Clear before restoring: once the guard's stack frame (and the
+        // strings it points at) is gone the handler must not see a stale
+        // pointer.
+        CAPTURE_FLUSH.store(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
+        // nosemgrep: unsafe-block
+        unsafe {
+            libc::signal(libc::SIGINT, self.prev_int);
+            libc::signal(libc::SIGTERM, self.prev_term);
+        }
+    }
+}
+
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
 pub const RAW_CAP: usize = 10_485_760; // 10 MiB
 
@@ -448,6 +568,12 @@ fn run_streaming_with_sink(
     }
 
     let is_streaming = matches!(stdout_mode, FilterMode::Streaming(_));
+
+    // CaptureOnly leaves the output it buffered in memory at the final wait;
+    // arm the signal flush for it (see `CaptureFlush`). Computed before
+    // `stdout_mode` is moved into the mode dispatch below.
+    #[cfg(unix)]
+    let mode_is_capture_only = mode_needs_signal_flush(&stdout_mode);
 
     let mut child = ChildGuard(cmd.spawn().context("Failed to spawn process")?);
 
@@ -820,7 +946,34 @@ fn run_streaming_with_sink(
         t.join().ok();
     }
 
+    // A captured filter (CaptureOnly) has not printed the output it buffered
+    // yet — the caller prints it once `run_streaming` returns. A ^C/SIGTERM
+    // landing in this final wait would otherwise kill the process with that
+    // output silently dropped. Install a SIGINT/SIGTERM handler for the wait
+    // that flushes the captured bytes and exits 130/143, then restores the
+    // previous handlers. For modes whose output is already written the flush
+    // payload is null, so the handler only exits. See `CaptureFlushGuard`.
+    #[cfg(unix)]
+    let mut capture_flush = CaptureFlush {
+        stdout: (raw_stdout.as_ptr(), raw_stdout.len()),
+        stderr: (raw_stderr.as_ptr(), raw_stderr.len()),
+    };
+    #[cfg(unix)]
+    let _capture_flush_guard = {
+        let payload: *mut CaptureFlush = if mode_is_capture_only {
+            std::ptr::addr_of_mut!(capture_flush)
+        } else {
+            std::ptr::null_mut()
+        };
+        CaptureFlushGuard::install(payload)
+    };
+
     let status = child.0.wait().context("Failed to wait for child")?;
+
+    // The wait is over: restore the previous SIGINT/SIGTERM handlers.
+    #[cfg(unix)]
+    drop(_capture_flush_guard);
+
     let exit_code = status_to_exit_code(status);
     let raw = format!("{}{}", raw_stdout, raw_stderr);
 
@@ -1090,6 +1243,30 @@ pub(crate) mod tests {
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert_eq!(status_to_exit_code(status), 137);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_capture_signal_exit_code() {
+        // Shell convention: 128 + signal number.
+        assert_eq!(capture_signal_exit_code(libc::SIGINT), 130);
+        assert_eq!(capture_signal_exit_code(libc::SIGTERM), 143);
+        assert_eq!(capture_signal_exit_code(libc::SIGHUP), 129);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_mode_needs_signal_flush_only_capture_only() {
+        // Only CaptureOnly has buffered output that has not been printed when
+        // the final wait is reached; the others must not re-emit output.
+        assert!(mode_needs_signal_flush(&FilterMode::CaptureOnly));
+        assert!(!mode_needs_signal_flush(&FilterMode::Passthrough));
+        assert!(!mode_needs_signal_flush(&FilterMode::Buffered(Box::new(
+            |_| String::new()
+        ))));
+        assert!(!mode_needs_signal_flush(&FilterMode::Streaming(Box::new(
+            LineFilter::new(|_| None)
+        ))));
     }
 
     #[test]
@@ -1989,7 +2166,11 @@ pub(crate) mod tests {
         for_each_line(io::Cursor::new(input), |l| got.push(l));
 
         assert_eq!(got.len(), 2);
-        assert_eq!(got[0].len(), MAX_LINE_BYTES, "exact-cap line must be intact");
+        assert_eq!(
+            got[0].len(),
+            MAX_LINE_BYTES,
+            "exact-cap line must be intact"
+        );
         assert_eq!(got[1], "after");
     }
 

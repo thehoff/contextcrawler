@@ -145,7 +145,12 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     if lines.is_empty() {
         ctxcrl.push_str("[docker] 0 images");
         println!("{}", ctxcrl);
-        timer.track("docker images", "contextcrawler docker images", &raw, &ctxcrl);
+        timer.track(
+            "docker images",
+            "contextcrawler docker images",
+            &raw,
+            &ctxcrl,
+        );
         return Ok(0);
     }
 
@@ -194,7 +199,12 @@ fn docker_images(_verbose: u8) -> Result<i32> {
     }
 
     print!("{}", ctxcrl);
-    timer.track("docker images", "contextcrawler docker images", &raw, &ctxcrl);
+    timer.track(
+        "docker images",
+        "contextcrawler docker images",
+        &raw,
+        &ctxcrl,
+    );
     Ok(0)
 }
 
@@ -546,7 +556,10 @@ pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     // DOCKER_CONTEXT / DOCKER_CLI_PLUGIN_EXTRA_DIRS stripped so a tainted
     // parent env can't redirect docker to an attacker daemon or load attacker
     // plugins.
-    let str_args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let str_args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     if let Err(msg) = check_forbidden_docker_args(&str_args) {
         eprintln!("{}", msg);
         return Ok(2);
@@ -589,7 +602,12 @@ pub fn run_compose_ps(verbose: u8) -> Result<i32> {
 
     let ctxcrl = format_compose_ps(&structured);
     println!("{}", ctxcrl);
-    timer.track("docker compose ps", "contextcrawler docker compose ps", &raw, &ctxcrl);
+    timer.track(
+        "docker compose ps",
+        "contextcrawler docker compose ps",
+        &raw,
+        &ctxcrl,
+    );
     Ok(0)
 }
 
@@ -651,12 +669,7 @@ pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("{}", msg);
         return Ok(2);
     }
-    crate::core::runner::run_passthrough_cmd(
-        secure_docker_command(),
-        "docker",
-        &combined,
-        verbose,
-    )
+    crate::core::runner::run_passthrough_cmd(secure_docker_command(), "docker", &combined, verbose)
 }
 
 pub fn run_kubectl_get(args: &[String], verbose: u8) -> Result<i32> {
@@ -682,12 +695,23 @@ fn kubectl_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
 }
 
 fn kubectl_get_requests_raw_output(args: &[String]) -> bool {
+    // Flags that switch `kubectl get` to a format we must not compact away:
+    // explicit output formats, watch mode, label/kind columns, and headerless
+    // tables. `--no-headers` still prints the raw table, so keep it verbatim.
+    const RAW_OUTPUT_FLAGS: [&str; 7] = [
+        "-o",
+        "--output",
+        "-w",
+        "--watch",
+        "--show-labels",
+        "--show-kind",
+        "--no-headers",
+    ];
     args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "-o" | "--output" | "-w" | "--watch" | "--show-labels" | "--show-kind"
-        ) || arg.starts_with("-o")
+        RAW_OUTPUT_FLAGS.contains(&arg.as_str())
+            || arg.starts_with("-o")
             || arg.starts_with("--output=")
+            || arg.starts_with("--no-headers=")
     })
 }
 
@@ -703,7 +727,10 @@ pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     // and spawn with KUBECONFIG / KUBE_EDITOR / etc. stripped so a tainted
     // parent env can't redirect every kubectl call to an attacker apiserver
     // or hijack `kubectl edit`.
-    let str_args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let str_args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     if let Err(msg) = check_forbidden_kubectl_args(&str_args) {
         eprintln!("{}", msg);
         return Ok(2);
@@ -851,7 +878,11 @@ api-1  | Connected to database";
     #[test]
     fn test_kubectl_get_target_pods_aliases() {
         for resource in ["po", "pod", "pods"] {
-            let args = vec![resource.to_string(), "-n".to_string(), "default".to_string()];
+            let args = vec![
+                resource.to_string(),
+                "-n".to_string(),
+                "default".to_string(),
+            ];
 
             assert_eq!(
                 kubectl_get_target(&args),
@@ -894,6 +925,27 @@ api-1  | Connected to database";
                 kubectl_get_target(&args),
                 None,
                 "should pass through {output_flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kubectl_get_target_respects_no_headers() {
+        // `--no-headers` asks for the raw table, so it must bypass compaction
+        // and pass through to kubectl unchanged.
+        for args in [
+            vec!["pods".to_string(), "--no-headers".to_string()],
+            vec!["pods".to_string(), "--no-headers=true".to_string()],
+            vec![
+                "services".to_string(),
+                "-A".to_string(),
+                "--no-headers".to_string(),
+            ],
+        ] {
+            assert_eq!(
+                kubectl_get_target(&args),
+                None,
+                "should pass through --no-headers in {args:?}"
             );
         }
     }

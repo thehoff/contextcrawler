@@ -59,6 +59,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     Ok(exit_code)
 }
 
+/// Human-readable command prefix for pip-family invocations. `base_cmd`
+/// already names the tool (`pip`), so only `uv` needs the extra `pip` word to
+/// form the real command (`uv pip`); otherwise the prefix stays `pip` alone.
+fn pip_display_prefix(base_cmd: &str) -> &'static str {
+    if base_cmd == "uv" {
+        "uv pip"
+    } else {
+        "pip"
+    }
+}
+
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = secure_python_command(base_cmd);
 
@@ -73,11 +84,14 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip list --format=json", base_cmd);
+        eprintln!(
+            "Running: {} list --format=json",
+            pip_display_prefix(base_cmd)
+        );
     }
 
     let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip list", base_cmd))?;
+        .with_context(|| format!("Failed to run {} list", pip_display_prefix(base_cmd)))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -107,11 +121,18 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip list --outdated --format=json", base_cmd);
+        eprintln!(
+            "Running: {} list --outdated --format=json",
+            pip_display_prefix(base_cmd)
+        );
     }
 
-    let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip list --outdated", base_cmd))?;
+    let result = exec_capture(&mut cmd).with_context(|| {
+        format!(
+            "Failed to run {} list --outdated",
+            pip_display_prefix(base_cmd)
+        )
+    })?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -137,11 +158,20 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
     }
 
     if verbose > 0 {
-        eprintln!("Running: {} pip {}", base_cmd, args.join(" "));
+        eprintln!(
+            "Running: {} {}",
+            pip_display_prefix(base_cmd),
+            args.join(" ")
+        );
     }
 
-    let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run {} pip {}", base_cmd, args.join(" ")))?;
+    let result = exec_capture(&mut cmd).with_context(|| {
+        format!(
+            "Failed to run {} {}",
+            pip_display_prefix(base_cmd),
+            args.join(" ")
+        )
+    })?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -234,6 +264,15 @@ fn filter_pip_outdated(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pip_display_prefix_prints_tool_name_once() {
+        // `base_cmd` already names pip, so the rendered command must not
+        // become "pip pip list".
+        assert_eq!(pip_display_prefix("pip"), "pip");
+        // uv wraps pip, so the real command is "uv pip".
+        assert_eq!(pip_display_prefix("uv"), "uv pip");
+    }
 
     #[test]
     fn test_filter_pip_list() {

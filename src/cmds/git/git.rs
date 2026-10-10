@@ -359,7 +359,12 @@ fn run_diff(
     let mut final_output = result.stdout.clone();
     if !diff_result.stdout.is_empty() {
         println!("\nChanges:");
-        let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
+        let compacted = if diff_wants_word_level(args) {
+            // Word-level markers would be torn by hunk compaction — pass raw.
+            diff_result.stdout.clone()
+        } else {
+            compact_diff(&diff_result.stdout, max_lines.unwrap_or(500))
+        };
         println!("{}", compacted);
         final_output.push_str("\nChanges:\n");
         final_output.push_str(&compacted);
@@ -516,7 +521,12 @@ fn run_show(
         if verbose > 0 {
             println!("\nChanges:");
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
+        let compacted = if diff_wants_word_level(args) {
+            // Word-level markers would be torn by hunk compaction — pass raw.
+            diff_text.to_string()
+        } else {
+            compact_diff(diff_text, max_lines.unwrap_or(500))
+        };
         println!("{}", compacted);
         final_output.push_str(&format!("\n{}", compacted));
     }
@@ -544,59 +554,71 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut in_hunk = false;
     let mut hunk_shown = 0;
     let mut hunk_skipped = 0usize;
+    // Body lines the current hunk's @@ header authorises. Drawn down by every
+    // body line (add / del / context); once zero the hunk is over even if more
+    // body lines follow. A new @@ or `diff --` header starts a fresh hunk.
+    let mut hunk_remaining = 0usize;
     let max_hunk_lines = 100;
     let mut was_truncated = false;
 
     for line in diff.lines() {
-        if line.starts_with("diff --git") {
-            // Flush hunk truncation before starting a new file
+        if line.starts_with("diff --") {
+            // `diff --git` (normal), `diff --cc` and `diff --combined` (merge)
+            // all open a new section and reset hunk state.
             if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+                result.push(lines_truncated_notice(hunk_skipped));
                 was_truncated = true;
                 hunk_skipped = 0;
             }
             if !current_file.is_empty() && (added > 0 || removed > 0) {
                 result.push(format!("  +{} -{}", added, removed));
             }
-            current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
+            current_file = diff_header_label(line);
             result.push(format!("\n{}", current_file));
             added = 0;
             removed = 0;
             in_hunk = false;
             hunk_shown = 0;
+            hunk_remaining = 0;
         } else if line.starts_with("@@") {
             // Flush hunk truncation before starting a new hunk
             if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+                result.push(lines_truncated_notice(hunk_skipped));
                 was_truncated = true;
                 hunk_skipped = 0;
             }
             in_hunk = true;
             hunk_shown = 0;
-            // Preserve the full unified diff hunk header, including trailing
-            // function / symbol context after the second @@ marker.
-            result.push(format!("  {}", line));
-        } else if in_hunk {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                added += 1;
+            hunk_remaining = hunk_body_budget(line);
+            // Hunk headers stay at column 0 — keep the full unified-diff header
+            // including any trailing function/symbol context.
+            result.push(line.to_string());
+        } else if in_hunk && hunk_remaining > 0 {
+            if line.starts_with('\\') {
+                // "\ No newline at end of file" — not a body line and not
+                // counted in the @@ ranges; drop it, budget untouched.
+            } else if line.starts_with('+') || line.starts_with('-') {
+                // Inside a hunk `++` / `--` (and even `+++` / `---`) are content,
+                // not file headers — file headers only appear before the first
+                // @@ of the section (where `in_hunk` is still false).
+                if line.starts_with('+') {
+                    added += 1;
+                } else {
+                    removed += 1;
+                }
+                hunk_remaining -= 1;
                 if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 } else {
                     hunk_skipped += 1;
                 }
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                removed += 1;
-                if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                } else {
-                    hunk_skipped += 1;
-                }
-            } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
-                if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
+            } else {
+                // Context line: leading context (before any change) carries no
+                // signal and is dropped; interior context is kept.
+                hunk_remaining -= 1;
+                if hunk_shown > 0 && hunk_shown < max_hunk_lines {
+                    result.push(line.to_string());
                     hunk_shown += 1;
                 }
             }
@@ -611,7 +633,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
 
     // Flush last hunk
     if hunk_skipped > 0 {
-        result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+        result.push(lines_truncated_notice(hunk_skipped));
         was_truncated = true;
     }
 
@@ -626,6 +648,193 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     result.join("\n")
 }
 
+/// Truncation notice with correct singular/plural: `1 line truncated`, not
+/// `1 lines truncated`.
+fn lines_truncated_notice(n: usize) -> String {
+    format!(
+        "  ... ({} line{} truncated)",
+        n,
+        if n == 1 { "" } else { "s" }
+    )
+}
+
+/// Number of body lines a hunk header authorises: the largest range count in
+/// the header. Combined diffs carry more than two ranges, so the max is taken
+/// (`@@@ -1,2 -3,4 +5,6 @@@` → 6). A range without a `,count` counts as 1.
+fn hunk_body_budget(header: &str) -> usize {
+    let after = header.trim_start_matches('@');
+    let spec = match after.find("@@") {
+        Some(i) => &after[..i],
+        None => after,
+    };
+    let mut max = 0usize;
+    for token in spec.split_whitespace() {
+        if let Some(rest) = token.strip_prefix('-').or_else(|| token.strip_prefix('+')) {
+            let count = match rest.split_once(',') {
+                Some((_, c)) => c.trim().parse::<usize>().unwrap_or(1),
+                None => 1,
+            };
+            max = max.max(count);
+        }
+    }
+    max.max(1)
+}
+
+/// File label for a `diff --…` header, decoded from git's C-style quoting.
+///
+/// Combined diffs (`diff --cc` / `diff --combined`) hold a single path and must
+/// not be split on ` b/`. Normal `diff --git a/x b/y` headers take the
+/// destination (second) token.
+fn diff_header_label(line: &str) -> String {
+    let rest = line
+        .strip_prefix("diff --git ")
+        .or_else(|| line.strip_prefix("diff --cc "))
+        .or_else(|| line.strip_prefix("diff --combined "));
+    match rest {
+        Some(rest) => {
+            let token = quoted_or_bare_tokens(rest).pop().unwrap_or_default();
+            decode_git_path(&token)
+        }
+        None => "unknown".to_string(),
+    }
+}
+
+/// Split a header remainder into whitespace-separated tokens, honouring git's
+/// surrounding double quotes for paths with special characters. Escapes inside
+/// quotes are preserved for [`decode_git_path`] to resolve.
+fn quoted_or_bare_tokens(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    let mut has_token = false;
+    for c in s.chars() {
+        if escaped {
+            current.push('\\');
+            current.push(c);
+            escaped = false;
+            has_token = true;
+            continue;
+        }
+        if in_quotes {
+            match c {
+                '\\' => escaped = true,
+                '"' => in_quotes = false,
+                _ => current.push(c),
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_quotes = true;
+                has_token = true;
+            }
+            ' ' | '\t' => {
+                if has_token {
+                    tokens.push(std::mem::take(&mut current));
+                    has_token = false;
+                }
+            }
+            _ => {
+                current.push(c);
+                has_token = true;
+            }
+        }
+    }
+    if has_token {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Decode a git C-style quoted path (`"a/weird\040name"` → `a/weird name`),
+/// including the octal escapes git uses for non-printable bytes. Input without
+/// surrounding quotes is returned unchanged apart from escape resolution.
+fn decode_git_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('"')
+        .and_then(|r| r.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('a') => out.push('\u{07}'),
+            Some('b') => out.push('\u{08}'),
+            Some('f') => out.push('\u{0C}'),
+            Some('v') => out.push('\u{0B}'),
+            Some(d) if matches!(d, '0'..='7') => {
+                let mut oct = String::new();
+                oct.push(d);
+                while oct.len() < 3 {
+                    match chars.peek() {
+                        Some(&n) if matches!(n, '0'..='7') => {
+                            oct.push(n);
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+                if let Ok(v) = u32::from_str_radix(&oct, 8) {
+                    if let Some(ch) = char::from_u32(v) {
+                        out.push(ch);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Word-level diff modes reflow content into `{+ +}` / `[- -]` (or coloured)
+/// markers where line-based hunk compaction is meaningless and would tear the
+/// markers apart. Detect them so callers pass the diff through raw.
+fn diff_wants_word_level(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg == "--word-diff"
+            || arg.starts_with("--word-diff=")
+            || arg.starts_with("--word-diff-regex")
+            || arg == "--color-words"
+            || arg.starts_with("--color-words=")
+    })
+}
+
+/// Run a prepared `git log` command, honouring `--stdin`.
+///
+/// `exec_capture` nulls the child's stdin, so `git log --stdin` would see EOF
+/// and silently fall back to HEAD. When the token is present, spawn with the
+/// process stdin inherited instead.
+fn capture_git_log(cmd: &mut Command, args: &[String]) -> Result<CaptureResult> {
+    if args.iter().any(|a| a == "--stdin") {
+        cmd.stdin(Stdio::inherit());
+        let output = cmd.output().context("Failed to run git log")?;
+        Ok(CaptureResult {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: exit_code_from_status(&output.status, "git log"),
+            truncated_stdout: false,
+            truncated_stderr: false,
+        })
+    } else {
+        exec_capture(cmd).context("Failed to run git log")
+    }
+}
+
 fn run_log(
     args: &[String],
     _max_lines: Option<usize>,
@@ -638,7 +847,31 @@ fn run_log(
         let mut cmd = git_cmd(global_args);
         cmd.arg("log");
         cmd.args(args);
-        let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+        let result = capture_git_log(&mut cmd, args)?;
+        print!("{}", result.stdout);
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        let original_cmd = if args.is_empty() {
+            "git log".to_string()
+        } else {
+            format!("git log {}", args.join(" "))
+        };
+        timer.track_passthrough(&original_cmd, &format!("contextcrawler {}", original_cmd));
+        return Ok(result.exit_code);
+    }
+
+    // Patch-producing invocations (`git log -p`, `--patch`, `-u`,
+    // `--patch-with-raw`, `--patch-with-stat`) must not be forced through the
+    // compact pretty-format + `---CTXCRL-END---` injection: the injected
+    // format would swallow the patch hunks entirely. When a patch flag appears
+    // as its own token, run the user's exact invocation and hand git's
+    // stdout/stderr/exit code through untouched.
+    if log_args_have_patch_flag(args) {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("log");
+        cmd.args(args);
+        let result = capture_git_log(&mut cmd, args)?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);
@@ -656,15 +889,13 @@ fn run_log(
     cmd.arg("log");
 
     // Check if user provided format flags
-    let has_format_flag = args.iter().any(|arg| {
-        arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
-    });
+    let has_format_flag = log_has_format_flag(args);
 
     // Apply CTXCRL defaults only if user didn't specify them
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
     if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
+        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---CTXCRL-END---"]);
     }
 
     // Determine limit: respect user's explicit -N flag, use sensible defaults
@@ -685,6 +916,12 @@ fn run_log(
         (10, false)
     };
 
+    // The default `-10` was ours, not the user's: say so on stderr (never for a
+    // user-supplied -n / --max-count / -N, which the cap does not affect).
+    if log_injects_default_limit(args) {
+        eprintln!("git log: history capped at 10 commits; pass -n to raise the limit");
+    }
+
     if should_inject_no_merges(args, user_set_limit) {
         cmd.arg("--no-merges");
     }
@@ -694,7 +931,7 @@ fn run_log(
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git log")?;
+    let result = capture_git_log(&mut cmd, args)?;
 
     if !result.success() {
         eprintln!("{}", result.stderr);
@@ -741,6 +978,66 @@ fn run_log(
 /// Returns `true` when the filter produced no structural change.
 fn log_run_is_passthrough(raw: &str, filtered: &str) -> bool {
     raw.trim_end() == filtered.trim_end()
+}
+
+/// True when the user supplied their own `git log` output format
+/// (`--oneline` / `--pretty` / `--format`), so CTXCRL must not inject its own
+/// pretty-format.
+fn log_has_format_flag(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
+    })
+}
+
+/// True when run_log will inject its own default `-10` cap: the user supplied
+/// neither an explicit limit (`-N` / `-n` / `--max-count`) nor a format flag.
+/// Mirrors the message emitted alongside the injected cap.
+fn log_injects_default_limit(args: &[String]) -> bool {
+    parse_user_limit(args).is_none() && !log_has_format_flag(args)
+}
+
+/// Detects a patch-producing `git log` flag appearing as its own token.
+///
+/// `-p` / `-u` are ambiguous: they are also plausible *values* for options
+/// that consume the following argument (`--grep -p`, `-S -p`, `--author -p`,
+/// `-n -p`, `--pretty -p`, …). Those must not be mistaken for a patch flag, so
+/// the scan skips the token after any such option. Attached forms
+/// (`--grep=-p`, `--max-count=-p`) never match because they are not the bare
+/// token — only an exact `-p` / `-u` / `--patch` / … counts.
+fn log_args_have_patch_flag(args: &[String]) -> bool {
+    const CONSUMES_NEXT: &[&str] = &[
+        "--grep",
+        "-S",
+        "-G",
+        "--author",
+        "--committer",
+        "-n",
+        "--max-count",
+        "--skip",
+        "--pretty",
+        "--format",
+    ];
+    const PATCH_FLAGS: &[&str] = &[
+        "-p",
+        "-u",
+        "--patch",
+        "--patch-with-raw",
+        "--patch-with-stat",
+    ];
+
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if CONSUMES_NEXT.contains(&arg.as_str()) {
+            skip_next = true;
+        } else if PATCH_FLAGS.contains(&arg.as_str()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -817,7 +1114,8 @@ pub(crate) fn filter_log_output(
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
     // When user specified their own format (--oneline, --pretty, --format),
-    // CTXCRL did not inject ---END--- markers. Use simple line-based truncation.
+    // CTXCRL did not inject ---CTXCRL-END--- markers. Use simple line-based
+    // truncation.
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
@@ -829,8 +1127,22 @@ pub(crate) fn filter_log_output(
             .join("\n");
     }
 
-    // CTXCRL injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
+    // CTXCRL injected format: split output into commit blocks separated by the
+    // sentinel. Split on the exact ---CTXCRL-END--- *line* only, so a body that
+    // merely contains that text (or the old ---END--- substring) is never torn.
+    let mut commits: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in output.lines() {
+        if line == "---CTXCRL-END---" {
+            commits.push(std::mem::take(&mut current));
+        } else {
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(line);
+        }
+    }
+    commits.push(current);
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
     let mut result = Vec::new();
@@ -1327,6 +1639,12 @@ fn commit_compact_line(first_line: Option<&str>) -> String {
     "ok".to_string()
 }
 
+/// Everything in `git commit`'s stdout after the first line — commit-hook
+/// output (pre-commit, commit-msg, post-commit) that run_commit must not drop.
+fn commit_stdout_remainder(stdout: &str) -> &str {
+    stdout.split_once('\n').map(|(_, r)| r).unwrap_or("")
+}
+
 fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1351,11 +1669,21 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         println!("{}", compact);
 
+        // Keep git's remaining stdout — commit hooks (pre-commit, commit-msg,
+        // post-commit) print there, and collapsing to the first line dropped it.
+        let remainder = commit_stdout_remainder(&stdout);
+        let mut final_output = compact.clone();
+        if !remainder.trim().is_empty() {
+            println!("{}", remainder);
+            final_output.push('\n');
+            final_output.push_str(remainder);
+        }
+
         timer.track(
             &original_cmd,
             "contextcrawler git commit",
             &raw_output,
-            &compact,
+            &final_output,
         );
     } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
         println!("ok (nothing to commit)");
@@ -1861,13 +2189,24 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
 }
 
 /// Format status message for stash operations.
-/// - For create operations (push/save): checks for "No local changes"
-/// - For other operations: uses "ok stash <subcommand>" format
+///
+/// The process exit code is authoritative, not git's English wording. For
+/// create operations (push/save) an exit-0 run with empty stdout means git had
+/// nothing to stash — relying on the phrase "No local changes" would misread a
+/// localized message (non-empty stdout on exit 0) as a successful stash.
+/// - create ops: exit 0 + empty stdout → "ok (nothing to stash)", else "ok stashed"
+/// - other ops: "ok stash <subcommand>"
+/// - any non-zero exit: reported as a failure regardless of subcommand
 fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
+    if result.exit_code != 0 {
+        return match subcommand {
+            Some(sub) => format!("stash {} failed", sub),
+            None => "stash failed".to_string(),
+        };
+    }
     match subcommand {
         None | Some("push") | Some("save") => {
-            // Create operations check for "no local changes"
-            if result.stdout.contains("No local changes") {
+            if result.stdout.trim().is_empty() {
                 "ok (nothing to stash)".to_string()
             } else {
                 "ok stashed".to_string()
@@ -1975,7 +2314,12 @@ fn run_stash(
                 println!("{}", msg);
                 msg.to_string()
             } else {
-                let compacted = compact_diff(&result.stdout, 100);
+                let compacted = if diff_wants_word_level(args) {
+                    // Word-level markers would be torn by hunk compaction.
+                    result.stdout.clone()
+                } else {
+                    compact_diff(&result.stdout, 100)
+                };
                 println!("{}", compacted);
                 compacted
             };
@@ -3232,7 +3576,7 @@ A  added.rs
 
     #[test]
     fn test_filter_log_output() {
-        let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
+        let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---CTXCRL-END---\ndef5678 Another commit (1 week ago) <other>\n\n---CTXCRL-END---\n";
         let result = filter_log_output(output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
@@ -3242,7 +3586,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output_with_body() {
         // Commit with body: first non-trailer body line should appear indented
-        let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
+        let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---CTXCRL-END---\ndef5678 fix: typo (1 day ago) <other>\n\n---CTXCRL-END---\n";
         let result = filter_log_output(output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("BREAKING CHANGE: removed old API"));
@@ -3256,7 +3600,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output_skips_trailers() {
         // Body with only trailers should not produce a body line
-        let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
+        let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---CTXCRL-END---\n";
         let result = filter_log_output(output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(!result.contains("Signed-off-by:"));
@@ -3276,7 +3620,12 @@ A  added.rs
     #[test]
     fn test_filter_log_output_cap_lines() {
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .map(|i| {
+                format!(
+                    "hash{} message {} (1 day ago) <author>\n\n---CTXCRL-END---",
+                    i, i
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false, false);
@@ -3287,7 +3636,12 @@ A  added.rs
     fn test_filter_log_output_user_limit_no_cap() {
         // When user explicitly passes -N, all N lines should be returned (no re-truncation)
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
+            .map(|i| {
+                format!(
+                    "hash{} message {} (1 day ago) <author>\n\n---CTXCRL-END---",
+                    i, i
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 20, true, false);
@@ -3504,13 +3858,13 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     #[test]
     fn test_log_plain_format_is_tracked() {
-        // Plain `git log`: CTXCRL injects %b + ---END---; the filter strips
+        // Plain `git log`: CTXCRL injects %b + ---CTXCRL-END---; the filter strips
         // commit bodies and trailers. Real work → must be tracked.
         let raw = "abc1234 feat: add feature (2 days ago) <author>\n\
                    BREAKING CHANGE: removed old API\n\
                    Signed-off-by: Author <a@b.com>\n\
-                   ---END---\n\
-                   def5678 fix: typo (1 day ago) <other>\n\n---END---\n";
+                   ---CTXCRL-END---\n\
+                   def5678 fix: typo (1 day ago) <other>\n\n---CTXCRL-END---\n";
         let filtered = filter_log_output(raw, 10, false, false);
         assert!(
             !log_run_is_passthrough(raw, &filtered),
@@ -3769,7 +4123,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .collect::<Vec<_>>()
             .join("\n");
         let output = format!(
-            "abc1234 feat: big change (1 day ago) <author>\n{}\n---END---\n",
+            "abc1234 feat: big change (1 day ago) <author>\n{}\n---CTXCRL-END---\n",
             body_lines
         );
         let result = filter_log_output(&output, 10, false, false);
@@ -3897,5 +4251,336 @@ To https://github.com/foo/bar.git
             input_tokens,
             output_tokens
         );
+    }
+
+    // ----- compact_diff fidelity: column-0 bodies, @@ budgets, combined
+    // diffs, quoted paths, word-level passthrough, singular notices -----
+
+    #[test]
+    fn test_compact_diff_hunk_body_and_header_at_column_zero() {
+        let diff =
+            "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,2 +1,3 @@\n ctx\n+added\n";
+        let result = compact_diff(diff, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(
+            lines.iter().any(|l| *l == "+added"),
+            "hunk body must stay at column 0:\n{result}"
+        );
+        assert!(
+            lines.iter().any(|l| *l == "@@ -1,2 +1,3 @@"),
+            "hunk header must stay at column 0:\n{result}"
+        );
+        assert!(
+            !result.contains("  +added"),
+            "hunk body must not be indented:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_honors_hunk_length() {
+        // Header authorises a single body line; the stray extra add belongs to
+        // no hunk and must not be emitted.
+        let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n+only\n+stray\n";
+        let result = compact_diff(diff, 100);
+        assert!(
+            result.contains("+only"),
+            "declared line must show:\n{result}"
+        );
+        assert!(
+            !result.contains("+stray"),
+            "line beyond the @@ length must not show:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_combined_header_keeps_whole_path() {
+        // `diff --cc` must not be split on ` b/`; the quoted label keeps the
+        // whole path (quoted because it contains a space, as git would emit).
+        let diff = "diff --cc \"path b/merged.rs\"\nindex 1,2..3,4\n@@@ -1,2 -1,2 +1,3 @@@\n  ctx\n+ merged\n";
+        let result = compact_diff(diff, 100);
+        assert!(
+            result.contains("path b/merged.rs"),
+            "combined label must be whole:\n{result}"
+        );
+        assert!(
+            result.contains("+ merged"),
+            "combined body must show:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_keeps_plusplus_minusminus_inside_hunk() {
+        // `---` / `+++` after the first @@ are content, not file headers.
+        let diff = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n@@ -1,2 +1,2 @@\n--- old content\n+++ new content\n";
+        let result = compact_diff(diff, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(
+            lines.iter().any(|l| *l == "--- old content"),
+            "`---` inside a hunk must be kept as content:\n{result}"
+        );
+        assert!(
+            lines.iter().any(|l| *l == "+++ new content"),
+            "`+++` inside a hunk must be kept as content:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_decodes_quoted_path() {
+        let diff = "diff --git \"a/weird\\040name.txt\" \"b/weird\\040name.txt\"\n--- \"a/weird\\040name.txt\"\n+++ \"b/weird\\040name.txt\"\n@@ -1 +1 @@\n-old\n+new\n";
+        let result = compact_diff(diff, 100);
+        assert!(
+            result.contains("b/weird name.txt"),
+            "quoted path must be decoded:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_singular_truncation_notice() {
+        let mut diff =
+            String::from("diff --git a/l.rs b/l.rs\n--- a/l.rs\n+++ b/l.rs\n@@ -1,101 +1,101 @@\n");
+        for i in 0..101 {
+            diff.push_str(&format!("+line {}\n", i));
+        }
+        let result = compact_diff(&diff, 500);
+        assert!(
+            result.contains("1 line truncated"),
+            "singular notice expected:\n{result}"
+        );
+        assert!(
+            !result.contains("1 lines truncated"),
+            "must not pluralize a single line:\n{result}"
+        );
+    }
+
+    #[test]
+    fn test_hunk_body_budget() {
+        assert_eq!(hunk_body_budget("@@ -1 +1 @@"), 1);
+        assert_eq!(hunk_body_budget("@@ -1,3 +1,4 @@ fn f()"), 4);
+        assert_eq!(hunk_body_budget("@@@ -1,2 -3,4 +5,6 @@@"), 6);
+        assert_eq!(hunk_body_budget("@@ -1,0 +1,5 @@"), 5);
+    }
+
+    #[test]
+    fn test_decode_git_path() {
+        assert_eq!(decode_git_path("b/plain.txt"), "b/plain.txt");
+        assert_eq!(decode_git_path("\"b/weird\\040name\""), "b/weird name");
+        assert_eq!(
+            decode_git_path("\"b/tab\\tand\\nnewline\""),
+            "b/tab\tand\nnewline"
+        );
+    }
+
+    #[test]
+    fn test_diff_header_label() {
+        assert_eq!(diff_header_label("diff --git a/x.rs b/x.rs"), "b/x.rs");
+        assert_eq!(diff_header_label("diff --cc merged.rs"), "merged.rs");
+        assert_eq!(diff_header_label("diff --combined merged.rs"), "merged.rs");
+        assert_eq!(
+            diff_header_label("diff --cc \"dir b/merged.rs\""),
+            "dir b/merged.rs"
+        );
+        assert_eq!(
+            diff_header_label("diff --git \"a/a b.rs\" \"b/a b.rs\""),
+            "b/a b.rs"
+        );
+    }
+
+    #[test]
+    fn test_diff_wants_word_level_detection() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(diff_wants_word_level(&s(&["--word-diff"])));
+        assert!(diff_wants_word_level(&s(&["--word-diff=porcelain"])));
+        assert!(diff_wants_word_level(&s(&["--word-diff-regex=[a-z]"])));
+        assert!(diff_wants_word_level(&s(&["--color-words"])));
+        assert!(diff_wants_word_level(&s(&["--color-words=."])));
+        assert!(!diff_wants_word_level(&s(&["-p"])));
+        assert!(!diff_wants_word_level(&s(&["--stat"])));
+    }
+
+    // ----- git log: patch-flag detection (own token vs. option value) -----
+
+    #[test]
+    fn test_log_args_have_patch_flag_detection() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(log_args_have_patch_flag(&s(&["-p"])));
+        assert!(log_args_have_patch_flag(&s(&["--patch"])));
+        assert!(log_args_have_patch_flag(&s(&["-u"])));
+        assert!(log_args_have_patch_flag(&s(&["--patch-with-raw"])));
+        assert!(log_args_have_patch_flag(&s(&["--patch-with-stat"])));
+        assert!(!log_args_have_patch_flag(&s(&["--oneline"])));
+        assert!(!log_args_have_patch_flag(&s(&[])));
+    }
+
+    #[test]
+    fn test_log_args_patch_flag_not_an_option_value() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(!log_args_have_patch_flag(&s(&["--grep", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["-S", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["-G", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["--author", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["--committer", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["-n", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["--max-count", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["--skip", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["--pretty", "-p"])));
+        assert!(!log_args_have_patch_flag(&s(&["--format", "-p"])));
+        // attached forms are never the bare token
+        assert!(!log_args_have_patch_flag(&s(&["--grep=-p"])));
+        // a real patch flag after a consuming option is still caught
+        assert!(log_args_have_patch_flag(&s(&["--grep", "fix", "-p"])));
+    }
+
+    #[test]
+    fn test_log_injects_default_limit_condition() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(log_injects_default_limit(&s(&[])));
+        assert!(!log_injects_default_limit(&s(&["-n", "20"])));
+        assert!(!log_injects_default_limit(&s(&["-20"])));
+        assert!(!log_injects_default_limit(&s(&["--max-count=5"])));
+        assert!(!log_injects_default_limit(&s(&["--oneline"])));
+        assert!(!log_injects_default_limit(&s(&["--pretty=format:%H"])));
+    }
+
+    #[test]
+    fn test_log_has_format_flag() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(log_has_format_flag(&s(&["--oneline"])));
+        assert!(log_has_format_flag(&s(&["--pretty=format:%H"])));
+        assert!(log_has_format_flag(&s(&["--format=%H"])));
+        assert!(!log_has_format_flag(&s(&["-p"])));
+    }
+
+    /// Integration: `git log -p` must reach git with the patch flag intact
+    /// (the raw-passthrough branch) rather than being rewritten by the injected
+    /// pretty-format. Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore] // Integration test: requires the git binary
+    fn test_run_log_patch_passthrough_integration() {
+        let dir = std::env::temp_dir().join(format!("ctxcrl_log_patch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .expect("git should run")
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "second"]);
+
+        // Must not error or emit the compact header; git's patch stays whole.
+        let code = run_log(&["-p".to_string()], None, 0, &[]).expect("run_log -p");
+        assert_eq!(code, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_filter_log_output_keeps_body_with_legacy_end_marker() {
+        // A commit body containing the old ---END--- text must survive intact:
+        // the injected/split marker is now ---CTXCRL-END---.
+        let output = "abc1234 feat (1 day ago) <a>\nbody ---END--- text\n---CTXCRL-END---\ndef5678 fix (1 day ago) <b>\n\n---CTXCRL-END---\n";
+        let result = filter_log_output(output, 10, false, false);
+        assert!(result.contains("abc1234"));
+        assert!(result.contains("body ---END--- text"));
+        assert!(result.contains("def5678"));
+    }
+
+    #[test]
+    fn test_filter_log_output_does_not_split_on_sentinel_substring() {
+        // Only the exact sentinel *line* splits; a body line that merely
+        // contains the marker text is preserved.
+        let output =
+            "abc1234 feat (1 day ago) <a>\nnote ---CTXCRL-END---x inside\n---CTXCRL-END---\n";
+        let result = filter_log_output(output, 10, false, false);
+        assert!(result.contains("abc1234"));
+        assert!(result.contains("---CTXCRL-END---x inside"));
+        assert_eq!(result.lines().count(), 2);
+    }
+
+    // ----- format_stash_message: exit code is authoritative -----
+
+    fn stash_capture(stdout: &str, stderr: &str, exit: i32) -> CaptureResult {
+        CaptureResult {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            exit_code: exit,
+            truncated_stdout: false,
+            truncated_stderr: false,
+        }
+    }
+
+    #[test]
+    fn test_format_stash_message_exit_zero_empty_stdout() {
+        assert_eq!(
+            format_stash_message(None, &stash_capture("", "", 0)),
+            "ok (nothing to stash)"
+        );
+        assert_eq!(
+            format_stash_message(Some("push"), &stash_capture("  \n", "", 0)),
+            "ok (nothing to stash)"
+        );
+    }
+
+    #[test]
+    fn test_format_stash_message_localized_nothing_to_stash() {
+        // git writes "No local changes to save" — localized — to stderr; stdout
+        // is empty on exit 0, so nothing was stashed regardless of locale.
+        let r = stash_capture("", "Aucune modification locale à sauvegarder\n", 0);
+        assert_eq!(format_stash_message(None, &r), "ok (nothing to stash)");
+        assert_eq!(
+            format_stash_message(Some("save"), &r),
+            "ok (nothing to stash)"
+        );
+    }
+
+    #[test]
+    fn test_format_stash_message_success() {
+        let saved = "Saved working directory and index state WIP on main: abc1234 msg";
+        assert_eq!(
+            format_stash_message(None, &stash_capture(saved, "", 0)),
+            "ok stashed"
+        );
+        assert_eq!(
+            format_stash_message(Some("push"), &stash_capture(saved, "", 0)),
+            "ok stashed"
+        );
+        assert_eq!(
+            format_stash_message(Some("drop"), &stash_capture("", "", 0)),
+            "ok stash drop"
+        );
+    }
+
+    #[test]
+    fn test_format_stash_message_failure_on_nonzero_exit() {
+        assert_eq!(
+            format_stash_message(None, &stash_capture("", "boom", 1)),
+            "stash failed"
+        );
+        assert_eq!(
+            format_stash_message(Some("drop"), &stash_capture("", "boom", 1)),
+            "stash drop failed"
+        );
+    }
+
+    // ----- run_commit: keep hook output after the compact first line -----
+
+    #[test]
+    fn test_commit_stdout_remainder() {
+        assert_eq!(commit_stdout_remainder("[main abc] msg\n"), "");
+        assert_eq!(commit_stdout_remainder("[main abc] msg"), "");
+        assert_eq!(
+            commit_stdout_remainder("[main abc] msg\nhook: lint ok\n"),
+            "hook: lint ok\n"
+        );
+        assert_eq!(commit_stdout_remainder("a\nb\nc"), "b\nc");
     }
 }

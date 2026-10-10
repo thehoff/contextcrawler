@@ -35,7 +35,7 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[],
     },
     CtxcrlRule {
-        pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
+        pattern: r"^gh\s+(pr|issue|run|repo|api|release)(?:\s|$)",
         ctxcrl_cmd: "contextcrawler gh",
         rewrite_prefixes: &["gh"],
         category: "GitHub",
@@ -44,7 +44,7 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[],
     },
     CtxcrlRule {
-        pattern: r"^glab\s+(mr|issue|ci|pipeline|api|release)",
+        pattern: r"^glab\s+(mr|issue|ci|pipeline|api|release)(?:\s|$)",
         ctxcrl_cmd: "contextcrawler glab",
         rewrite_prefixes: &["glab"],
         category: "GitLab",
@@ -57,7 +57,7 @@ pub const RULES: &[CtxcrlRule] = &[
         // (`cargo +nightly test`). `normalise_command` strips it before the
         // classifier runs, but accepting it inline keeps classification robust
         // regardless of normalisation order. Subcommand stays in capture 1.
-        pattern: r"^cargo\s+(?:\+\S+\s+)?(build|test|clippy|check|fmt|install)",
+        pattern: r"^cargo\s+(?:\+\S+\s+)?(build|test|clippy|check|fmt|install)(?:\s|$)",
         ctxcrl_cmd: "contextcrawler cargo",
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
@@ -66,7 +66,11 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[("fmt", CtxcrlStatus::Passthrough)],
     },
     CtxcrlRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        // `(?:-\S+(?:\s+\S+)?\s+)*` tolerates global pnpm options before the
+        // subcommand (`pnpm --filter foo test`, `pnpm -r test`): a `-flag`
+        // token with an optional detached value. The trailing `(?:\s|$)`
+        // stops the subcommand from matching inside a longer word.
+        pattern: r"^pnpm\s+(?:-\S+(?:\s+\S+)?\s+)*(exec|i|install|list|ls|outdated|run|run-script|test)(?:\s|$)",
         ctxcrl_cmd: "contextcrawler pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
@@ -75,7 +79,10 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[],
     },
     CtxcrlRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        // Same global-option tolerance as the pnpm rule: `npm --workspace foo
+        // run build` must classify even though the subcommand is not adjacent
+        // to `npm`.
+        pattern: r"^npm\s+(?:-\S+(?:\s+\S+)?\s+)*(exec|run|run-script|rum|urn|x)(\s|$)",
         ctxcrl_cmd: "contextcrawler npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
@@ -394,7 +401,7 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[],
     },
     CtxcrlRule {
-        pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
+        pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))(?:\s|$)",
         ctxcrl_cmd: "contextcrawler docker",
         rewrite_prefixes: &["docker"],
         category: "Infra",
@@ -403,7 +410,7 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[],
     },
     CtxcrlRule {
-        pattern: r"^kubectl\s+(get|logs|describe|apply)",
+        pattern: r"^kubectl\s+(get|logs|describe|apply)(?:\s|$)",
         ctxcrl_cmd: "contextcrawler kubectl",
         rewrite_prefixes: &["kubectl"],
         category: "Infra",
@@ -475,7 +482,7 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[],
     },
     CtxcrlRule {
-        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
+        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)(?:\s|$)",
         ctxcrl_cmd: "contextcrawler pip",
         rewrite_prefixes: &["pip3", "pip", "uv pip"],
         category: "Python",
@@ -484,7 +491,7 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_status: &[],
     },
     CtxcrlRule {
-        pattern: r"^go\s+(test|build|vet)",
+        pattern: r"^go\s+(test|build|vet)(?:\s|$)",
         ctxcrl_cmd: "contextcrawler go",
         rewrite_prefixes: &["go"],
         category: "Go",
@@ -960,3 +967,92 @@ pub const IGNORED_PREFIXES: &[&str] = &[
 pub const IGNORED_EXACT: &[&str] = &[
     "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::RULES;
+    use regex::Regex;
+
+    /// Compile the pattern of the rule whose `ctxcrl_cmd` is `ctxcrl_cmd` and
+    /// test it against `cmd`.
+    fn matches(ctxcrl_cmd: &str, cmd: &str) -> bool {
+        let rule = RULES
+            .iter()
+            .find(|r| r.ctxcrl_cmd == ctxcrl_cmd)
+            .unwrap_or_else(|| panic!("no rule with ctxcrl_cmd {ctxcrl_cmd:?}"));
+        Regex::new(rule.pattern)
+            .expect("rule pattern must compile")
+            .is_match(cmd)
+    }
+
+    #[test]
+    fn pnpm_allows_global_flags_before_subcommand() {
+        assert!(matches("contextcrawler pnpm", "pnpm --filter foo test"));
+        assert!(matches("contextcrawler pnpm", "pnpm -r test"));
+        assert!(matches(
+            "contextcrawler pnpm",
+            "pnpm --filter foo run build"
+        ));
+        assert!(matches("contextcrawler pnpm", "pnpm -F foo run test"));
+    }
+
+    #[test]
+    fn pnpm_still_matches_bare_subcommands() {
+        assert!(matches("contextcrawler pnpm", "pnpm test"));
+        assert!(matches("contextcrawler pnpm", "pnpm run build"));
+        assert!(matches("contextcrawler pnpm", "pnpm install"));
+        assert!(matches("contextcrawler pnpm", "pnpm i"));
+    }
+
+    #[test]
+    fn pnpm_subcommand_needs_token_boundary() {
+        assert!(!matches("contextcrawler pnpm", "pnpm installs"));
+        assert!(!matches("contextcrawler pnpm", "pnpm testx"));
+    }
+
+    #[test]
+    fn npm_allows_global_flags_before_subcommand() {
+        assert!(matches(
+            "contextcrawler npm",
+            "npm --workspace foo run build"
+        ));
+        assert!(matches("contextcrawler npm", "npm -g run build"));
+        assert!(matches("contextcrawler npm", "npm run build"));
+    }
+
+    #[test]
+    fn npm_subcommand_needs_token_boundary() {
+        assert!(!matches("contextcrawler npm", "npm runx"));
+    }
+
+    #[test]
+    fn subcommands_reject_longer_word_prefixes() {
+        assert!(!matches("contextcrawler gh", "gh prs"));
+        assert!(!matches("contextcrawler glab", "glab issues"));
+        assert!(!matches("contextcrawler cargo", "cargo installing"));
+        assert!(!matches("contextcrawler docker", "docker psql"));
+        assert!(!matches("contextcrawler kubectl", "kubectl gets"));
+        assert!(!matches("contextcrawler pip", "pip installs"));
+        assert!(!matches("contextcrawler pip", "pip shows"));
+        assert!(!matches("contextcrawler go", "go testing"));
+        assert!(!matches("contextcrawler go", "go builds"));
+    }
+
+    #[test]
+    fn real_subcommands_still_match() {
+        assert!(matches("contextcrawler gh", "gh pr create"));
+        assert!(matches("contextcrawler gh", "gh pr"));
+        assert!(matches("contextcrawler glab", "glab ci list"));
+        assert!(matches("contextcrawler glab", "glab mr"));
+        assert!(matches("contextcrawler cargo", "cargo test"));
+        assert!(matches("contextcrawler cargo", "cargo +nightly test"));
+        assert!(matches("contextcrawler docker", "docker ps"));
+        assert!(matches("contextcrawler docker", "docker compose ps"));
+        assert!(matches("contextcrawler docker", "docker run --rm ubuntu"));
+        assert!(matches("contextcrawler kubectl", "kubectl get pods"));
+        assert!(matches("contextcrawler pip", "pip list"));
+        assert!(matches("contextcrawler pip", "uv pip list"));
+        assert!(matches("contextcrawler go", "go test ./..."));
+        assert!(matches("contextcrawler go", "go build"));
+    }
+}

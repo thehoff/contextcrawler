@@ -1,6 +1,6 @@
 [filters.servicenow-sdk-build]
 description = "Compact ServiceNow Fluent SDK build output (npx @servicenow/sdk build)"
-match_command = "@servicenow/sdk\\s+build\\b"
+match_command = "^@servicenow/sdk\\s+build\\b"
 strip_ansi = true
 
 # Stage 2 — line-by-line substitutions. Drop the noisy "[now-sdk] " prefix and

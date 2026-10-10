@@ -457,6 +457,43 @@ fn compile_user_regex_set(patterns: &[String], field: &str) -> Result<RegexSet, 
         .map_err(|error| format!("invalid or over-complex {} regex: {}", field, error))
 }
 
+/// True when `pattern` begins with a start-of-string anchor — `^` (line anchor,
+/// or haystack anchor without `(?m)`) or `\A` (always haystack start). Leading
+/// inline flag groups such as `(?i)` or `(?i:^cmd)` are tolerated.
+///
+/// A filter whose `match_command` is not anchored can match the tool name
+/// anywhere in the command string — a path fragment, an argument, another
+/// tool's flags — and silently misroute unrelated commands through the filter.
+fn starts_with_start_anchor(pattern: &str) -> bool {
+    let mut rest = pattern.trim_start();
+    loop {
+        let Some(after) = rest.strip_prefix("(?") else {
+            break;
+        };
+        // Flags-only group, e.g. `(?i)`, `(?im)`, `(?i-u)`.
+        if let Some(close) = after.find(')') {
+            if is_inline_flag_chars(&after[..close]) {
+                rest = after[close + 1..].trim_start();
+                continue;
+            }
+        }
+        // Scoped-flags group, e.g. `(?i:^cmd)` — descend into the body.
+        if let Some(colon) = after.find(':') {
+            if is_inline_flag_chars(&after[..colon]) {
+                return starts_with_start_anchor(&after[colon + 1..]);
+            }
+        }
+        break;
+    }
+    rest.starts_with('^') || rest.starts_with("\\A")
+}
+
+/// Characters permitted inside an inline regex flag group: letters (i, m, s,
+/// x, u, U, R) plus `-` to toggle flags off.
+fn is_inline_flag_chars(flags: &str) -> bool {
+    !flags.is_empty() && flags.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-')
+}
+
 fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, String> {
     // Mutual exclusion: strip and keep cannot both be set
     if !def.strip_lines_matching.is_empty() && !def.keep_lines_matching.is_empty() {
@@ -471,6 +508,16 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
     }
 
     let match_regex = compile_user_regex(&def.match_command, "match_command")?;
+
+    // Anchoring requirement: an unanchored match_command can match the tool name
+    // appearing mid-command and hijack output from an unrelated command. Require
+    // a start-of-command anchor (`^` or `\A`, optionally behind inline flags).
+    if !starts_with_start_anchor(&def.match_command) {
+        return Err(format!(
+            "match_command must be anchored at the start (begin with `^` or `\\A`): {:?}",
+            def.match_command
+        ));
+    }
 
     // Shadow warning: if match_command matches a Rust-handled command, this filter
     // will never activate (Clap routes before run_fallback). Warn the author.
@@ -1308,6 +1355,110 @@ match_command = "^terraform"
         );
         let found = find_filter_in("kubectl get pods", &filters);
         assert!(found.is_none());
+    }
+
+    // --- match_command must be anchored at the start ---
+
+    #[test]
+    fn test_unanchored_match_command_is_rejected() {
+        let result = make_filters(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "liquibase\\b"
+strip_lines_matching = ["^noise"]
+"#,
+        );
+        assert!(
+            result.is_empty(),
+            "unanchored match_command should be rejected at load"
+        );
+    }
+
+    #[test]
+    fn test_anchored_match_command_still_loads() {
+        let filters = make_filters(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^liquibase\\b"
+strip_lines_matching = ["^noise"]
+"#,
+        );
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].name, "f");
+    }
+
+    #[test]
+    fn test_start_anchor_detection_accepts_equivalents() {
+        assert!(starts_with_start_anchor("^cmd"));
+        assert!(starts_with_start_anchor("\\Acmd"));
+        assert!(starts_with_start_anchor("(?i)^cmd"));
+        assert!(starts_with_start_anchor("(?im:^cmd)"));
+        assert!(!starts_with_start_anchor("cmd"));
+        assert!(!starts_with_start_anchor("(?:^|/)liquibase"));
+        assert!(!starts_with_start_anchor("@servicenow/sdk\\s+build"));
+    }
+
+    // --- built-in matcher tightening (spring-boot / liquibase / ssh) ---
+
+    fn builtin_filter_name_for(command: &str) -> Option<String> {
+        let filters = make_filters(BUILTIN_TOML);
+        find_filter_in(command, &filters).map(|f| f.name.clone())
+    }
+
+    #[test]
+    fn test_builtin_spring_boot_matches_spring_not_every_jar() {
+        assert_eq!(
+            builtin_filter_name_for("java -jar spring-boot-app.jar").as_deref(),
+            Some("spring-boot")
+        );
+        assert_eq!(
+            builtin_filter_name_for("java -Dspring.profiles.active=dev -jar app.jar").as_deref(),
+            Some("spring-boot")
+        );
+        assert_eq!(
+            builtin_filter_name_for("java -jar app.jar --spring.config.location=x").as_deref(),
+            Some("spring-boot")
+        );
+        assert_eq!(
+            builtin_filter_name_for("java -jar plain-app.jar"),
+            None,
+            "a plain java -jar invocation must not match the spring-boot filter"
+        );
+    }
+
+    #[test]
+    fn test_builtin_liquibase_is_anchored() {
+        assert_eq!(
+            builtin_filter_name_for("liquibase status").as_deref(),
+            Some("liquibase")
+        );
+        assert_eq!(
+            builtin_filter_name_for("/opt/liquibase/bin/liquibase update").as_deref(),
+            Some("liquibase")
+        );
+        assert_eq!(
+            builtin_filter_name_for("echo liquibase status"),
+            None,
+            "liquibase appearing mid-command must not match"
+        );
+        assert_eq!(builtin_filter_name_for("mvn liquibase:update"), None);
+    }
+
+    #[test]
+    fn test_builtin_ssh_excludes_keygen_add_agent() {
+        assert_eq!(
+            builtin_filter_name_for("ssh host uptime").as_deref(),
+            Some("ssh")
+        );
+        assert_eq!(
+            builtin_filter_name_for("/usr/bin/ssh host uptime").as_deref(),
+            Some("ssh")
+        );
+        assert_eq!(builtin_filter_name_for("ssh-keygen -t ed25519"), None);
+        assert_eq!(builtin_filter_name_for("ssh-add ~/.ssh/id_ed25519"), None);
+        assert_eq!(builtin_filter_name_for("ssh-agent -s"), None);
     }
 
     #[test]

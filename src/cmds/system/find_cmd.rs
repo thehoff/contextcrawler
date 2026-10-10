@@ -62,17 +62,51 @@ fn has_native_find_flags(args: &[String]) -> bool {
         .any(|a| a == "-name" || a == "-type" || a == "-maxdepth" || a == "-iname")
 }
 
-/// Native find flags that CTXCRL cannot handle correctly.
-/// These involve compound predicates, actions, or semantics we don't support.
-const UNSUPPORTED_FIND_FLAGS: &[&str] = &[
-    "-not", "!", "-or", "-o", "-and", "-a", "-exec", "-execdir", "-delete", "-print0", "-newer",
-    "-perm", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-empty", "-link",
-    "-regex", "-iregex",
-];
+/// Native find predicates the compact (CTXCRL) output can reproduce faithfully.
+/// Anything outside this set — compound expressions (`-not`, `-o`, `-a`, `!`),
+/// actions (`-exec`, `-delete`, `-print0`) or unsupported tests (`-size`,
+/// `-mtime`, `-path`, …) — is delegated to the real `find` unchanged.
+const SUPPORTED_FIND_FLAGS: &[&str] = &["-name", "-iname", "-type", "-maxdepth"];
 
-fn has_unsupported_find_flags(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| UNSUPPORTED_FIND_FLAGS.contains(&a.as_str()))
+/// Decide whether the expression must be handed to the real `find` verbatim.
+///
+/// The compact output only understands `-name`, `-iname`, `-type` and
+/// `-maxdepth` (plus the CTXCRL-only `-m`/`-t` flags). Any other predicate in
+/// the expression makes the compact rendering lossy, so the original command
+/// is run through unchanged rather than erroring out with zero results.
+fn find_requires_passthrough(args: &[String]) -> bool {
+    let mut i = 0;
+    // Skip leading positionals: the search path (native syntax) and/or the
+    // glob pattern (CTXCRL syntax). Values only ever follow flags here, so
+    // this greedy skip is unambiguous.
+    while i < args.len() && !args[i].starts_with('-') {
+        i += 1;
+    }
+
+    while i < args.len() {
+        let arg = args[i].as_str();
+        // `!` is a compound-predicate operator and never starts with `-`.
+        if arg == "!" {
+            return true;
+        }
+        // Supported natives consume one following value.
+        if SUPPORTED_FIND_FLAGS.contains(&arg) || arg == "-m" || arg == "-t" {
+            i += 2;
+            continue;
+        }
+        // Long CTXCRL flags may carry the value inline (`--max=10`).
+        if arg.starts_with("--max") || arg.starts_with("--file-type") {
+            i += if arg.contains('=') { 1 } else { 2 };
+            continue;
+        }
+        // Any other flag-looking token is a predicate we cannot reproduce.
+        if arg.starts_with('-') {
+            return true;
+        }
+        i += 1;
+    }
+
+    false
 }
 
 /// Parse arguments from raw args vec, supporting both native find and CTXCRL syntax.
@@ -82,12 +116,6 @@ fn has_unsupported_find_flags(args: &[String]) -> bool {
 fn parse_find_args(args: &[String]) -> Result<FindArgs> {
     if args.is_empty() {
         return Ok(FindArgs::default());
-    }
-
-    if has_unsupported_find_flags(args) {
-        anyhow::bail!(
-            "contextcrawler find does not support compound predicates or actions (e.g. -not, -exec). Use `find` directly."
-        );
     }
 
     if has_native_find_flags(args) {
@@ -177,8 +205,25 @@ fn parse_ctxcrl_find_args(args: &[String]) -> Result<FindArgs> {
 }
 
 /// Entry point from main.rs — parses raw args then delegates to run().
+///
+/// Expressions the compact output cannot reproduce faithfully are handed to
+/// the real `find` binary verbatim (exit code preserved) instead of failing
+/// with a hard error and zero results.
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+    if find_requires_passthrough(args) {
+        return run_real_find(args);
+    }
+
     let parsed = parse_find_args(args)?;
+
+    // A search root that does not exist is a hard error in real find: report
+    // it the same way and exit non-zero rather than printing "0 for 'pattern'".
+    let root = search_root(args, &parsed.path);
+    if let Some(err) = missing_path_error(&root) {
+        eprintln!("{}", err);
+        std::process::exit(1);
+    }
+
     run(
         &parsed.pattern,
         &parsed.path,
@@ -188,6 +233,62 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
         parsed.case_insensitive,
         verbose,
     )
+}
+
+/// Run the real `find` with the original arguments, inheriting stdio, and exit
+/// with its exit code so callers see exactly what find would have produced.
+fn run_real_find(args: &[String]) -> Result<()> {
+    let status = std::process::Command::new("find")
+        .args(args)
+        .status()
+        .context("failed to execute find")?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Resolve the search root to validate for existence.
+///
+/// Native syntax puts the path first (`find <path> -name …`), which
+/// `parse_find_args` already captured. CTXCRL syntax puts a glob pattern first
+/// (`find *.rs src`), so a leading positional is only a path when it plainly
+/// looks like one — it contains a separator or is `.`/`..`. A bare word could
+/// be an exact-name CTXCRL pattern, so it stays a pattern and is not validated.
+fn search_root(args: &[String], parsed_path: &str) -> String {
+    match args.first() {
+        Some(a)
+            if !a.starts_with('-')
+                && (a.contains('/') || a.as_str() == "." || a.as_str() == "..") =>
+        {
+            a.to_string()
+        }
+        _ => parsed_path.to_string(),
+    }
+}
+
+/// find-style error for a search root that does not exist.
+fn missing_path_error(path: &str) -> Option<String> {
+    if Path::new(path).exists() {
+        None
+    } else {
+        Some(format!("find: '{}': No such file or directory", path))
+    }
+}
+
+/// Count files per extension, ordered by descending count then ascending
+/// extension name. The secondary key keeps ties deterministic across runs
+/// (a plain count sort left equal buckets in HashMap iteration order).
+fn extension_histogram(files: &[String]) -> Vec<(String, usize)> {
+    let mut by_ext: HashMap<String, usize> = HashMap::new();
+    for file in files {
+        let ext = Path::new(file)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_else(|| "none".to_string());
+        *by_ext.entry(ext).or_default() += 1;
+    }
+
+    let mut exts: Vec<(String, usize)> = by_ext.into_iter().collect();
+    exts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    exts
 }
 
 pub fn run(
@@ -221,7 +322,11 @@ pub fn run(
     // single trailing slash so the prefix matches what `ignore` yields.
     let walk_root: &str = {
         let trimmed = path.strip_suffix('/').unwrap_or(path);
-        if trimmed.is_empty() { path } else { trimmed }
+        if trimmed.is_empty() {
+            path
+        } else {
+            trimmed
+        }
     };
 
     let mut builder = WalkBuilder::new(walk_root);
@@ -363,20 +468,10 @@ pub fn run(
     }
 
     // Extension summary
-    let mut by_ext: HashMap<String, usize> = HashMap::new();
-    for file in &files {
-        let ext = Path::new(file)
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_else(|| "none".to_string());
-        *by_ext.entry(ext).or_default() += 1;
-    }
-
+    let exts = extension_histogram(&files);
     let mut ext_line = String::new();
-    if by_ext.len() > 1 {
+    if exts.len() > 1 {
         println!();
-        let mut exts: Vec<_> = by_ext.iter().collect();
-        exts.sort_by(|a, b| b.1.cmp(a.1));
         let ext_str: Vec<String> = exts
             .iter()
             .take(5)
@@ -506,20 +601,149 @@ mod tests {
         assert_eq!(parsed.path, ".");
     }
 
-    // --- parse_find_args: unsupported flags ---
+    // --- parse_find_args: unsupported predicates delegate, never bail ---
 
     #[test]
-    fn parse_native_find_rejects_not() {
-        let result = parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("compound predicates"));
+    fn parse_native_find_unsupported_no_longer_bails() {
+        // Unsupported predicates no longer error out; they route to passthrough.
+        let parsed = parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]));
+        assert!(parsed.is_ok());
+    }
+
+    // --- passthrough detection: predicates outside the supported set ---
+
+    #[test]
+    fn passthrough_for_not_predicate() {
+        assert!(find_requires_passthrough(&args(&[
+            ".",
+            "-name",
+            "*.rs",
+            "-not",
+            "-name",
+            "*_test.rs"
+        ])));
     }
 
     #[test]
-    fn parse_native_find_rejects_exec() {
-        let result = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]));
-        assert!(result.is_err());
+    fn passthrough_for_exec_action() {
+        assert!(find_requires_passthrough(&args(&[
+            ".", "-name", "*.tmp", "-exec", "rm", "{}", ";"
+        ])));
+    }
+
+    #[test]
+    fn passthrough_for_unsupported_test() {
+        assert!(find_requires_passthrough(&args(&[".", "-size", "+1M"])));
+        assert!(find_requires_passthrough(&args(&[".", "-mtime", "-7"])));
+        assert!(find_requires_passthrough(&args(&[
+            ".",
+            "-path",
+            "*/target/*"
+        ])));
+    }
+
+    #[test]
+    fn passthrough_for_bang_and_or() {
+        assert!(find_requires_passthrough(&args(&[
+            ".", "-name", "a", "!", "-name", "b"
+        ])));
+        assert!(find_requires_passthrough(&args(&[
+            ".", "-name", "a", "-o", "-name", "b"
+        ])));
+    }
+
+    #[test]
+    fn no_passthrough_for_supported_native_predicates() {
+        assert!(!find_requires_passthrough(&args(&[".", "-name", "*.rs"])));
+        assert!(!find_requires_passthrough(&args(&[
+            "src",
+            "-iname",
+            "makefile",
+            "-type",
+            "f",
+            "-maxdepth",
+            "3"
+        ])));
+        assert!(!find_requires_passthrough(&args(&["-name", "*.rs"])));
+    }
+
+    #[test]
+    fn no_passthrough_for_ctxcrl_syntax() {
+        assert!(!find_requires_passthrough(&args(&["*.rs"])));
+        assert!(!find_requires_passthrough(&args(&[
+            "*.rs", "src", "-m", "10", "-t", "d"
+        ])));
+        assert!(!find_requires_passthrough(&args(&["*.rs", "--max=5"])));
+    }
+
+    // --- missing path ---
+
+    #[test]
+    fn missing_path_error_none_for_existing() {
+        assert!(missing_path_error(".").is_none());
+        assert!(missing_path_error("src").is_none());
+    }
+
+    #[test]
+    fn missing_path_error_reports_find_style_message() {
+        let err = missing_path_error("definitely/not/here").expect("missing path should error");
+        assert!(err.starts_with("find: "), "got: {err}");
+        assert!(err.contains("definitely/not/here"), "got: {err}");
+        assert!(err.contains("No such file or directory"), "got: {err}");
+    }
+
+    #[test]
+    fn search_root_uses_native_path() {
+        assert_eq!(search_root(&args(&["src", "-name", "*.rs"]), "src"), "src");
+        assert_eq!(search_root(&args(&[".", "-name", "*.rs"]), "."), ".");
+    }
+
+    #[test]
+    fn search_root_keeps_ctxcrl_pattern_but_reads_path() {
+        // A glob pattern first means the parsed path is the real root.
+        assert_eq!(search_root(&args(&["*.rs", "src"]), "src"), "src");
+        // A bare word may be an exact-name CTXCRL pattern, not a path.
+        assert_eq!(search_root(&args(&["Cargo.toml"]), "."), ".");
+        // A leading positional with a separator is a path even in CTXCRL form.
+        assert_eq!(search_root(&args(&["/no/such/dir"]), "."), "/no/such/dir");
+        assert_eq!(search_root(&args(&["./missing"]), "."), "./missing");
+    }
+
+    // --- extension histogram tie-break ---
+
+    #[test]
+    fn extension_histogram_sorts_count_desc_then_name_asc() {
+        let files = args(&["a.rs", "b.rs", "c.md", "d.md", "e.txt"]);
+        let hist = extension_histogram(&files);
+        assert_eq!(
+            hist,
+            vec![
+                ("md".to_string(), 2),
+                ("rs".to_string(), 2),
+                ("txt".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_histogram_ties_are_stable() {
+        let files = args(&["x.zz", "y.aa", "z.mm"]);
+        let hist = extension_histogram(&files);
+        assert_eq!(
+            hist,
+            vec![
+                ("aa".to_string(), 1),
+                ("mm".to_string(), 1),
+                ("zz".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_histogram_none_for_extensionless() {
+        let files = args(&["Makefile", "LICENSE"]);
+        let hist = extension_histogram(&files);
+        assert_eq!(hist, vec![("none".to_string(), 2)]);
     }
 
     // --- parse_find_args: CTXCRL syntax ---
@@ -628,7 +852,10 @@ mod tests {
     #[test]
     fn find_trailing_slash_path_runs() {
         let result = run("*.rs", "src/", 50, None, "f", false, 0);
-        assert!(result.is_ok(), "trailing-slash search root should run cleanly");
+        assert!(
+            result.is_ok(),
+            "trailing-slash search root should run cleanly"
+        );
     }
 
     #[test]

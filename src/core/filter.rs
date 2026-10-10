@@ -59,7 +59,7 @@ impl Language {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "rs" => Language::Rust,
-            "py" | "pyw" => Language::Python,
+            "py" | "pyw" | "pyi" => Language::Python,
             "js" | "mjs" | "cjs" => Language::JavaScript,
             "ts" | "tsx" => Language::TypeScript,
             "go" => Language::Go,
@@ -129,10 +129,15 @@ impl Language {
                 doc_line: None,
                 doc_block_start: None,
             },
+            // Unknown (extensionless) files are not C: a `.gitignore` line
+            // like `/*.log` is a glob, not an unterminated block comment.
+            // Opening a `/* ... */` span here swallowed the rest of the file,
+            // so Unknown only ever strips `//` line comments. Real C-like
+            // languages keep their block-comment handling above.
             Language::Unknown => CommentPatterns {
                 line: Some("//"),
-                block_start: Some("/*"),
-                block_end: Some("*/"),
+                block_start: None,
+                block_end: None,
                 doc_line: None,
                 doc_block_start: None,
             },
@@ -736,7 +741,43 @@ mod tests {
     fn test_language_detection() {
         assert_eq!(Language::from_extension("rs"), Language::Rust);
         assert_eq!(Language::from_extension("py"), Language::Python);
+        // Stub files are Python too; treating `pyi` as Unknown meant they
+        // were never comment-filtered as Python (and `/*` was mis-read).
+        assert_eq!(Language::from_extension("pyi"), Language::Python);
         assert_eq!(Language::from_extension("js"), Language::JavaScript);
+    }
+
+    #[test]
+    fn test_unknown_extension_does_not_open_block_comment() {
+        // A `.gitignore` glob `/*.log` is not a C block comment opener.
+        // Treating it as one swallowed the remainder of the file.
+        let gitignore = "/*.log\n/target/\n*.tmp\n";
+        let out = MinimalFilter.filter(gitignore, &Language::Unknown);
+        assert!(
+            out.contains("/*.log"),
+            "`/*.log` must survive Unknown filtering; got:\n{out}"
+        );
+        assert!(
+            out.contains("/target/"),
+            "lines after `/*.log` must survive; got:\n{out}"
+        );
+        assert!(
+            out.contains("*.tmp"),
+            "the rest of the file must not be swallowed; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_c_like_languages_still_strip_block_comments() {
+        // The Unknown fix must not weaken real C-like stripping.
+        let code = "let before = 1;\n/* gone */\nlet after = 2;";
+        let out = MinimalFilter.filter(code, &Language::Rust);
+        assert!(out.contains("let before = 1;"));
+        assert!(out.contains("let after = 2;"));
+        assert!(
+            !out.contains("gone"),
+            "block comment must be stripped: {out}"
+        );
     }
 
     #[test]

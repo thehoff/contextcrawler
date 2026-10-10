@@ -337,7 +337,8 @@ pub fn run_gemini() -> Result<()> {
         }
     };
 
-    let json: Value = match serde_json::from_str(&input) {
+    let input = strip_leading_bom(&input);
+    let json: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
             // Malformed JSON — fail closed. The Gemini hook is the allow/deny
@@ -361,7 +362,7 @@ pub fn run_gemini() -> Result<()> {
 /// payload this is the fail-CLOSED deny verdict (#111 G2), never an `Err`.
 #[cfg(test)]
 fn run_gemini_inner(input: &str) -> String {
-    match serde_json::from_str::<Value>(input) {
+    match serde_json::from_str::<Value>(strip_leading_bom(input)) {
         Ok(_) => json!({ "decision": "allow" }).to_string(),
         Err(_) => json!({
             "decision": "deny",
@@ -1092,7 +1093,7 @@ pub fn run_claude() -> Result<()> {
         }
     };
 
-    let input = input.trim();
+    let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
         // No payload at all — nothing to gate. The harness invoked the hook
         // with empty stdin; treat as a no-op rather than denying.
@@ -1150,7 +1151,7 @@ pub fn run_claude() -> Result<()> {
 /// (rewrite or deny), or `None` for a silent pass-through (`Ignore`/`Skip`).
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(input).ok()?;
+    let v: Value = serde_json::from_str(strip_leading_bom(input)).ok()?;
     match process_claude_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         PayloadAction::Deny { reason, .. } => Some(
@@ -1179,10 +1180,11 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 // ── Cursor native hook ─────────────────────────────────────────
 
-/// Cursor on Windows ships hook payloads with one or more leading
+/// Windows harnesses ship hook payloads with one or more leading
 /// UTF-8 BOMs (`EF BB BF`, sometimes doubled), which serde_json
-/// refuses to parse. Strip them defensively so the rewrite path keeps
-/// working instead of silently returning `{}`.
+/// refuses to parse. Every stdin-parsing hook (Cursor, Claude, Gemini)
+/// strips them defensively so the hook keeps working instead of failing
+/// closed (Claude/Gemini deny) or silently returning `{}` (Cursor).
 fn strip_leading_bom(input: &str) -> &str {
     let mut s = input;
     while let Some(rest) = s.strip_prefix('\u{feff}') {
@@ -2963,6 +2965,24 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_strips_leading_utf8_bom() {
+        // Windows harnesses can prepend a UTF-8 BOM to hook stdin.
+        // serde_json rejects BOM-prefixed input, so without the strip the
+        // Claude path failed closed with a deny instead of rewriting.
+        let payload = claude_input("git status");
+        let with_bom = format!("\u{feff}{payload}");
+        let result = run_claude_inner(&with_bom)
+            .expect("BOM-prefixed Claude payload must still produce a verdict");
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            v.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|c| c.as_str()),
+            Some("contextcrawler git status"),
+            "leading BOM must not break the Claude rewrite path"
+        );
+    }
+
+    #[test]
     fn test_claude_extremely_long_command() {
         let long_cmd = format!("git status {}", "A".repeat(100_000));
         let input = claude_input(&long_cmd);
@@ -3000,6 +3020,19 @@ mod tests {
         let ok = run_gemini_inner(r#"{"tool_name":"run_shell_command"}"#);
         let v: Value = serde_json::from_str(&ok).unwrap();
         assert_eq!(v["decision"], "allow");
+    }
+
+    #[test]
+    fn test_gemini_strips_leading_utf8_bom() {
+        // A BOM-prefixed but otherwise well-formed payload must not be
+        // treated as malformed (which would fail closed with a deny).
+        let with_bom = format!("\u{feff}{}", r#"{"tool_name":"run_shell_command"}"#);
+        let out = run_gemini_inner(&with_bom);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["decision"], "allow",
+            "leading BOM must not push Gemini down the malformed-JSON deny path"
+        );
     }
 
     #[test]

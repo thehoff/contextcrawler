@@ -107,6 +107,9 @@ pub(crate) enum Commands {
         /// Keep only last N lines
         #[arg(long, conflicts_with = "max_lines")]
         tail_lines: Option<usize>,
+        /// Keep only first N lines
+        #[arg(long, conflicts_with = "tail_lines")]
+        head_lines: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -1490,7 +1493,8 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 // Command not found — same behaviour as no-TOML path
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
                 eprintln!("[contextcrawler: {}]", e);
-                Ok(127)
+                // Exists but not executable → 126; not found → 127.
+                Ok(fallback_spawn_exit_code(&e))
             }
         }
     } else {
@@ -1528,9 +1532,20 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 }
                 // Command not found or other OS error — single message, no duplicate Clap error
                 eprintln!("[contextcrawler: {}]", e);
-                Ok(127)
+                Ok(fallback_spawn_exit_code(&e))
             }
         }
+    }
+}
+
+/// Exit code for a failed passthrough spawn: the shell convention is 127 for
+/// "command not found", but 126 when the program exists and cannot be
+/// executed (e.g. `EACCES`/`PermissionDenied`).
+fn fallback_spawn_exit_code(e: &std::io::Error) -> i32 {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        126
+    } else {
+        127
     }
 }
 
@@ -3274,6 +3289,7 @@ fn run_cli() -> Result<i32> {
             level,
             max_lines,
             tail_lines,
+            head_lines,
             line_numbers,
             intent,
             force,
@@ -3305,13 +3321,14 @@ fn run_cli() -> Result<i32> {
                         }
                         None => match line_limit {
                             Some(0) => {
-                                return Err(anyhow::anyhow!(
-                                    "--line-limit must be >= 1 (got 0)"
-                                ));
+                                return Err(anyhow::anyhow!("--line-limit must be >= 1 (got 0)"));
                             }
                             Some(limit) => {
                                 let end = anchor.checked_add(limit - 1).ok_or_else(|| {
-                                    anyhow::anyhow!("--line {} + --line-limit {limit} overflows line numbers", anchor)
+                                    anyhow::anyhow!(
+                                        "--line {} + --line-limit {limit} overflows line numbers",
+                                        anchor
+                                    )
                                 })?;
                                 (Some(anchor), Some(end))
                             }
@@ -3326,9 +3343,7 @@ fn run_cli() -> Result<i32> {
             // — the false conflict was removed from clap for #244.
             let (max_lines, end_line) = match (start_line, max_lines, end_line) {
                 (Some(s), Some(0), None) => {
-                    return Err(anyhow::anyhow!(
-                        "--max-lines must be >= 1 (got 0)"
-                    ));
+                    return Err(anyhow::anyhow!("--max-lines must be >= 1 (got 0)"));
                 }
                 (Some(s), Some(n), None) => {
                     let end = s.checked_add(n - 1).ok_or_else(|| {
@@ -3341,6 +3356,7 @@ fn run_cli() -> Result<i32> {
             let window = crate::cmds::system::read::LineWindow {
                 max_lines,
                 tail_lines,
+                head_lines,
                 start_line,
                 end_line,
             };
@@ -3666,11 +3682,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
-                diff_cmd::run(&file1, &f2, cli.verbose)?;
+                diff_cmd::run(&file1, &f2, cli.verbose)?
             } else {
-                diff_cmd::run_stdin(cli.verbose)?;
+                diff_cmd::run_stdin(cli.verbose)?
             }
-            0
         }
 
         Commands::Log { file } => {
@@ -3840,7 +3855,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_pidev_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
-                let install_claude = !opencode;
+                // A cursor-only init must not also install Claude hooks.
+                let install_claude = !opencode && agent != Some(AgentTarget::Cursor);
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
@@ -5102,7 +5118,10 @@ mod tests {
         if let Ok(cli) = result {
             match cli.command {
                 Commands::Gain {
-                    web, port, no_browser, ..
+                    web,
+                    port,
+                    no_browser,
+                    ..
                 } => {
                     assert!(web);
                     assert_eq!(port, Some(8765));
@@ -5165,11 +5184,14 @@ mod tests {
 
     #[test]
     fn test_read_line_with_limit_parses() {
-        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--line", "937", "--line-limit", "25"]);
+        let result =
+            Cli::try_parse_from(["rtk", "read", "x.md", "--line", "937", "--line-limit", "25"]);
         assert!(result.is_ok());
         if let Ok(cli) = result {
             match cli.command {
-                Commands::Read { line, line_limit, .. } => {
+                Commands::Read {
+                    line, line_limit, ..
+                } => {
                     assert_eq!(line, Some(937));
                     assert_eq!(line_limit, Some(25));
                 }
@@ -5181,7 +5203,8 @@ mod tests {
     #[test]
     fn test_read_line_with_line_end_parses() {
         // `--line 10 --line-end 40` — explicit bound pairing (#244).
-        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--line", "10", "--line-end", "40"]);
+        let result =
+            Cli::try_parse_from(["rtk", "read", "x.md", "--line", "10", "--line-end", "40"]);
         assert!(result.is_ok());
         if let Ok(cli) = result {
             match cli.command {
@@ -5224,14 +5247,50 @@ mod tests {
     fn test_read_start_with_max_lines_no_longer_conflicts() {
         // #244: `--start 2 --max-lines 3` was a hard clap conflict; the DB
         // showed real agent calls hitting it. Now composes to a range.
-        let result = Cli::try_parse_from(["rtk", "read", "r.txt", "--start", "2", "--max-lines", "3"]);
+        let result =
+            Cli::try_parse_from(["rtk", "read", "r.txt", "--start", "2", "--max-lines", "3"]);
         assert!(result.is_ok(), "--start + --max-lines must parse");
     }
 
     #[test]
     fn test_read_range_conflicts_with_start_line() {
-        let result = Cli::try_parse_from(["rtk", "read", "x", "--range", "1:10", "--start-line", "2"]);
+        let result =
+            Cli::try_parse_from(["rtk", "read", "x", "--range", "1:10", "--start-line", "2"]);
         assert!(result.is_err(), "--range conflicts with --start-line");
+    }
+
+    #[test]
+    fn test_read_head_lines_parses() {
+        let result = Cli::try_parse_from(["rtk", "read", "x.md", "--head-lines", "7"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Read { head_lines, .. } => assert_eq!(head_lines, Some(7)),
+                _ => panic!("Expected Read command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_head_lines_conflicts_with_tail_lines() {
+        let result = Cli::try_parse_from([
+            "rtk",
+            "read",
+            "x.md",
+            "--head-lines",
+            "7",
+            "--tail-lines",
+            "3",
+        ]);
+        assert!(result.is_err(), "--head-lines conflicts with --tail-lines");
+    }
+
+    #[test]
+    fn test_fallback_spawn_exit_code_maps_permission_to_126() {
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(fallback_spawn_exit_code(&denied), 126);
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(fallback_spawn_exit_code(&missing), 127);
     }
 
     #[test]

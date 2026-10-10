@@ -81,7 +81,7 @@ lazy_static! {
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
-    // `==> name <==` banners that `ctxcrl read --max-lines` cannot reproduce.
+    // `==> name <==` banners that `ctxcrl read --head-lines` cannot reproduce.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
@@ -219,10 +219,20 @@ pub fn classify_command(cmd: &str) -> Classification {
             (rule.savings_pct, super::report::CtxcrlStatus::Existing)
         };
 
+        // A `Passthrough` command runs through the `external_subcommand`
+        // handler with NO filtering, so it saves nothing. Never inherit the
+        // filter's headline `savings_pct` here — `cargo fmt` reports 0%, not
+        // the Cargo filter's 80%.
+        let estimated_savings_pct = if status == super::report::CtxcrlStatus::Passthrough {
+            0.0
+        } else {
+            savings
+        };
+
         Classification::Supported {
             ctxcrl_equivalent: rule.ctxcrl_cmd,
             category: rule.category,
-            estimated_savings_pct: savings,
+            estimated_savings_pct,
             status,
         }
     } else {
@@ -326,6 +336,12 @@ fn normalise_command(cmd: &str) -> String {
     let stripped = ENV_PREFIX.replace(cmd.trim(), "").to_string();
     let stripped = strip_absolute_path(&stripped);
     let stripped = ENV_PREFIX.replace(&stripped, "").to_string();
+    // Peel scheduling wrappers (`timeout`/`nice`/`time`/`nohup`) for
+    // classification too, mirroring `rewrite_segment_inner`. Strip env again
+    // afterwards so an interleaved `timeout 5s sudo <cmd>` still classifies.
+    let stripped = strip_scheduling_prefixes_all(stripped.trim());
+    let stripped = ENV_PREFIX.replace(&stripped, "").to_string();
+    let stripped = strip_scheduling_prefixes_all(stripped.trim());
     let stripped = strip_git_global_opts(stripped.trim());
     let stripped = strip_cargo_toolchain(stripped.trim());
     strip_golangci_global_opts(&stripped)
@@ -997,7 +1013,9 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
-            return Some(format!("contextcrawler read {} --max-lines {}", file, n));
+            // `head -N file` keeps the FIRST N lines — that is `--head-lines`,
+            // not `--max-lines` (an absolute cap that can truncate the middle).
+            return Some(format!("contextcrawler read {} --head-lines {}", file, n));
         }
     }
     if cmd.starts_with("head -") {
@@ -1153,6 +1171,20 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
+    // Scheduling wrappers (`timeout`, `nice`, `time`, `nohup`) run the inner
+    // command and pass its output through unchanged, so — exactly like the
+    // `sudo`/`env` prefix above — peel them for classification and re-prepend
+    // them on the rewritten command (`timeout 5s git status` →
+    // `timeout 5s contextcrawler git status`). Only a LEADING word is peeled;
+    // `time`/`nice` as later arguments are untouched.
+    if let Some((prefix, rest)) = strip_scheduling_prefix(trimmed) {
+        if rest.is_empty() {
+            return None;
+        }
+        return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
+    }
+
     for &prefix in SHELL_PREFIX_BUILTINS {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
@@ -1238,7 +1270,7 @@ fn rewrite_segment_inner(
         return Some(trimmed.to_string());
     }
 
-// `nl` joins head/tail here because the only faithful mapping it has is a
+    // `nl` joins head/tail here because the only faithful mapping it has is a
     // line-range/format one: `nl -ba <file>` → `read --line-numbers` (#195).
     // Every other `nl` form falls out of `rewrite_line_range` as None and runs
     // raw, which is the correct outcome — bare `nl` numbers only non-empty
@@ -1258,6 +1290,14 @@ fn rewrite_segment_inner(
         || cmd_sans_abs.starts_with("tail ")
         || cmd_sans_abs.starts_with("nl ")
     {
+        // Honour user `exclude_commands` BEFORE the line-range special case.
+        // The generic classification path below already checks `is_excluded`,
+        // but this guard short-circuits ahead of it — without this an excluded
+        // `head -20 f` (or `tail`/`nl`) still became a `read` rewrite.
+        let normalised_for_exclude = normalise_command(&cmd_sans_abs);
+        if is_excluded(normalised_for_exclude.trim(), excluded) {
+            return None;
+        }
         return rewrite_line_range(&cmd_sans_abs).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
@@ -1267,6 +1307,18 @@ fn rewrite_segment_inner(
     if let Some(cmd_args) = cmd_sans_abs.strip_prefix("cat ") {
         let args = cmd_args.trim_start();
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
+            return None;
+        }
+    }
+
+    // GNU grep's --include/--exclude/--exclude-from/--exclude-dir have no
+    // equivalent in the rg-backed `contextcrawler grep`: rg rejects them with
+    // `unrecognized flag`, so rewriting turned a valid `grep --include='*.rs' .`
+    // into a failing command (#248). Leave these raw — native GNU grep handles
+    // them correctly. rg-native `-g`/`--glob` (valid on the bare `rg` source)
+    // is untouched: it is the rewrite target's own syntax.
+    if let Some(grep_args) = cmd_sans_abs.strip_prefix("grep ") {
+        if grep_args.contains("--include") || grep_args.contains("--exclude") {
             return None;
         }
     }
@@ -1408,6 +1460,135 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+/// Apply `strip_scheduling_prefix` repeatedly until no leading scheduling
+/// wrapper remains (e.g. `timeout 5s nice -n 5 <cmd>`). Classification-only:
+/// the wrapper text is discarded. Bounded by `MAX_PREFIX_DEPTH`.
+fn strip_scheduling_prefixes_all(cmd: &str) -> String {
+    let mut current = cmd.trim();
+    for _ in 0..MAX_PREFIX_DEPTH {
+        match strip_scheduling_prefix(current) {
+            Some((_, rest)) if !rest.is_empty() => current = rest,
+            _ => break,
+        }
+    }
+    current.to_string()
+}
+
+/// Split `s` at its first whitespace run into `(first_token, remainder)`.
+/// `remainder` is left-trimmed (leading whitespace dropped); it is `""` when
+/// the token was the last one. Returns `None` when `s` is empty/whitespace-only.
+fn split_first_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    match s.find(char::is_whitespace) {
+        Some(i) => Some((&s[..i], s[i..].trim_start())),
+        None => Some((s, "")),
+    }
+}
+
+/// Peel a leading scheduling wrapper (`timeout`/`nice`/`time`/`nohup`) so the
+/// REAL command can be classified and rewritten, then re-prepend it — mirroring
+/// how `ENV_PREFIX` peels `sudo`/`env`/`KEY=VALUE`.
+///
+/// Returns `(prefix, rest)` where `prefix` is the wrapper text with its own
+/// trailing whitespace trimmed and `rest` is the real command. `timeout` and
+/// `nice` consume their own options plus their argument (duration /
+/// adjustment) before the command word; `time`/`nohup` are bare words.
+///
+/// Only a LEADING word is recognised — `echo time` / `nice` as an argument
+/// never matches, and a longer word is never mistaken for a shorter prefix
+/// (`timeout` does not match `time`) thanks to the word-boundary check.
+fn strip_scheduling_prefix(cmd: &str) -> Option<(&str, &str)> {
+    // Bare wrappers: `nohup <cmd>`, `time <cmd>`.
+    for word in ["nohup", "time"] {
+        if let Some(rest) = strip_word_prefix(cmd, word) {
+            if rest.is_empty() {
+                return None;
+            }
+            return Some((cmd[..cmd.len() - rest.len()].trim_end(), rest));
+        }
+    }
+
+    // `timeout [OPTIONS] DURATION <cmd>` — skip options, then require a
+    // non-flag duration token, then the real command.
+    if let Some(rest) = strip_word_prefix(cmd, "timeout") {
+        let rest = skip_timeout_options(rest);
+        let (duration, after) = split_first_token(rest)?;
+        if duration.starts_with('-') || after.is_empty() {
+            return None;
+        }
+        return Some((cmd[..cmd.len() - after.len()].trim_end(), after));
+    }
+
+    // `nice [-n ADJUSTMENT] <cmd>` / `nice [--adjustment=N] <cmd>`.
+    if let Some(rest) = strip_word_prefix(cmd, "nice") {
+        let rest = skip_nice_options(rest);
+        if rest.is_empty() {
+            return None;
+        }
+        return Some((cmd[..cmd.len() - rest.len()].trim_end(), rest));
+    }
+
+    None
+}
+
+/// Advance past leading `timeout` options. `-s`/`-k`/`--signal`/`--kill-after`
+/// take a separate value argument; every other `-…` flag is value-less.
+fn skip_timeout_options(cmd: &str) -> &str {
+    let mut rest = cmd.trim_start();
+    loop {
+        let (tok, after) = match split_first_token(rest) {
+            Some(v) => v,
+            None => return rest,
+        };
+        if !tok.starts_with('-') || tok == "-" {
+            return rest;
+        }
+        let takes_value = matches!(tok, "-s" | "-k" | "--signal" | "--kill-after");
+        rest = after;
+        if takes_value {
+            match split_first_token(rest) {
+                Some((_, a)) => rest = a,
+                None => return "",
+            }
+        }
+    }
+}
+
+/// Advance past leading `nice` options. Only the adjustment forms are
+/// recognised (`-n N`, `--adjustment=N`, `--adjustment N`, and the legacy
+/// `-N`); any other leading `-…` token is treated as the command itself.
+fn skip_nice_options(cmd: &str) -> &str {
+    let mut rest = cmd.trim_start();
+    loop {
+        let (tok, after) = match split_first_token(rest) {
+            Some(v) => v,
+            None => return rest,
+        };
+        if tok == "-n" || tok == "--adjustment" {
+            match split_first_token(after) {
+                Some((_, a)) => rest = a,
+                None => return "",
+            }
+        } else if let Some(adj) = tok.strip_prefix("--adjustment=") {
+            if adj.is_empty() {
+                return rest;
+            }
+            rest = after;
+        } else if tok.len() > 1
+            && tok.starts_with('-')
+            && tok[1..].chars().all(|c| c.is_ascii_digit())
+        {
+            // Legacy `nice -5 <cmd>` adjustment spelling.
+            rest = after;
+        } else {
+            return rest;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::report::CtxcrlStatus;
@@ -1428,6 +1609,30 @@ mod tests {
                 status: CtxcrlStatus::Existing,
             }
         );
+    }
+
+    #[test]
+    fn test_classify_scheduling_prefix_stripped() {
+        // `timeout`/`nice`/`time`/`nohup` are peeled for classification just
+        // like the `sudo`/`env` prefix, so the inner command classifies.
+        for cmd in [
+            "timeout 5s git status",
+            "timeout -s KILL 5s git status",
+            "nice -n 5 git status",
+            "time git status",
+            "nohup git status",
+        ] {
+            assert_eq!(
+                classify_command(cmd),
+                Classification::Supported {
+                    ctxcrl_equivalent: "contextcrawler git",
+                    category: "Git",
+                    estimated_savings_pct: 70.0,
+                    status: CtxcrlStatus::Existing,
+                },
+                "classify_command({cmd:?})"
+            );
+        }
     }
 
     #[test]
@@ -1704,12 +1909,15 @@ mod tests {
 
     #[test]
     fn test_classify_cargo_fmt_passthrough() {
+        // cargo fmt routes through the `external_subcommand` passthrough — no
+        // filtering happens, so it must NOT inherit Cargo's headline 80%
+        // savings. A passthrough always claims 0.
         assert_eq!(
             classify_command("cargo fmt"),
             Classification::Supported {
                 ctxcrl_equivalent: "contextcrawler cargo",
                 category: "Cargo",
-                estimated_savings_pct: 80.0,
+                estimated_savings_pct: 0.0,
                 status: CtxcrlStatus::Passthrough,
             }
         );
@@ -2225,6 +2433,47 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_grep_include_flags_left_raw() {
+        // #248: GNU grep's --include/--exclude have no rg equivalent in
+        // `contextcrawler grep` — rg rejects them with `unrecognized flag`, so
+        // rewriting produced a failed loop. Leave these raw: native GNU grep
+        // handles them correctly.
+        for cmd in [
+            r#"grep -rn "unwrap()" --include="*.rs" ."#,
+            r#"grep -rn "unwrap()" --include="*.rs" --exclude="*.md" ."#,
+            r#"grep -r --include='*.rs' --exclude-dir=target foo src/"#,
+            "/usr/bin/grep -rni foo --include='*.rs' .",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "must leave GNU-flag grep raw so it runs correctly (#248): {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_grep_plain_still_rewrites() {
+        // Non-regression: a plain `grep` (no GNU include/exclude flags) keeps
+        // rewriting to the compressed contextcrawler grep.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn \"fn main\" src/", &[]),
+            Some("contextcrawler grep -rn \"fn main\" src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_glob_flag_still_rewrites() {
+        // rg-native `-g '*.rs'` is valid on the bare `rg` source — and since
+        // it's the rewrite TARGET's own syntax, it must keep rewriting. Guards
+        // only target GNU grep's --include/--exclude.
+        assert_eq!(
+            rewrite_command_no_prefixes("rg \"fn main\" -g '*.rs'", &[]),
+            Some("contextcrawler rg \"fn main\" -g '*.rs'".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_playwright() {
         let commands = vec![
             "npm exec playwright",
@@ -2568,10 +2817,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_head_numeric_flag() {
-        // head -20 file → contextcrawler read file --max-lines 20 (not contextcrawler read -20 file)
+        // head -20 file → contextcrawler read file --head-lines 20 (not contextcrawler read -20 file)
         assert_eq!(
             rewrite_command_no_prefixes("head -20 src/main.rs", &[]),
-            Some("contextcrawler read src/main.rs --max-lines 20".into())
+            Some("contextcrawler read src/main.rs --head-lines 20".into())
         );
     }
 
@@ -2579,7 +2828,7 @@ mod tests {
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
             rewrite_command_no_prefixes("head --lines=50 src/lib.rs", &[]),
-            Some("contextcrawler read src/lib.rs --max-lines 50".into())
+            Some("contextcrawler read src/lib.rs --head-lines 50".into())
         );
     }
 
@@ -2588,7 +2837,7 @@ mod tests {
         // `head -n 5 file` — space form, parity with `tail -n 5 file`.
         assert_eq!(
             rewrite_command_no_prefixes("head -n 5 src/main.rs", &[]),
-            Some("contextcrawler read src/main.rs --max-lines 5".into())
+            Some("contextcrawler read src/main.rs --head-lines 5".into())
         );
     }
 
@@ -2597,7 +2846,7 @@ mod tests {
         // `head --lines 7 file` — space form, parity with `tail --lines 7 file`.
         assert_eq!(
             rewrite_command_no_prefixes("head --lines 7 src/lib.rs", &[]),
-            Some("contextcrawler read src/lib.rs --max-lines 7".into())
+            Some("contextcrawler read src/lib.rs --head-lines 7".into())
         );
     }
 
@@ -2626,6 +2875,116 @@ mod tests {
             rewrite_command_no_prefixes("head -c 100 src/main.rs", &[]),
             None
         );
+    }
+
+    #[test]
+    fn test_rewrite_head_uses_head_lines_flag() {
+        // `head -N file` keeps the FIRST N lines → `--head-lines`, never the
+        // absolute-cap `--max-lines`.
+        assert_eq!(
+            rewrite_command_no_prefixes("head -3 src/main.rs", &[]),
+            Some("contextcrawler read src/main.rs --head-lines 3".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("head --lines=9 src/lib.rs", &[]),
+            Some("contextcrawler read src/lib.rs --head-lines 9".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_excluded_head_stays_raw() {
+        // exclude_commands=["head"] must beat the line-range special case,
+        // which otherwise short-circuits ahead of the generic exclude check.
+        let excluded = vec!["head".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("head -20 src/main.rs", &excluded),
+            None
+        );
+        // Other commands are unaffected by the head exclusion.
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
+            Some("contextcrawler git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_excluded_tail_and_nl_stay_raw() {
+        let excluded_tail = vec!["tail".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("tail -n 5 app.log", &excluded_tail),
+            None
+        );
+        let excluded_nl = vec!["nl".to_string()];
+        assert_eq!(
+            rewrite_command_no_prefixes("nl -ba README.md", &excluded_nl),
+            None
+        );
+    }
+
+    // --- scheduling wrappers: timeout / nice / time / nohup ---
+    //
+    // These run the inner command and pass its output through unchanged, so
+    // they are peeled for classification and re-prepended on the rewrite —
+    // exactly like the `sudo`/`env` prefix (ENV_PREFIX).
+
+    #[test]
+    fn test_rewrite_timeout_prefix_preserved() {
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout 5s git status", &[]),
+            Some("timeout 5s contextcrawler git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_timeout_options_and_duration_preserved() {
+        // Options and their value arguments are consumed with the duration.
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout -s KILL 5s git status", &[]),
+            Some("timeout -s KILL 5s contextcrawler git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("timeout --kill-after=2s 5s git status", &[]),
+            Some("timeout --kill-after=2s 5s contextcrawler git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_nice_prefix_preserved() {
+        assert_eq!(
+            rewrite_command_no_prefixes("nice -n 10 git status", &[]),
+            Some("nice -n 10 contextcrawler git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("nice --adjustment=5 git status", &[]),
+            Some("nice --adjustment=5 contextcrawler git status".into())
+        );
+        // Bare `nice <cmd>` (default adjustment).
+        assert_eq!(
+            rewrite_command_no_prefixes("nice git status", &[]),
+            Some("nice contextcrawler git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_nohup_and_time_prefix_preserved() {
+        assert_eq!(
+            rewrite_command_no_prefixes("nohup git status", &[]),
+            Some("nohup contextcrawler git status".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("time git status", &[]),
+            Some("time contextcrawler git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_scheduling_word_not_prefix_not_peeled() {
+        // `time`/`nice`/`timeout` as an ARGUMENT (not the leading word) must
+        // not be peeled, and a longer word must not match a shorter prefix.
+        assert_eq!(rewrite_command_no_prefixes("echo time", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("echo nice", &[]), None);
+        // `timeout` must not be treated as `time`.
+        assert_eq!(rewrite_command_no_prefixes("timeout 5s", &[]), None);
     }
 
     // --- nl → read --line-numbers (#195) ---
@@ -2723,9 +3082,9 @@ mod tests {
 
     // --- Issue #1362: head/tail with multiple files falls back to native command ---
     //
-    // `contextcrawler read <file> --max-lines N` only accepts a single positional file path in
+    // `contextcrawler read <file> --head-lines N` only accepts a single positional file path in
     // a shape that maps cleanly to `head -N`. Rewriting `head -N a b c` to
-    // `contextcrawler read a b c --max-lines N` previously produced a command where `contextcrawler read`
+    // `contextcrawler read a b c --head-lines N` previously produced a command where `contextcrawler read`
     // would concatenate the files without the `==> name <==` banners that native
     // `head` emits, so the fix is to skip the rewrite and let the shell run the
     // real `head`/`tail` binary.
@@ -2769,14 +3128,20 @@ mod tests {
             None
         );
         // Bare form already had this behaviour; keep it locked.
-        assert_eq!(rewrite_command_no_prefixes("head -c 200 src/main.rs", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("head -c 200 src/main.rs", &[]),
+            None
+        );
     }
 
     #[test]
     fn test_rewrite_abs_path_tail_follow_passes_through() {
         // `tail -f` blocks forever; read has no follow mode. Rewriting it
         // to `read -f` was both a parse failure AND a semantics break.
-        assert_eq!(rewrite_command_no_prefixes("/usr/bin/tail -f app.log", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/tail -f app.log", &[]),
+            None
+        );
         assert_eq!(rewrite_command_no_prefixes("tail -f app.log", &[]), None);
     }
 
@@ -2784,7 +3149,10 @@ mod tests {
     fn test_rewrite_abs_path_cat_display_flag_passes_through() {
         // `cat -v` shows control chars; read has no equivalent. Must not
         // become `read -v`.
-        assert_eq!(rewrite_command_no_prefixes("/usr/bin/cat -v file.txt", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("/usr/bin/cat -v file.txt", &[]),
+            None
+        );
     }
 
     #[test]
@@ -2802,7 +3170,7 @@ mod tests {
     fn test_rewrite_abs_path_head_numeric_still_rewrites() {
         assert_eq!(
             rewrite_command_no_prefixes("/usr/bin/head -20 src/main.rs", &[]),
-            Some("contextcrawler read src/main.rs --max-lines 20".into())
+            Some("contextcrawler read src/main.rs --head-lines 20".into())
         );
     }
 

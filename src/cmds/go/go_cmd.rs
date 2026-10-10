@@ -51,6 +51,43 @@ struct PackageResult {
     package_fail_output: Vec<String>,         // output lines collected before the package fail
 }
 
+/// Position at which the injected `-json` flag must be spliced into the
+/// user's `go test` arguments.
+///
+/// `go` requires the `-C <dir>` flag to be the first flag on the command
+/// line, so `-json` cannot simply be prepended: `go test -json -C dir ./...`
+/// is rejected ("-C flag must be first flag"). When a `-C <dir>` pair is
+/// present we return the index just past it, so the emitted command is
+/// `go test -C dir -json ./...`. Otherwise `-json` goes first (index 0).
+fn go_test_json_insert_position(args: &[String]) -> usize {
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "-C" {
+            // `-C <dir>` pair: splice after the directory operand.
+            return (i + 2).min(args.len());
+        }
+        if arg.starts_with("-C=") {
+            // `-C=<dir>` single-token form.
+            return i + 1;
+        }
+    }
+    0
+}
+
+/// Assemble the argv handed to `go test`, injecting `-json` at the position
+/// returned by [`go_test_json_insert_position`] unless the user already
+/// selected a JSON/bench mode (`skip_json`).
+fn build_go_test_args(args: &[String], skip_json: bool) -> Vec<String> {
+    if skip_json {
+        return args.to_vec();
+    }
+    let pos = go_test_json_insert_position(args);
+    let mut v = Vec::with_capacity(args.len() + 1);
+    v.extend_from_slice(&args[..pos]);
+    v.push("-json".to_string());
+    v.extend_from_slice(&args[pos..]);
+    v
+}
+
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     if let Err(msg) = check_forbidden_go_args(args) {
         eprintln!("{}", msg);
@@ -62,20 +99,16 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 
     let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
 
-    if !skip_json {
-        cmd.arg("-json");
-    }
+    // `-json` must be inserted after a leading `-C <dir>` pair (the `go` tool
+    // requires `-C` to be the first flag); otherwise it is prepended.
+    let effective_args = build_go_test_args(args, skip_json);
 
-    for arg in args {
+    for arg in &effective_args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!(
-            "Running: go test {}{}",
-            if !skip_json { "-json " } else { "" },
-            args.join(" ")
-        );
+        eprintln!("Running: go test {}", effective_args.join(" "));
     }
 
     let filter: fn(&str) -> String = if skip_json {
@@ -160,7 +193,10 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     // `go run` (and others) also accept `-toolexec` / `-exec`. Reject the
     // dangerous flags before any spawn — these are CLI flags, not env vars,
     // so `secure_go_command` does not defend them. See #111 G6.
-    let str_args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let str_args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     if let Err(msg) = check_forbidden_go_args(&str_args) {
         eprintln!("{}", msg);
         return Ok(2);
@@ -267,7 +303,10 @@ fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
 fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     // golangci-lint loads custom .so plugin linters from its config file,
     // so `-c <attacker.yml>` is RCE-equivalent. Reject before spawn. #111 G6.
-    let str_args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    let str_args: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     if let Err(msg) = crate::core::utils::check_forbidden_golangci_args(&str_args) {
         eprintln!("{}", msg);
         return Ok(2);
@@ -678,10 +717,7 @@ fn format_go_build_failure(output: &str, exit_code: i32) -> String {
     }
 
     if lines.len() > 20 {
-        result.push_str(&format!(
-            "\n... +{} more output lines\n",
-            lines.len() - 20
-        ));
+        result.push_str(&format!("\n... +{} more output lines\n", lines.len() - 20));
     }
 
     result.trim().to_string()
@@ -1203,5 +1239,54 @@ utils.go:15:5: unreachable code"#;
         assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
         assert!(!has_golangci_format_flag(&os(&[])));
         assert!(!has_golangci_format_flag(&os(&["--fix"])));
+    }
+
+    fn sa(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_go_test_json_prepended_without_c_flag() {
+        // No `-C`: `-json` goes first, ahead of user args.
+        let out = build_go_test_args(&sa(&["./...", "-run", "TestFoo"]), false);
+        assert_eq!(out, sa(&["-json", "./...", "-run", "TestFoo"]));
+    }
+
+    #[test]
+    fn test_go_test_json_inserted_after_c_pair() {
+        // `-C <dir>` must stay first: `go test -C dir ./...` must become
+        // `go test -C dir -json ./...`, never `go test -json -C dir ./...`.
+        let out = build_go_test_args(&sa(&["-C", "dir", "./..."]), false);
+        assert_eq!(out, sa(&["-C", "dir", "-json", "./..."]));
+    }
+
+    #[test]
+    fn test_go_test_json_inserted_after_c_equals_form() {
+        // Single-token `-C=<dir>` form.
+        let out = build_go_test_args(&sa(&["-C=dir", "./..."]), false);
+        assert_eq!(out, sa(&["-C=dir", "-json", "./..."]));
+    }
+
+    #[test]
+    fn test_go_test_json_not_duplicated_when_user_supplies_it() {
+        let args = sa(&["-C", "dir", "-json", "./..."]);
+        let out = build_go_test_args(&args, true);
+        assert_eq!(out, args);
+        assert_eq!(out.iter().filter(|a| *a == "-json").count(), 1);
+    }
+
+    #[test]
+    fn test_go_test_json_skipped_for_bench() {
+        // `-bench` implies the raw (non-JSON) path; no `-json` injected.
+        let args = sa(&["-bench", ".", "./..."]);
+        let out = build_go_test_args(&args, true);
+        assert_eq!(out, args);
+    }
+
+    #[test]
+    fn test_go_test_json_insert_position_trailing_c_without_dir() {
+        // Malformed `-C` at the end must not panic; clamped to the arg count.
+        let out = build_go_test_args(&sa(&["-C"]), false);
+        assert_eq!(out, sa(&["-C", "-json"]));
     }
 }

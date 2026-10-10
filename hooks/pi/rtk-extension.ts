@@ -12,7 +12,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 const BINARY = "contextcrawler";
 
@@ -22,16 +22,25 @@ function binaryAvailable(): boolean {
 }
 
 function rewrite(command: string): string {
-	try {
-		const out = execFileSync(BINARY, ["rewrite", command], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		}).trim();
-		return out || command;
-	} catch {
-		// rewrite failed — pass the original command through unchanged
+	// `contextcrawler rewrite` exits non-zero (3) when a permission/Ask verdict
+	// or a defence-in-depth gate downgrades auto-allow to Ask, OR when no
+	// ContextCrawler equivalent exists (1). The rewritten command is still
+	// emitted on stdout in the Ask case (see exit-code contract in
+	// src/hooks/rewrite_cmd.rs) — the harness must USE that stdout rather than
+	// treat the non-zero exit as failure. Only a genuinely useless stdout
+	// (empty or byte-identical to the original) falls back to the raw command.
+	const result = spawnSync(BINARY, ["rewrite", command], {
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "ignore"],
+	});
+	const out = (result.stdout ?? "").trim();
+	if (!out) {
 		return command;
 	}
+	if (result.status === 0 || out !== command) {
+		return out;
+	}
+	return command;
 }
 
 export default function (pi: ExtensionAPI) {

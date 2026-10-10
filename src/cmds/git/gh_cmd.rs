@@ -315,13 +315,13 @@ fn state_icon(state: &str, ultra_compact: bool) -> &'static str {
 fn should_passthrough_pr_view(extra_args: &[String]) -> bool {
     extra_args
         .iter()
-        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments")
+        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments" || a == "-c")
 }
 
 fn should_passthrough_issue_view(extra_args: &[String]) -> bool {
     extra_args
         .iter()
-        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments")
+        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments" || a == "-c")
 }
 
 fn should_passthrough_pr_status(args: &[String]) -> bool {
@@ -467,14 +467,15 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32>
         Some(id) => format!("pr checks {}", id),
         None => "pr checks".to_string(),
     };
+    // Failing checks exit non-zero, but we still want the filtered
+    // pass/fail/pending summary rather than raw output, so deliberately do
+    // NOT set `early_exit_on_failure` here.
     runner::run_filtered(
         cmd,
         "gh",
         &label,
         format_pr_checks,
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        RunOptions::stdout_only().no_trailing_newline(),
     )
 }
 
@@ -484,7 +485,26 @@ fn format_pr_checks(stdout: &str) -> String {
     let mut pending = 0;
     let mut failed_checks = Vec::new();
 
+    // `gh pr checks --watch` re-emits a line for a check every time its state
+    // changes, so the captured stream can repeat the same check many times.
+    // De-duplicate by check identity, keeping the latest line for each check
+    // (its most recent state) so a pending→pass transition is not counted
+    // twice, and a genuine pass is not shadowed by an earlier pending line.
+    let mut seen: Vec<(String, &str)> = Vec::new();
     for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Non-TTY `gh pr checks` output is tab-separated: name, status,
+        // elapsed, url. Fall back to the whole line when there are no tabs.
+        let key = line.split('\t').next().unwrap_or(line).trim().to_string();
+        match seen.iter().position(|(k, _)| *k == key) {
+            Some(idx) => seen[idx].1 = line,
+            None => seen.push((key, line)),
+        }
+    }
+
+    for (_, line) in &seen {
         if line.contains("[ok]") || line.contains("pass") {
             passed += 1;
         } else if line.contains("[x]") || line.contains("fail") {
@@ -994,7 +1014,10 @@ fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[Strin
     // use `secure_gh_command()` to apply UNIVERSAL_ENV_STRIP + GH_STRIP_ENV
     // to the child env. The shared `runner::run_passthrough` uses raw
     // `resolved_command()` and would bypass the env-strip entirely.
-    debug_assert_eq!(cmd, "gh", "gh passthrough helper should only be called for gh");
+    debug_assert_eq!(
+        cmd, "gh",
+        "gh passthrough helper should only be called for gh"
+    );
     let mut os_args: Vec<std::ffi::OsString> =
         base_args.iter().map(std::ffi::OsString::from).collect();
     os_args.extend(extra_args.iter().map(std::ffi::OsString::from));
@@ -1003,7 +1026,10 @@ fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[Strin
 
 fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<i32> {
     // SECURITY (issue #50 pre-PR review P0): see run_passthrough_with_extra.
-    debug_assert_eq!(cmd, "gh", "gh passthrough helper should only be called for gh");
+    debug_assert_eq!(
+        cmd, "gh",
+        "gh passthrough helper should only be called for gh"
+    );
     let mut os_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from(subcommand)];
     os_args.extend(args.iter().map(std::ffi::OsString::from));
     crate::core::runner::run_passthrough_cmd(secure_gh_command(), cmd, &os_args, 0)
@@ -1233,6 +1259,11 @@ mod tests {
     }
 
     #[test]
+    fn test_should_passthrough_pr_view_short_comments() {
+        assert!(should_passthrough_pr_view(&["-c".into()]));
+    }
+
+    #[test]
     fn test_should_passthrough_pr_status_help() {
         assert!(should_passthrough_pr_status(&["--help".into()]));
         assert!(should_passthrough_pr_status(&["-h".into()]));
@@ -1293,11 +1324,53 @@ mod tests {
         assert!(result.contains("fail 1"));
     }
 
+    // --- format_pr_checks tests ---
+
+    #[test]
+    fn test_format_pr_checks_buckets() {
+        let stdout = "build\tpass\t1m2s\thttps://ci/build\n\
+                      test\tfail\t20s\thttps://ci/test\n\
+                      lint\tpending\t0s\thttps://ci/lint\n";
+        let out = format_pr_checks(stdout);
+        assert!(out.contains("[ok] Passed: 1"), "got:\n{}", out);
+        assert!(out.contains("[FAIL] Failed: 1"), "got:\n{}", out);
+        assert!(out.contains("[pending] Pending: 1"), "got:\n{}", out);
+        assert!(out.contains("test\tfail\t20s"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_format_pr_checks_dedupes_repeated_watch_lines() {
+        // `--watch` re-emits the same line on every poll; the check must be
+        // counted exactly once.
+        let stdout = "build\tpass\t1m2s\thttps://ci/build\n\
+                      build\tpass\t1m2s\thttps://ci/build\n\
+                      build\tpass\t1m2s\thttps://ci/build\n";
+        let out = format_pr_checks(stdout);
+        assert!(out.contains("[ok] Passed: 1"), "got:\n{}", out);
+        assert!(!out.contains("Passed: 3"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn test_format_pr_checks_dedupe_keeps_latest_state() {
+        // A check that transitions pending → pass during the watch must be
+        // counted once, in its final (pass) state rather than as pending.
+        let stdout = "build\tpending\t0s\thttps://ci/build\n\
+                      build\tpass\t1m2s\thttps://ci/build\n";
+        let out = format_pr_checks(stdout);
+        assert!(out.contains("[ok] Passed: 1"), "got:\n{}", out);
+        assert!(!out.contains("Pending: 1"), "got:\n{}", out);
+    }
+
     // --- should_passthrough_issue_view tests ---
 
     #[test]
     fn test_should_passthrough_issue_view_comments() {
         assert!(should_passthrough_issue_view(&["--comments".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_issue_view_short_comments() {
+        assert!(should_passthrough_issue_view(&["-c".into()]));
     }
 
     #[test]
