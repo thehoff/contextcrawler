@@ -1065,14 +1065,37 @@ impl Default for CaptureLimits {
 }
 
 /// Capture a child's stdout/stderr with explicit caps and optional
-/// wall-clock timeout. stdin is always nulled (callers that need to feed
-/// stdin should use `run_streaming` with `StdinMode::Filter`).
+/// wall-clock timeout. stdin is nulled. Callers that need the child's
+/// stdin should use [`exec_capture_inheriting_stdin`], or `run_streaming`
+/// with `StdinMode::Filter`.
 ///
 /// Caps fire silently: the returned `CaptureResult` contains the
 /// truncated prefix and the child runs to completion. A timeout, by
 /// contrast, returns `Err` — the caller decides fallback.
 pub fn exec_capture_with_limits(cmd: &mut Command, limits: CaptureLimits) -> Result<CaptureResult> {
-    cmd.stdin(Stdio::null());
+    exec_capture_with_limits_inner(cmd, limits, false)
+}
+
+/// Capture stdout/stderr while the child inherits our stdin.
+///
+/// `exec_capture` gives the child an immediate EOF. `curl -d @-` then sends
+/// an empty body. Upstream rtk 3fd7fc8b.
+pub fn exec_capture_inheriting_stdin(cmd: &mut Command) -> Result<CaptureResult> {
+    let result = exec_capture_with_limits_inner(cmd, CaptureLimits::default(), true)?;
+    warn_if_capped(&result, "exec_capture");
+    Ok(result)
+}
+
+fn exec_capture_with_limits_inner(
+    cmd: &mut Command,
+    limits: CaptureLimits,
+    inherit_stdin: bool,
+) -> Result<CaptureResult> {
+    if inherit_stdin {
+        cmd.stdin(Stdio::inherit());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 

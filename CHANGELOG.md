@@ -43,6 +43,15 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   skips the host check of `contextcrawler git status`. A deny rule that
   matches only the rewrite still blocks. Copilot does not treat an
   already-prefixed `contextcrawler read .env` as trusted on Standard.
+- Harvested from rtk, reviewed against the two jobs:
+  `case` terminators `;;` / `;&` / `;;&` stay one operator, so a rewrite
+  no longer turns a fall-through into a background job (rtk 5e92ea47).
+  A `{ rm ...; }` group no longer hides the command from a deny or ask
+  rule, and that strip is not applied to allow (rtk 3992e0ab). The
+  ANSI-C quote and leading-redirect holes from that commit were already
+  closed. `read --head-lines N` stops at the Nth line instead of reading
+  a source that never ends (rtk 0df1d2ba). `curl -d @-` inherits stdin
+  instead of sending an empty body (rtk 3fd7fc8b).
 
 ## [0.5.0] — 2026-08-16
 

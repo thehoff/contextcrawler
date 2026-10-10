@@ -9,7 +9,7 @@ use crate::core::tracking;
 use crate::core::utils::format_tokens;
 use anyhow::{Context, Result};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
 const JSON_MAX_DEPTH: usize = 5;
@@ -51,6 +51,57 @@ fn tracking_label(display_path: &str, window: &LineWindow) -> String {
     }
 }
 
+/// How much is pulled at a time. Only the lines asked for are kept, so this
+/// bounds how far past the Nth newline one read can reach.
+const READ_CHUNK: usize = 8192;
+
+/// The first `n` newline-terminated lines, as text.
+///
+/// Stops at the Nth `\n` so a device node or a FIFO nobody closes still
+/// returns. `n == 0` reads nothing. Invalid UTF-8 in that window is an
+/// error, the same as `fs::read_to_string` on a regular file.
+fn read_head_text(file: &Path, n: usize) -> Result<String> {
+    let handle =
+        fs::File::open(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
+    read_head_text_from(handle, n, &file.display().to_string())
+}
+
+fn read_head_text_from(reader: impl Read, n: usize, what: &str) -> Result<String> {
+    let bytes =
+        read_head_bytes(reader, n).with_context(|| format!("Failed to read file: {what}"))?;
+    String::from_utf8(bytes)
+        .with_context(|| format!("Failed to read file: {what} is not valid UTF-8"))
+}
+
+fn read_head_bytes(mut reader: impl Read, n: usize) -> std::io::Result<Vec<u8>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut window = Vec::new();
+    let mut chunk = [0u8; READ_CHUNK];
+    let mut seen = 0usize;
+    while seen < n {
+        let read = match reader.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if read == 0 {
+            break;
+        }
+        for &byte in &chunk[..read] {
+            window.push(byte);
+            if byte == b'\n' {
+                seen += 1;
+                if seen == n {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(window)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     file: &Path,
@@ -67,9 +118,21 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
-    // Read file content
-    let content = fs::read_to_string(file)
-        .with_context(|| format!("Failed to read file: {}", file.display()))?;
+    // `head -n N` stops at the Nth line. Reading the file whole first never
+    // returns on a source with no end (`head -5 /dev/urandom` rewrites here).
+    // A head window is taken from the raw bytes before filtering, so the rest
+    // of the file is not an input to the render. Tail and an explicit range
+    // still need the whole file. Upstream rtk 0df1d2ba.
+    let content = if intent.is_none() && window.tail_lines.is_none() && !window.has_range() {
+        match window.head_lines {
+            Some(n) => read_head_text(file, n)?,
+            None => fs::read_to_string(file)
+                .with_context(|| format!("Failed to read file: {}", file.display()))?,
+        }
+    } else {
+        fs::read_to_string(file)
+            .with_context(|| format!("Failed to read file: {}", file.display()))?
+    };
 
     let read_config = config::read();
     let ext = file.extension().and_then(|e| e.to_str());
@@ -714,6 +777,37 @@ fn main() {{
     // `--head-lines` / `--tail-lines` select lines from the RAW file, then the
     // content is comment-filtered. Doing it the other way round let comment
     // stripping change which lines the window landed on (and how many).
+
+    #[test]
+    fn read_head_text_stops_at_the_nth_line() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        file.write_all(b"a\nb\nc\nd\n")?;
+        file.flush()?;
+        assert_eq!(read_head_text(file.path(), 2)?, "a\nb\n");
+        assert_eq!(read_head_text(file.path(), 0)?, "");
+        Ok(())
+    }
+
+    /// A source that stays open after the Nth line must still return. This is
+    /// the `/dev/urandom` hang: `head -n N` rewrites to `read --head-lines`.
+    #[cfg(unix)]
+    #[test]
+    fn read_head_returns_before_the_source_closes() {
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_head_text_from(reader, 2, "pipe"));
+        });
+        writer.write_all(b"a\nb\nc\n").unwrap();
+        let got = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("head read waited for the source to close");
+        assert_eq!(got.unwrap(), "a\nb\n");
+    }
 
     #[test]
     fn head_lines_takes_the_first_raw_lines() {

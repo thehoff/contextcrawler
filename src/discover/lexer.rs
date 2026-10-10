@@ -203,12 +203,28 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
             }
             ';' => {
                 flush_arg(&mut tokens, &mut current, current_start);
+                let start = byte_pos;
+                let mut val = String::from(";");
+                byte_pos += char_len;
+                // `;;`, `;&` and `;;&` are one `case` terminator each. Split
+                // apart, the rewrite emits `; ;` (a syntax error) or `; &`
+                // (a background job where a fall-through was written).
+                // Upstream rtk 5e92ea47.
+                if chars.peek() == Some(&';') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push(';');
+                }
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
+                    val.push('&');
+                }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Operator,
-                    value: ";".into(),
-                    offset: byte_pos,
+                    value: val,
+                    offset: start,
                 });
-                byte_pos += char_len;
                 current_start = byte_pos;
             }
             '&' => {

@@ -926,8 +926,8 @@ fn rewrite_compound(
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                if tok.value == ";" {
-                    result.push(';');
+                if tok.value.starts_with(';') {
+                    result.push_str(&tok.value);
                     let after = tok.offset + tok.value.len();
                     if after < cmd.len() {
                         result.push(' ');
@@ -1596,6 +1596,64 @@ mod tests {
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         super::rewrite_command(cmd, excluded, &[])
+    }
+
+    /// `;;`, `;&` and `;;&` terminate a `case` arm. Lexing each character as
+    /// its own operator made the rewrite emit `; ;` (bash rejects it) or
+    /// `; &` (the arm runs in the background). Upstream rtk 5e92ea47.
+    #[test]
+    fn test_case_terminators_survive_a_rewrite() {
+        for (cmd, expected) in [
+            (
+                "git status; case x in a) echo 1;; *) echo 2;; esac",
+                "contextcrawler git status; case x in a) echo 1;; *) echo 2;; esac",
+            ),
+            (
+                "git status; case x in a) echo 1;& *) echo 2;; esac",
+                "contextcrawler git status; case x in a) echo 1;& *) echo 2;; esac",
+            ),
+            (
+                "git status; case x in a) echo 1;;& *) echo 2;; esac",
+                "contextcrawler git status; case x in a) echo 1;;& *) echo 2;; esac",
+            ),
+            (
+                "case x in x) echo A;; esac; git status",
+                "case x in x) echo A;; esac; contextcrawler git status",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]).as_deref(),
+                Some(expected),
+                "case terminator was not preserved: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_case_terminators_lex_as_one_operator() {
+        for (input, expected) in [(";;", ";;"), (";&", ";&"), (";;&", ";;&"), (";", ";")] {
+            let tokens = tokenize(input);
+            assert_eq!(tokens.len(), 1, "{input} should lex as one token");
+            assert_eq!(tokens[0].kind, TokenKind::Operator);
+            assert_eq!(tokens[0].value, expected);
+            assert_eq!(tokens[0].offset, 0);
+        }
+
+        let tokens = tokenize(";;esac");
+        assert_eq!(tokens.len(), 2, ";;esac should lex as two tokens");
+        assert!(matches!(tokens[0].kind, TokenKind::Operator));
+        assert_eq!(tokens[0].value, ";;");
+        assert!(matches!(tokens[1].kind, TokenKind::Arg));
+        assert_eq!(tokens[1].value, "esac");
+
+        let tokens = tokenize("a ; & b");
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|t| matches!(t.kind, TokenKind::Operator | TokenKind::Shellism))
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -1052,7 +1052,33 @@ fn shell_text_is_balanced(text: &str) -> bool {
 
 fn segment_matches_rule(segment: &str, resolution: &SegmentResolution, pattern: &str) -> bool {
     command_matches_pattern(segment, pattern)
+        || command_matches_pattern(strip_grammar_residue(segment), pattern)
         || resolved_matches_pattern(resolution, pattern, false)
+}
+
+/// `{` and `}` are not segment boundaries, so `... && { rm -rf / ; }` arrives
+/// as `{ rm -rf /` and an exact deny or ask pattern never matches.
+///
+/// Deny and ask only. Stripping can only make a rule fire on more segments,
+/// so a verdict gets stricter. Applying it on the allow side would let
+/// `{ ls` inherit an `ls` rule and turn a prompt into an auto-approve.
+/// Upstream rtk 3992e0ab. `!` is already skipped when resolving the command
+/// word; it is stripped here too so a raw-segment match sees the same command.
+fn strip_grammar_residue(segment: &str) -> &str {
+    let mut rest = segment.trim();
+    loop {
+        // A standalone word is grammar. `!rm` is history expansion, and
+        // `{foo` is a brace expansion, not a group.
+        let stripped = match rest.split_once([' ', '\t']) {
+            Some(("{" | "}" | "!" | "(" | ")", tail)) => tail,
+            _ => return rest,
+        };
+        let next = stripped.trim_start();
+        if next == rest {
+            return rest;
+        }
+        rest = next;
+    }
 }
 
 fn allow_matches_pattern(cmd: &str, pattern: &str) -> bool {
@@ -4780,6 +4806,46 @@ mod tests {
             check_command_with_rules("echo hi & rm -rf /", &deny, &[], &[]),
             PermissionVerdict::Deny,
             "background `&` must split so the rm -rf segment is denied"
+        );
+    }
+
+    /// `{` is not a segment boundary. A deny rule must still see the command
+    /// inside the group. The same strip must not let `{ ls` inherit an `ls`
+    /// allow rule. Upstream rtk 3992e0ab; the ANSI-C and leading-redirect
+    /// holes from that commit were already closed here.
+    #[test]
+    fn brace_group_does_not_hide_a_denied_command() {
+        let deny = vec!["rm -rf".to_string()];
+        let allow = vec!["*".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status && { rm -rf / ; }", &deny, &[], &allow),
+            PermissionVerdict::Deny,
+            "a brace group must not hide rm from a deny rule"
+        );
+        assert_ne!(
+            check_command_with_rules("{ ls /tmp ; }", &[], &[], &["ls /tmp".to_string()]),
+            PermissionVerdict::Allow,
+            "stripping a brace must not widen an allow rule"
+        );
+    }
+
+    #[test]
+    fn leading_redirect_does_not_hide_a_denied_command() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("2>&1 rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny,
+            "a leading fd redirect must not hide the command from deny rules"
+        );
+    }
+
+    #[test]
+    fn ansi_c_quote_is_not_auto_allowed() {
+        let allow = vec!["git:*".to_string()];
+        assert_eq!(
+            check_command_with_rules(r#"git status $'\'' ; rm -rf /"#, &[], &[], &allow),
+            PermissionVerdict::Ask,
+            "ANSI-C quoting the lexer cannot follow must prompt"
         );
     }
 

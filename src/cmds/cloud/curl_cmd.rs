@@ -10,7 +10,7 @@ use crate::cmds::cloud::web_cmd;
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::{
-    stream::exec_capture,
+    stream::exec_capture_inheriting_stdin,
     utils::{check_forbidden_curl_args, secure_curl_command},
 };
 use anyhow::{Context, Result};
@@ -40,7 +40,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: curl -s {}", args.join(" "));
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run curl")?;
+    // `exec_capture` nulls stdin, so `-d @-` / `--data-binary @-` / `-T -`
+    // would send an empty body. Inherit stdin instead. Upstream rtk 3fd7fc8b.
+    let result = exec_capture_inheriting_stdin(&mut cmd).context("Failed to run curl")?;
 
     // Skip filtering on failure: curl can return HTML error bodies that would
     // be misleading to summarize, and we want the real exit code surfaced.
@@ -589,7 +591,10 @@ mod tests {
         let result = filter_curl_output(raw, true);
         let raw_val: serde_json::Value = serde_json::from_str(raw).unwrap();
         let filt_val: serde_json::Value = serde_json::from_str(&result.content).unwrap();
-        assert_eq!(raw_val, filt_val, "minified JSON must be the same value as raw");
+        assert_eq!(
+            raw_val, filt_val,
+            "minified JSON must be the same value as raw"
+        );
     }
 
     // --- Cow optimization: passthrough must not allocate ---
