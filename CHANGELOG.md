@@ -43,6 +43,9 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   skips the host check of `contextcrawler git status`. A deny rule that
   matches only the rewrite still blocks. Copilot does not treat an
   already-prefixed `contextcrawler read .env` as trusted on Standard.
+- `git show -p` no longer prints the full patch in the summary and again
+  in the compacted diff. The summary and the stat drop the patch flags.
+  The diff step keeps them.
 - Harvested from rtk, reviewed against the two jobs:
   `case` terminators `;;` / `;&` / `;;&` stay one operator, so a rewrite
   no longer turns a fall-through into a background job (rtk 5e92ea47).

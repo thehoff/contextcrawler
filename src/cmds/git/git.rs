@@ -482,12 +482,16 @@ fn run_show(
         .map(|r| r.stdout)
         .unwrap_or_default();
 
-    // Step 1: one-line commit summary
+    // Step 1: one-line commit summary. User `-p` / `--patch` must not ride
+    // along: git lets the later flag win, so appending them after `--no-patch`
+    // printed the full patch here and again in the compacted diff.
+    let summary_args = args_without_patch_flags(args);
     let mut summary_cmd = git_cmd(global_args);
-    summary_cmd.args(["show", "--no-patch", "--pretty=format:%h %s (%ar) <%an>"]);
-    for arg in args {
+    summary_cmd.args(["show", "--pretty=format:%h %s (%ar) <%an>"]);
+    for arg in &summary_args {
         summary_cmd.arg(arg);
     }
+    summary_cmd.arg("--no-patch");
     let summary_result = exec_capture(&mut summary_cmd).context("Failed to run git show")?;
     if !summary_result.success() {
         eprintln!("{}", summary_result.stderr);
@@ -495,10 +499,11 @@ fn run_show(
     }
     println!("{}", summary_result.stdout.trim());
 
-    // Step 2: --stat summary
+    // Step 2: --stat summary. `--stat` does not suppress a patch flag, so the
+    // same strip applies. The diff step below keeps the user's flags.
     let mut stat_cmd = git_cmd(global_args);
     stat_cmd.args(["show", "--stat", "--pretty=format:"]);
-    for arg in args {
+    for arg in &summary_args {
         stat_cmd.arg(arg);
     }
     let stat_result = exec_capture(&mut stat_cmd).context("Failed to run git show --stat")?;
@@ -994,6 +999,63 @@ fn log_has_format_flag(args: &[String]) -> bool {
 /// Mirrors the message emitted alongside the injected cap.
 fn log_injects_default_limit(args: &[String]) -> bool {
     parse_user_limit(args).is_none() && !log_has_format_flag(args)
+}
+
+/// Args with a patch request removed, for `git show`'s summary and stat
+/// steps. The diff step keeps the original list.
+///
+/// `-p` as the value of `--grep` / `-n` / `--pretty` stays. Tokens after `--`
+/// stay: they are pathspecs, and a path can be named `-p`.
+fn args_without_patch_flags(args: &[String]) -> Vec<String> {
+    const CONSUMES_NEXT: &[&str] = &[
+        "--grep",
+        "-S",
+        "-G",
+        "--author",
+        "--committer",
+        "-n",
+        "--max-count",
+        "--skip",
+        "--pretty",
+        "--format",
+    ];
+    const PATCH_FLAGS: &[&str] = &[
+        "-p",
+        "-u",
+        "--patch",
+        "--patch-with-raw",
+        "--patch-with-stat",
+    ];
+
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    let mut operands = false;
+    for arg in args {
+        if operands {
+            out.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            operands = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if skip_next {
+            out.push(arg.clone());
+            skip_next = false;
+            continue;
+        }
+        if CONSUMES_NEXT.contains(&arg.as_str()) {
+            skip_next = true;
+            out.push(arg.clone());
+            continue;
+        }
+        if PATCH_FLAGS.contains(&arg.as_str()) {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
 }
 
 /// Detects a patch-producing `git log` flag appearing as its own token.
@@ -4428,6 +4490,27 @@ To https://github.com/foo/bar.git
         assert!(!log_args_have_patch_flag(&s(&["--grep=-p"])));
         // a real patch flag after a consuming option is still caught
         assert!(log_args_have_patch_flag(&s(&["--grep", "fix", "-p"])));
+    }
+
+    #[test]
+    fn show_summary_drops_patch_flags_and_keeps_their_values() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            args_without_patch_flags(&s(&["-p", "abc1234"])),
+            s(&["abc1234"])
+        );
+        assert_eq!(
+            args_without_patch_flags(&s(&["--oneline", "--patch", "HEAD"])),
+            s(&["--oneline", "HEAD"])
+        );
+        assert_eq!(
+            args_without_patch_flags(&s(&["--grep", "-p", "-u"])),
+            s(&["--grep", "-p"])
+        );
+        assert_eq!(
+            args_without_patch_flags(&s(&["--", "-p"])),
+            s(&["--", "-p"])
+        );
     }
 
     #[test]
