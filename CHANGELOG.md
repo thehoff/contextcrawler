@@ -3,6 +3,27 @@
 All notable changes to ContextCrawler are documented here. Format adapted
 from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- `contextcrawler observe` — compact OMP native `grep` and `glob` results,
+  and bash output the rewrite did not claim, without replacing those tools
+  (#247). `read` and semantic `find` pass through. Timestamps and
+  under-cap OMP grep are not reparsed as `file:line:content`.
+- `contextcrawler session` reports Claude Code subagent transcripts it
+  skips, and the threat model records that those Bash calls stay raw
+  (#204).
+
+### Removed
+- The `^npx` catch-all rewrite. It claimed 70% savings and then ran the
+  npm boilerplate filter (#195). Named tools (`npx tsc`, `npx eslint`,
+  and the rest) still match their own rules.
+
+### Fixed
+- Docs that still called the user config and data directories `ctxcrl`,
+  or pinned v0.4.0 as the current release (#242). The loader's
+  project-local filter path is still `.ctxcrl/filters.toml`.
+
 ## [0.5.0] — 2026-08-16
 
 32 commits past 0.4.9 (unreleased until this tag).

@@ -4309,11 +4309,11 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_npx() {
-        assert_eq!(
-            rewrite_command_no_prefixes("npx svgo", &[]),
-            Some("contextcrawler npx svgo".to_string()),
-        );
+    fn test_rewrite_npx_unknown_stays_raw() {
+        // #195: the catch-all rewrote every `npx` into the npm boilerplate
+        // filter, recorded a 70% saving, and saved nothing. Named tools
+        // still rewrite; see `test_rewrite_tsc`.
+        assert_eq!(rewrite_command_no_prefixes("npx svgo", &[]), None);
     }
 
     // --- Gradle ---

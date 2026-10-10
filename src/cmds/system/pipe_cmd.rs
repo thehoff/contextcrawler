@@ -66,7 +66,10 @@ fn grep_wrapper(input: &str) -> String {
         if parts.len() == 3 {
             if let Ok(_line_num) = parts[1].parse::<usize>() {
                 total += 1;
-                by_file.entry(parts[0]).or_default().push((parts[1], parts[2]));
+                by_file
+                    .entry(parts[0])
+                    .or_default()
+                    .push((parts[1], parts[2]));
             }
         }
     }
@@ -209,11 +212,12 @@ fn identity_filter(input: &str) -> String {
 }
 
 pub(crate) fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
-        .unwrap_or_else(|_| {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input))).unwrap_or_else(
+        |_| {
             eprintln!("[contextcrawler] warning: filter panicked — passing through raw output");
             input.to_string()
-        })
+        },
+    )
 }
 
 pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
@@ -257,7 +261,11 @@ mod tests {
     fn test_resolve_filter_cargo_test() {
         let f = resolve_filter("cargo-test").expect("cargo-test filter must exist");
         let out = f("test result: ok. 5 passed; 0 failed");
-        assert!(out.contains("passed") || out.contains("PASS"), "out={}", out);
+        assert!(
+            out.contains("passed") || out.contains("PASS"),
+            "out={}",
+            out
+        );
     }
 
     #[test]
@@ -514,7 +522,9 @@ mod tests {
         assert!(
             savings >= 60.0,
             "grep filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
-            savings, count_tokens(&input), count_tokens(&output)
+            savings,
+            count_tokens(&input),
+            count_tokens(&output)
         );
     }
 
@@ -572,7 +582,9 @@ mod tests {
             output
         );
         // ...and a comma-joined line-number list on a "+N more at L:" line.
-        let has_compact_list = output.lines().any(|l| l.contains("more at L:") && l.contains(','));
+        let has_compact_list = output
+            .lines()
+            .any(|l| l.contains("more at L:") && l.contains(','));
         assert!(
             has_compact_list,
             "expected a comma-joined '+N more at L:' line: {}",
@@ -613,7 +625,9 @@ mod tests {
         assert!(
             savings >= 60.0,
             "find filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
-            savings, count_tokens(&input), count_tokens(&output)
+            savings,
+            count_tokens(&input),
+            count_tokens(&output)
         );
     }
 

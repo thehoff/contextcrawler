@@ -90,15 +90,10 @@ pub const RULES: &[CtxcrlRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    CtxcrlRule {
-        pattern: r"^npx\s+",
-        ctxcrl_cmd: "contextcrawler npx",
-        rewrite_prefixes: &["npx"],
-        category: "PackageManager",
-        savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
+    // No `^npx\s+` catch-all (#195). It claimed 70% and then ran the npm
+    // boilerplate filter, which saves nothing for an arbitrary package.
+    // Known tools (`npx tsc`, `npx eslint`, …) match their own later rules.
+    // Anything else stays raw instead of recording a fake saving.
     CtxcrlRule {
         pattern: r"^(cat|head|tail)\s+",
         ctxcrl_cmd: "contextcrawler read",

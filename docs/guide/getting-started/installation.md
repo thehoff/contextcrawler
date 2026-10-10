@@ -140,9 +140,9 @@ Other agents are wired the same way with a different flag (`--gemini`,
 
 | What | Path (Linux; macOS uses the platform equivalent) |
 |---|---|
-| Core config | `~/.config/ctxcrl/config.toml`, `~/.config/ctxcrl/filters.toml` |
-| Savings history (SQLite) | `~/.local/share/ctxcrl/history.db` |
-| Tee'd raw output (on failure) | `~/.local/share/ctxcrl/tee/` |
+| Core config | `~/.config/contextcrawler/config.toml`, `~/.config/contextcrawler/filters.toml` |
+| Savings history (SQLite) | `~/.local/share/contextcrawler/history.db` |
+| Tee'd raw output (on failure) | `~/.local/share/contextcrawler/tee/` |
 | Supply-chain config (opt-in) | `~/.config/contextcrawler/supply-chain.toml` |
 | Tirith downgrade log | `~/.local/share/contextcrawler/downgrades.jsonl` |
 
@@ -154,7 +154,7 @@ for the full list.
 ## Verify
 
 ```bash
-contextcrawler --version   # contextcrawler 0.4.0
+contextcrawler --version   # contextcrawler 0.5.0
 contextcrawler gain        # token-savings dashboard
 contextcrawler init --show # shows what's currently registered
 which contextcrawler       # should resolve to ~/.cargo/bin/contextcrawler

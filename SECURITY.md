@@ -228,7 +228,7 @@ Tracked by [GHSA-2cwv-rr7c-2p4c](https://github.com/thehoff/contextcrawler/secur
 
 ## TOML filter trust — global file gated
 
-`~/.config/ctxcrl/filters.toml` (the user-global filter file) is now
+`~/.config/contextcrawler/filters.toml` (the user-global filter file) is now
 SHA-256 pinned through the same trust store used for project-local
 `.ctxcrl/filters.toml`. Previously the global file was loaded
 unconditionally, which meant malware that could write to a user's

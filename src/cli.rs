@@ -18,8 +18,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, rg_cmd, summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, observe_cmd,
+    pipe_cmd, read, rg_cmd, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -741,6 +741,26 @@ pub(crate) enum Commands {
         args: Vec<OsString>,
     },
 
+    /// Compact a native tool result on stdin without re-running the tool.
+    ///
+    /// OMP calls this from the tool-result hook for bash, grep, and glob.
+    /// Those tools never enter the bash rewrite (#247). `read` and `find`
+    /// are printed unchanged.
+    Observe {
+        /// Tool that produced stdin: bash, shell, grep, glob, read, find.
+        #[arg(long)]
+        tool: String,
+
+        /// Original command or pattern. Recorded in the savings ledger only.
+        /// Patterns are allowed to start with `-` (`--fn`, `-n`).
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        command: String,
+
+        /// Tool failed. Print stdin unchanged.
+        #[arg(long)]
+        error: bool,
+    },
+
     /// Read stdin, apply filter, print filtered output (Unix pipe mode)
     Pipe {
         /// Filter name (cargo-test, pytest, grep, find, git-log, etc.)
@@ -1278,6 +1298,7 @@ const CTXCRL_META_COMMANDS: &[&str] = &[
     "run",
     "hook",
     "hook-audit",
+    "observe",
     "pipe",
     "cc-economics",
     "verify",
@@ -4262,6 +4283,15 @@ fn run_cli() -> Result<i32> {
         Commands::Rewrite { args } => {
             let cmd = args.join(" ");
             hooks::rewrite_cmd::run(&cmd)?;
+            0
+        }
+
+        Commands::Observe {
+            tool,
+            command,
+            error,
+        } => {
+            observe_cmd::run(&tool, &command, error)?;
             0
         }
 

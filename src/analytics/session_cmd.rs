@@ -76,13 +76,16 @@ pub fn run(_verbose: u8) -> Result<()> {
         return Ok(());
     }
 
-    // Group JSONL files by parent session (ignore subagent files)
+    // Parent sessions only. Claude Code does not inherit the parent
+    // PreToolUse hook into a subagent, so those Bash calls never hit
+    // the rewrite (#204). Count them and say so below.
+    let subagent_files = sessions
+        .iter()
+        .filter(|p| p.to_string_lossy().contains("subagents"))
+        .count();
     let mut session_files: Vec<PathBuf> = sessions
         .into_iter()
-        .filter(|p| {
-            // Skip subagent files — only top-level session JSONL
-            !p.to_string_lossy().contains("subagents")
-        })
+        .filter(|p| !p.to_string_lossy().contains("subagents"))
         .collect();
 
     // Sort by mtime desc
@@ -194,6 +197,11 @@ pub fn run(_verbose: u8) -> Result<()> {
     };
     println!("Average adoption: {:.0}%", avg_adoption);
     println!("Tip: Run `contextcrawler discover` to find missed ContextCrawler opportunities");
+    if subagent_files > 0 {
+        println!(
+            "Subagent transcripts skipped: {subagent_files}. Claude Code does not run the parent PreToolUse hook for subagent Bash, so those commands stay raw (#204). Workaround: tell the subagent to prefix shell commands with `contextcrawler`."
+        );
+    }
 
     Ok(())
 }
@@ -287,7 +295,10 @@ mod tests {
         assert_eq!(total, 4);
         // All three contextcrawler-prefixed commands count as adopted;
         // echo does not.
-        assert_eq!(ctxcrl, 3, "contextcrawler-prefixed commands must count as adopted");
+        assert_eq!(
+            ctxcrl, 3,
+            "contextcrawler-prefixed commands must count as adopted"
+        );
         assert_eq!(output, 750);
     }
 

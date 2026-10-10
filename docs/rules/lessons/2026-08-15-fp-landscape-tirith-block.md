@@ -81,7 +81,8 @@ Result: **NOT suppressed** — remains as a user-facing Ask prompt.
 
 ## What to measure after a fix
 
-Run `cargo test` and `scripts/extract-gate-corpus.py --replay` to verify
+Run `cargo test gate_corpus` to verify. The extractor
+(`scripts/extract-gate-corpus.py`) has `--verify`, not `--replay`.
 suppression rate changes. The two corpus guards are:
 
 - `suppression_rate_does_not_regress` — floor against suppression breaking

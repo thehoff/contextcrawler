@@ -53,21 +53,36 @@ Nothing below is a release promise. It is the order in which work earns
 a place on `develop`.
 
 1. **Coverage before features.** A filter the agent never calls saves
-   nothing. Native read/grep/find bypassing the bash hook (#247) and
-   missing subagent coverage (#204) come before any new pane, filter,
-   or flag.
-2. **Filters that currently save ~0%.** `grep` (#193) and the
-   `sh` / `sudo` / `npx` passthroughs (#195) are the compression
-   product failing in plain sight. Fix or delete. Do not add a
-   sixty-first filter while these report nothing.
+   nothing. OMP's native `grep` and `glob`, and bash output the rewrite
+   missed, are compacted by `contextcrawler observe` after the tool
+   returns (#247). `read` and semantic `find` stay as the tool returned
+   them: replacing those tools drops hashline anchors and the ranked
+   digest. OMP rebinds that extension into child sessions, so OMP
+   subagents are covered. Claude Code does not inherit the parent
+   PreToolUse hook into a subagent (#204); `contextcrawler session`
+   counts those transcripts and the workaround is in the threat model.
+2. **Filters that currently save ~0%.** Recursive and context `grep`
+   now filter (#193). Format flags (`-c`, `-l`, `-o`, `-Z`) and the
+   flags that collide with rg (`-H`, `-h`, `-G`) stay raw: the output
+   is already one line per file, or forwarding the flag makes rg print
+   help or drop filenames. `sh` and `sudo` already unwrap to the inner
+   command (#195). The `^npx` catch-all is deleted: it claimed 70% and
+   saved nothing. `npx tsc` and the other named tools still match their
+   own rules. Do not add a sixty-first filter while a live rule reports
+   nothing.
 3. **The gate stays empirical.** The false-positive corpus (#243) is
-   the stopping rule for #191. No further classifier cleverness
-   without a replay that shows ordinary work prompting less often
-   and the known adversarial shapes still prompting.
-4. **The instrument must not rot.** Rotate `downgrades.jsonl` (#240).
-   Fix the `read` clap failure that execs a binary and exits 0 (#238).
-   Stop the docs describing commands and versions the code no longer
-   has (#242).
+   the stopping rule for #191, and it is in place: `cargo test
+   gate_corpus` replays `tests/fixtures/gate_corpus.jsonl` and pins the
+   suppressed count. No further classifier cleverness without a replay
+   that shows ordinary work prompting less often and the known
+   adversarial shapes still prompting.
+4. **The instrument must not rot.** `downgrades.jsonl` rotates on write
+   (#240). A clap failure on `read` exits through clap instead of execing
+   a shell builtin and reporting success (#238). The user config and data
+   directories are `~/.config/contextcrawler` and
+   `~/.local/share/contextcrawler`, and the current release pin is
+   v0.5.0 (#242). Project-local filters are still `.ctxcrl/filters.toml`,
+   because that is the path the loader reads.
 
 ## How a later idea gets in
 

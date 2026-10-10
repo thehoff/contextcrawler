@@ -224,6 +224,12 @@ v0.1.x. Each has a tracking note elsewhere; re-evaluate at v0.2.0.
    need to either cherry-pick it or wrap the global load with the same
    `hooks::trust` check. Surfaced during the 2026-05-15 audit's Codex
    re-review; do not carry into v0.2.0.
+6. **Claude Code subagents do not inherit the parent PreToolUse hook**
+   (#204, upstream rtk#1820). A subagent's Bash calls run raw: no
+   rewrite and no gate. OMP rebinds its extension into child sessions,
+   so this gap is Claude Code only. `contextcrawler session` counts the
+   skipped subagent transcripts. Workaround: tell the subagent to prefix
+   shell commands with `contextcrawler`.
 
 ## Out of scope
 
