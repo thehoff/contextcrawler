@@ -27,14 +27,23 @@ const CONTENT_CHARS: usize = 200;
 const FILES_KEPT: usize = 5;
 const DIRS_KEPT: usize = 20;
 
+/// Printed whenever compacted grep output leaves lines out. The model can
+/// still ask for the full tool result, or for one file.
+const ASK_FOR_THE_REST: &str = "\
+Omitted lines are still available. Ask for the full grep output, or name one file, to see them.";
+
 /// Compact `input` for `tool`. `is_error` prints the text unchanged: a failed
 /// tool result is the thing the model needs to see.
 pub fn compact(tool: &str, input: &str, is_error: bool) -> String {
+    compact_with_command(tool, "", input, is_error)
+}
+
+fn compact_with_command(tool: &str, command: &str, input: &str, is_error: bool) -> String {
     if is_error || input.is_empty() {
         return input.to_string();
     }
     let out = match tool.trim().to_ascii_lowercase().as_str() {
-        "grep" => compact_grep(input),
+        "grep" => compact_grep(input, every_line_pattern(command)),
         "glob" => compact_glob(input),
         "bash" | "shell" => compact_captured(input),
         _ => input.to_string(),
@@ -45,7 +54,7 @@ pub fn compact(tool: &str, input: &str, is_error: bool) -> String {
 pub fn run(tool: &str, command: &str, is_error: bool) -> Result<()> {
     let timer = TimedExecution::start();
     let input = read_stdin()?;
-    let output = compact(tool, &input, is_error);
+    let output = compact_with_command(tool, command, &input, is_error);
     if output.len() < input.len() {
         timer.track(
             &ledger_label(tool, command),
@@ -130,8 +139,44 @@ fn bare_colon_triples(input: &str) -> bool {
     saw
 }
 
-fn compact_grep(input: &str) -> String {
-    if let Some(out) = compact_omp_grep(input) {
+/// The search pattern, when it matches every line.
+///
+/// `grep .` (and `.*`, `^.*$`, and the dotall equivalents) is not a search.
+/// The first lines kept per file are just the start of the file. A real
+/// pattern, including `\.`, is not in this list.
+fn every_line_pattern(command: &str) -> Option<&str> {
+    let mut parts = command.split_whitespace();
+    let first = parts.next()?;
+    let raw = if first == "grep" || first == "rg" {
+        parts.next().unwrap_or("")
+    } else {
+        first
+    };
+    let pattern = raw.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+    const EVERY_LINE: &[&str] = &[
+        ".",
+        ".+",
+        ".*",
+        "^",
+        "$",
+        "^.*",
+        "^.*$",
+        ".*$",
+        "(?s).*",
+        "(?s).+",
+        "(?s:.*)",
+        "(?s)^.*$",
+        r"[\s\S]*",
+        r"[\s\S]+",
+        r"[\d\D]*",
+        r"[\w\W]*",
+        r"^[\s\S]*$",
+    ];
+    EVERY_LINE.contains(&pattern).then_some(pattern)
+}
+
+fn compact_grep(input: &str, every_line: Option<&str>) -> String {
+    if let Some(out) = compact_omp_grep(input, every_line) {
         return out;
     }
     // An OMP result under the collapse cap is still OMP-shaped. Falling
@@ -142,7 +187,54 @@ fn compact_grep(input: &str) -> String {
     {
         return input.to_string();
     }
+    if let Some(pattern) = every_line {
+        if let Some(out) = compact_classic_every_line(input, pattern) {
+            return out;
+        }
+    }
     compact_captured(input)
+}
+
+fn every_line_notice(pattern: &str, lines: usize, files: usize) -> String {
+    let line_word = if lines == 1 { "line" } else { "lines" };
+    let file_word = if files == 1 { "file" } else { "files" };
+    format!(
+        "Pattern `{pattern}` matches every line, so {lines} {line_word} across {files} {file_word} were omitted.\n{ASK_FOR_THE_REST}\n"
+    )
+}
+
+/// `file:line:content` from `rg .` / `grep .`. The line text is the file, not
+/// a hit. Keep the file name and the count.
+fn compact_classic_every_line(input: &str, pattern: &str) -> Option<String> {
+    use std::collections::BTreeMap;
+    let mut files: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut matched = 0usize;
+    let mut other = 0usize;
+    for line in input.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(3, ':');
+        let Some(file) = parts.next() else { continue };
+        let Some(mid) = parts.next() else { continue };
+        if parts.next().is_some()
+            && mid.parse::<usize>().is_ok()
+            && (file.contains('/') || file.contains('.'))
+        {
+            *files.entry(file).or_default() += 1;
+            matched += 1;
+        } else {
+            other += 1;
+        }
+    }
+    if matched == 0 || other * 2 > matched {
+        return None;
+    }
+    let mut out = every_line_notice(pattern, matched, files.len());
+    for (file, count) in &files {
+        out.push_str(&format!("{file} ({count})\n"));
+    }
+    Some(out)
 }
 
 struct Hit {
@@ -156,7 +248,7 @@ struct Group {
     tail: Vec<String>,
 }
 
-fn compact_omp_grep(input: &str) -> Option<String> {
+fn compact_omp_grep(input: &str, every_line: Option<&str>) -> Option<String> {
     let mut groups: Vec<Group> = Vec::new();
     let mut current = Group {
         header: None,
@@ -212,21 +304,28 @@ fn compact_omp_grep(input: &str) -> Option<String> {
         return None;
     }
     let collapsed = groups.iter().any(|g| g.hits.len() > MATCHES_KEPT);
-    if contexts == 0 && !collapsed && !truncated {
+    // A pattern that matches every line has nothing to show from the first
+    // five lines of each file. Drop the line text even under the usual cap.
+    let omit_bodies = every_line.is_some();
+    if !omit_bodies && contexts == 0 && !collapsed && !truncated {
+        return None;
+    }
+    if omit_bodies && matches == 0 {
         return None;
     }
 
+    let kept = if omit_bodies { 0 } else { MATCHES_KEPT };
     let mut out = String::new();
     for group in &groups {
         if let Some(header) = &group.header {
             out.push_str(header);
             out.push('\n');
         }
-        for hit in group.hits.iter().take(MATCHES_KEPT) {
+        for hit in group.hits.iter().take(kept) {
             out.push_str(&hit.rendered);
             out.push('\n');
         }
-        if group.hits.len() > MATCHES_KEPT {
+        if !omit_bodies && group.hits.len() > MATCHES_KEPT {
             let rest: Vec<String> = group.hits[MATCHES_KEPT..]
                 .iter()
                 .map(|h| h.line_no.to_string())
@@ -239,6 +338,17 @@ fn compact_omp_grep(input: &str) -> Option<String> {
         }
         for line in &group.tail {
             out.push_str(line);
+            out.push('\n');
+        }
+    }
+    let omitted = omit_bodies || collapsed || contexts > 0 || truncated;
+    if omitted && !out.contains(ASK_FOR_THE_REST) {
+        if let Some(pattern) = every_line {
+            let lines: usize = groups.iter().map(|g| g.hits.len()).sum();
+            let files = groups.iter().filter(|g| !g.hits.is_empty()).count();
+            out.push_str(&every_line_notice(pattern, lines, files));
+        } else {
+            out.push_str(ASK_FOR_THE_REST);
             out.push('\n');
         }
     }
@@ -427,18 +537,67 @@ mod tests {
             "context lines must drop: {out}"
         );
         assert!(out.contains("Use skip=20 for the next page"), "{out}");
+        assert!(out.contains(ASK_FOR_THE_REST), "{out}");
+        assert!(
+            !out.contains("matches every line"),
+            "a real pattern keeps its hits: {out}"
+        );
+    }
+
+    #[test]
+    fn every_line_pattern_drops_the_line_text_and_says_to_ask() {
+        let input = omp_grep();
+        let out = compact_with_command("grep", ".", &input, false);
+        assert!(out.len() < input.len(), "{out}");
+        assert!(out.contains("### hook_cmd.rs#C143"), "{out}");
+        assert!(out.contains("# src/"), "{out}");
+        assert!(!out.contains("*1:"), "line text should drop: {out}");
+        assert!(!out.contains("pub fn item"), "{out}");
+        assert!(
+            out.contains("Pattern `.` matches every line, so 12 lines across 1 file were omitted."),
+            "{out}"
+        );
+        assert!(out.contains(ASK_FOR_THE_REST), "{out}");
+        assert!(out.contains("Use skip=20 for the next page"), "{out}");
+        assert_eq!(compact_with_command("grep", ".", &out, false), out);
+    }
+
+    #[test]
+    fn a_real_pattern_still_keeps_five_lines() {
+        let out = compact_with_command("grep", "fn src/cli.rs", &omp_grep(), false);
+        assert!(out.contains("*1:"), "{out}");
+        assert!(out.contains("*5:"), "{out}");
+        assert!(!out.contains("*6:"), "{out}");
+        assert!(!out.contains("matches every line"), "{out}");
+        assert!(out.contains(ASK_FOR_THE_REST), "{out}");
+    }
+
+    #[test]
+    fn classic_every_line_keeps_the_file_and_not_the_text() {
+        let mut input = String::new();
+        for n in 1..=20 {
+            input.push_str(&format!("src/cli.rs:{n}:    fn item_{n}() {{}}\n"));
+        }
+        let out = compact_with_command("grep", "grep .", &input, false);
+        assert!(out.contains("src/cli.rs (20)"), "{out}");
+        assert!(!out.contains("fn item_"), "{out}");
+        assert!(out.contains("20 lines across 1 file"), "{out}");
+        assert!(out.contains(ASK_FOR_THE_REST), "{out}");
+        let kept = compact_with_command("grep", "fn", &input, false);
+        assert!(kept.contains("fn item_1"), "{kept}");
     }
 
     #[test]
     fn single_file_grep_without_headers_still_compacts() {
         let mut input = String::new();
         for n in 1..=8 {
-            input.push_str(&format!("*{n}:match {n}\n"));
-            input.push_str(&format!(" {n}:ctx {n}\n"));
+            input.push_str(&format!("*{n}:match {n} {}\n", "x".repeat(40)));
+            input.push_str(&format!(" {n}:ctx {n} {}\n", "y".repeat(40)));
         }
         let out = compact("grep", &input, false);
         assert!(out.contains("+3 more at L: 6,7,8"), "{out}");
         assert!(!out.contains("ctx "), "{out}");
+        assert!(out.contains(ASK_FOR_THE_REST), "{out}");
     }
 
     #[test]

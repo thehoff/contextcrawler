@@ -52,6 +52,11 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `proxy grep` and `proxy git` now run the wrapper.
   `CONTEXTCRAWLER_PROXY_RAW=1` keeps the raw command. OMP compacts a tool
   result from 400 characters, down from 1,500.
+- `grep .` (and `.*`, `^.*$`, and the same dotall forms) no longer
+  keeps the first lines of each file. Those lines are the file, not a
+  hit. The file headers stay, and the result says the omitted lines are
+  still available if the model asks for the full output or names one
+  file. A real pattern still keeps its first five hits.
 - A unified diff that arrives as bash output (`git show | head`,
   `git diff | head`) is compacted. Rewrite still leaves the pipe raw,
   and that patch was being returned unchanged. The commit message in
