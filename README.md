@@ -78,7 +78,7 @@ can apply ContextCrawler's filters to text it already has, no CLI subprocess.
 
 ```toml
 [dependencies]
-contextcrawler = { git = "https://github.com/thehoff/contextcrawler", tag = "v0.5.0" }
+contextcrawler = { git = "https://github.com/thehoff/contextcrawler", tag = "v0.5.1" }
 ```
 
 The curated entry points (re-exported from the crate root) are
@@ -98,11 +98,11 @@ Installation is always through Cargo, never by copying a binary around.
 ```sh
 # From a clone (recommended, read the diff first):
 git clone https://github.com/thehoff/contextcrawler.git
-cd contextcrawler && git checkout v0.5.0
+cd contextcrawler && git checkout v0.5.1
 cargo install --path .
 
 # Or straight from git:
-cargo install --git https://github.com/thehoff/contextcrawler --tag v0.5.0 --locked
+cargo install --git https://github.com/thehoff/contextcrawler --tag v0.5.1 --locked
 ```
 
 Then wire up the agent hook. Run `contextcrawler init -g` for Claude Code,
@@ -189,6 +189,6 @@ It documents what we used to do, not what we do.
 
 ## Status
 
-v0.5.0. The library pivot landed in v0.4.0: the binary is a thin shim
+v0.5.1. The library pivot landed in v0.4.0: the binary is a thin shim
 over the `contextcrawler` library crate, which also exposes the
 experimental filter/summary API above. See [`CHANGELOG.md`](CHANGELOG.md).

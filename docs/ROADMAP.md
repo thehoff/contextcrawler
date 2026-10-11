@@ -9,10 +9,11 @@ Backlog A and Backlog B below are history, not the plan.
 
 ## Current line: v0.5.x
 
-**Shipping: 0.5.0** (2026-08-16). The binary is still a thin shim over the
-`contextcrawler` library crate. This line adds the local `gain --web`
-dashboard, precise `read` line ranges, and a replayable gate
-false-positive corpus. Detail is in `CHANGELOG.md`.
+**Shipping: 0.5.1** (2026-10-11). The binary is still a thin shim over the
+`contextcrawler` library crate. 0.5.0 (2026-08-16) added the local
+`gain --web` dashboard, precise `read` line ranges, and a replayable
+gate false-positive corpus. 0.5.1 adds `observe`, the OMP installer,
+and the gate fixes. Detail is in `CHANGELOG.md`.
 
 ### Closed line: v0.4.x
 

@@ -5,6 +5,10 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-11
+
+Patch on 0.5.0. Observe, the OMP installer, and the gate fixes below.
+
 ### Added
 - `contextcrawler init --agent omp` installs the OMP extension, the
   `fragments/CONTEXTCRAWLER.md` law, and the same text as a marked block

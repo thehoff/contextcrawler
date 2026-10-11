@@ -154,7 +154,7 @@ for the full list.
 ## Verify
 
 ```bash
-contextcrawler --version   # contextcrawler 0.5.0
+contextcrawler --version   # contextcrawler 0.5.1
 contextcrawler gain        # token-savings dashboard
 contextcrawler init --show # shows what's currently registered
 which contextcrawler       # should resolve to ~/.cargo/bin/contextcrawler
