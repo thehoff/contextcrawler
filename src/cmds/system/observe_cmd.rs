@@ -32,12 +32,9 @@ const DIRS_KEPT: usize = 20;
 const ASK_FOR_THE_REST: &str = "\
 Omitted lines are still available. Ask for the full grep output, or name one file, to see them.";
 
-/// Compact `input` for `tool`. `is_error` prints the text unchanged: a failed
+/// Compact `input` for `tool`, using `command` only to recognise a pattern
+/// that matches every line. `is_error` prints the text unchanged: a failed
 /// tool result is the thing the model needs to see.
-pub fn compact(tool: &str, input: &str, is_error: bool) -> String {
-    compact_with_command(tool, "", input, is_error)
-}
-
 fn compact_with_command(tool: &str, command: &str, input: &str, is_error: bool) -> String {
     if is_error || input.is_empty() {
         return input.to_string();
@@ -511,6 +508,11 @@ fn looks_like_prose(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests that do not name a search pattern.
+    fn compact(tool: &str, input: &str, is_error: bool) -> String {
+        compact_with_command(tool, "", input, is_error)
+    }
 
     fn omp_grep() -> String {
         let mut s = String::from("# src/\n## hooks/\n### hook_cmd.rs#C143\n");
