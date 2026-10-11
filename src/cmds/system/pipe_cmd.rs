@@ -43,6 +43,47 @@ fn git_diff_wrapper(input: &str) -> String {
     crate::cmds::git::git::compact_diff(input, 200)
 }
 
+/// Byte offset of the first `diff --git` / `--cc` / `--combined` line, if
+/// that line starts within the first 8 KiB. A later mention is a document
+/// that happens to quote a diff, not a patch this filter should own.
+fn unified_diff_offset(input: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    for line in input.split_inclusive('\n') {
+        if line.starts_with("diff --git ")
+            || line.starts_with("diff --cc ")
+            || line.starts_with("diff --combined ")
+        {
+            return Some(offset);
+        }
+        offset += line.len();
+        if offset > 8192 {
+            return None;
+        }
+    }
+    None
+}
+
+/// Compact a captured unified diff. Lines before the first `diff --` header
+/// (the `git show` commit preamble) stay. When the diff itself does not
+/// shrink, the original text is returned so a small patch is not rewritten
+/// into a different shape for no saving.
+fn captured_diff_wrapper(input: &str) -> String {
+    let Some(at) = unified_diff_offset(input) else {
+        return input.to_string();
+    };
+    let diff = &input[at..];
+    let compact = crate::cmds::git::git::compact_diff(diff, 200);
+    if compact.len() >= diff.len() {
+        return input.to_string();
+    }
+    let preamble = input[..at].trim_end();
+    if preamble.is_empty() {
+        compact
+    } else {
+        format!("{preamble}\n{compact}")
+    }
+}
+
 fn vitest_wrapper(input: &str) -> String {
     use crate::cmds::js::vitest_cmd::VitestParser;
     use crate::parser::{FormatMode, OutputParser, TokenFormatter};
@@ -180,6 +221,15 @@ pub(crate) fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     // A schema dump never takes that path.
     if is_sqlite_schema_text(first_1k) {
         return identity_filter;
+    }
+
+    // `git show | head` and `git diff | head` stay raw at rewrite time: the
+    // pipe consumer has to see the producer's real output (#166). The patch
+    // then arrives here, and the grep heuristic does not recognise a unified
+    // diff, so the whole patch was returned unchanged. Compact it the same
+    // way `contextcrawler git diff` does, and keep the commit preamble.
+    if unified_diff_offset(input).is_some() {
+        return captured_diff_wrapper;
     }
 
     // grep/rg: lines matching file:number:content
@@ -421,6 +471,51 @@ mod tests {
                       fn main() {}\n";
         let out = git_diff_wrapper(input);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn captured_unified_diff_keeps_the_commit_preamble_and_shrinks() {
+        let input = "\
+commit abc1234\n\
+Author: Ada <ada@example.com>\n\
+\n\
+    keep this message\n\
+\n\
+diff --git a/src/a.rs b/src/a.rs\n\
+index 1111111..2222222 100644\n\
+--- a/src/a.rs\n\
++++ b/src/a.rs\n\
+@@ -1,6 +1,6 @@\n\
+ LEAD_CTX\n\
+-old line\n\
++new line\n\
+ trail\n\
+";
+        let out = auto_detect_filter(input)(input);
+        assert!(
+            out.len() < input.len(),
+            "in={} out={}\n{out}",
+            input.len(),
+            out.len()
+        );
+        assert!(out.contains("Author: Ada"), "{out}");
+        assert!(out.contains("keep this message"), "{out}");
+        assert!(out.contains("+new line"), "{out}");
+        assert!(
+            !out.contains("LEAD_CTX"),
+            "leading context should drop: {out}"
+        );
+    }
+
+    #[test]
+    fn a_diff_quote_past_the_scan_window_stays_raw() {
+        let mut input = String::from("notes\n");
+        while input.len() <= 8192 {
+            input.push_str("not a patch line\n");
+        }
+        input.push_str("diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n");
+        let out = auto_detect_filter(&input)(&input);
+        assert_eq!(out, input);
     }
 
     #[test]

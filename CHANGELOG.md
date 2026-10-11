@@ -52,6 +52,10 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `proxy grep` and `proxy git` now run the wrapper.
   `CONTEXTCRAWLER_PROXY_RAW=1` keeps the raw command. OMP compacts a tool
   result from 400 characters, down from 1,500.
+- A unified diff that arrives as bash output (`git show | head`,
+  `git diff | head`) is compacted. Rewrite still leaves the pipe raw,
+  and that patch was being returned unchanged. The commit message in
+  front of the diff stays.
 - `git log --stat` (and `--numstat`, `--name-only`, `--name-status`,
   `--raw`, `--shortstat`, `--dirstat`, `--summary`) is passed through.
   The injected pretty-format was splitting the stat block into another

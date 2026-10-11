@@ -469,6 +469,30 @@ mod tests {
     }
 
     #[test]
+    fn bash_unified_diff_compacts_and_keeps_the_commit_header() {
+        let input = "\
+commit abc1234\n\
+Author: Ada <ada@example.com>\n\
+\n\
+    keep this message\n\
+\n\
+diff --git a/src/a.rs b/src/a.rs\n\
+--- a/src/a.rs\n\
++++ b/src/a.rs\n\
+@@ -1,6 +1,6 @@\n\
+ LEAD_CTX\n\
+-old line\n\
++new line\n\
+ trail\n\
+";
+        let out = compact("bash", input, false);
+        assert!(out.len() < input.len(), "{out}");
+        assert!(out.contains("keep this message"), "{out}");
+        assert!(out.contains("+new line"), "{out}");
+        assert!(!out.contains("LEAD_CTX"), "{out}");
+    }
+
+    #[test]
     fn bash_path_grep_still_compacts() {
         let mut input = String::new();
         for n in 1..=30 {
