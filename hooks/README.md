@@ -20,7 +20,7 @@
 > are kept as-is deliberately: renaming them changes install paths and
 > integrity hashes.
 
-Owns: per-agent hook scripts and configuration files. `contextcrawler init` targets Claude Code, Cursor, Windsurf, Cline, Kilo Code, Antigravity, Hermes and Pi; the binary additionally serves Copilot and Gemini through `contextcrawler hook`.
+Owns: per-agent hook scripts and configuration files. `contextcrawler init` targets Claude Code, Cursor, Windsurf, Cline, Kilo Code, Antigravity, Hermes, Pi, and OMP; the binary additionally serves Copilot and Gemini through `contextcrawler hook`.
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 

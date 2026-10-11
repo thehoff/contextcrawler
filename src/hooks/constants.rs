@@ -42,3 +42,15 @@ pub const PI_DIR: &str = ".pi";
 pub const PI_AGENT_SUBDIR: &str = "agent";
 pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_EXTENSION_FILE: &str = "contextcrawler.ts";
+
+/// Oh My Pi (OMP). The agent directory is `~/.omp/agent/`. `AGENTS.md` there
+/// includes `fragments/CONTEXTCRAWLER.md`. The extension is auto-discovered
+/// from `extensions/`. `RULES.md` holds the same text in a marked block so
+/// the binding law and the fragment cannot drift.
+pub const OMP_DIR: &str = ".omp";
+pub const OMP_AGENT_SUBDIR: &str = "agent";
+pub const OMP_EXTENSIONS_SUBDIR: &str = "extensions";
+pub const OMP_EXTENSION_FILE: &str = "contextcrawler.ts";
+pub const OMP_FRAGMENTS_SUBDIR: &str = "fragments";
+pub const OMP_FRAGMENT_FILE: &str = "CONTEXTCRAWLER.md";
+pub const OMP_RULES_FILE: &str = "RULES.md";

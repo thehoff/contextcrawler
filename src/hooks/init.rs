@@ -15,8 +15,10 @@ use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    LEGACY_CURSOR_HOOK_COMMAND, PI_AGENT_SUBDIR, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_EXTENSION_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    LEGACY_CURSOR_HOOK_COMMAND, OMP_AGENT_SUBDIR, OMP_DIR, OMP_EXTENSIONS_SUBDIR,
+    OMP_EXTENSION_FILE, OMP_FRAGMENTS_SUBDIR, OMP_FRAGMENT_FILE, OMP_RULES_FILE, PI_AGENT_SUBDIR,
+    PI_DIR, PI_EXTENSIONS_SUBDIR, PI_EXTENSION_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -25,6 +27,11 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 
 // Embedded Pi extension (auto-rewrite via createBashTool spawnHook)
 const PI_EXTENSION: &str = include_str!("../../hooks/pi/rtk-extension.ts"); // branding-lint: allow legacy
+
+// Embedded OMP extension and the law it enforces. The fragment is what
+// `AGENTS.md` includes. The same text is upserted into `RULES.md`.
+const OMP_EXTENSION: &str = include_str!("../../hooks/omp/contextcrawler.ts");
+const OMP_FRAGMENT: &str = include_str!("../../hooks/omp/CONTEXTCRAWLER.md");
 
 // ─── Unified guidance ──────────────────────────────────────────────────────
 //
@@ -3634,6 +3641,141 @@ fn uninstall_pidev_at(agent_dir: &Path, ctx: InitContext) -> Result<Vec<String>>
     Ok(removed)
 }
 
+// ─── OMP (omp.sh) support ─────────────────────────────────────────────
+
+fn resolve_omp_agent_dir() -> Result<PathBuf> {
+    Ok(resolve_home_subdir(OMP_DIR)?.join(OMP_AGENT_SUBDIR))
+}
+
+fn omp_extension_path(agent_dir: &Path) -> PathBuf {
+    agent_dir
+        .join(OMP_EXTENSIONS_SUBDIR)
+        .join(OMP_EXTENSION_FILE)
+}
+
+fn omp_fragment_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join(OMP_FRAGMENTS_SUBDIR).join(OMP_FRAGMENT_FILE)
+}
+
+fn omp_rules_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join(OMP_RULES_FILE)
+}
+
+/// The binding law, wrapped so `RULES.md` can be updated without touching
+/// the rest of that file. The body is the fragment `AGENTS.md` includes.
+fn omp_rules_block() -> String {
+    format!(
+        "<!-- ctxcrl-instructions v3 -->\n{}\n<!-- /ctxcrl-instructions -->\n",
+        OMP_FRAGMENT.trim()
+    )
+}
+
+pub fn run_omp_mode(ctx: InitContext) -> Result<()> {
+    let agent_dir = resolve_omp_agent_dir()?;
+    run_omp_mode_at(&agent_dir, ctx)
+}
+
+fn run_omp_mode_at(agent_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+
+    for dir in [
+        agent_dir.join(OMP_EXTENSIONS_SUBDIR),
+        agent_dir.join(OMP_FRAGMENTS_SUBDIR),
+    ] {
+        if !dry_run {
+            fs::create_dir_all(&dir)
+                .with_context(|| format!("Failed to create OMP directory: {}", dir.display()))?;
+        }
+    }
+
+    let extension_path = omp_extension_path(agent_dir);
+    write_if_changed(&extension_path, OMP_EXTENSION, "OMP extension", ctx)?;
+    write_if_changed(
+        &omp_fragment_path(agent_dir),
+        OMP_FRAGMENT,
+        "OMP fragment",
+        ctx,
+    )?;
+    // AGENTS.md is the operator's file. It already includes the fragment.
+    // Only the marked law in RULES.md is owned here.
+    write_ctxcrl_block(
+        &omp_rules_path(agent_dir),
+        &omp_rules_block(),
+        "OMP law",
+        "contextcrawler init --agent omp",
+        ctx,
+    )?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nContextCrawler configured for OMP.\n");
+        println!("  Extension: {}", extension_path.display());
+        println!("  Fragment:  {}", omp_fragment_path(agent_dir).display());
+        println!("  Law:       {}", omp_rules_path(agent_dir).display());
+        println!("  AGENTS.md must include @fragments/CONTEXTCRAWLER.md.");
+        println!("  The extension loads on the next OMP session.\n");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_omp(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let agent_dir = resolve_omp_agent_dir()?;
+    let removed = uninstall_omp_at(&agent_dir, ctx)?;
+
+    if removed.is_empty() {
+        println!("ContextCrawler OMP support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall ContextCrawler for OMP:"
+        } else {
+            "ContextCrawler uninstalled for OMP:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+fn uninstall_omp_at(agent_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
+
+    let rules_path = omp_rules_path(agent_dir);
+    if let Some(desc) = strip_ctxcrl_block_from_file(&rules_path, "OMP law", ctx)? {
+        removed.push(desc);
+    }
+
+    for (path, label) in [
+        (omp_extension_path(agent_dir), "OMP extension"),
+        (omp_fragment_path(agent_dir), "OMP fragment"),
+    ] {
+        if path.exists() {
+            if dry_run {
+                println!("[dry-run] would remove {label}: {}", path.display());
+            } else {
+                fs::remove_file(&path)
+                    .with_context(|| format!("Failed to remove {label}: {}", path.display()))?;
+                if verbose > 0 {
+                    eprintln!("Removed {label}: {}", path.display());
+                }
+            }
+            removed.push(format!("{label}: {}", path.display()));
+        }
+    }
+
+    Ok(removed)
+}
+
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
 fn resolve_cursor_dir() -> Result<PathBuf> {
@@ -5304,6 +5446,48 @@ mod tests {
         assert!(after.contains("# Project notes"));
         assert!(after.contains("User text."));
         assert!(!after.contains(CTXCRL_BLOCK_START));
+    }
+
+    #[test]
+    fn test_omp_mode_writes_extension_fragment_and_law() {
+        let temp = private_tempdir();
+        let agent_dir = temp.path().join("omp-agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(omp_rules_path(&agent_dir), "# Other laws\n\nKeep me.\n").unwrap();
+
+        run_omp_mode_at(&agent_dir, InitContext::default()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(omp_extension_path(&agent_dir)).unwrap(),
+            OMP_EXTENSION
+        );
+        assert_eq!(
+            fs::read_to_string(omp_fragment_path(&agent_dir)).unwrap(),
+            OMP_FRAGMENT
+        );
+        let rules = fs::read_to_string(omp_rules_path(&agent_dir)).unwrap();
+        assert!(rules.contains("# Other laws"));
+        assert!(rules.contains("Keep me."));
+        assert!(rules.contains("GEN-CTXCRL-001"));
+        assert!(rules.contains("CONTEXTCRAWLER_PROXY_RAW=1"));
+        assert!(rules.contains("stay native"));
+        assert_eq!(rules.matches(CTXCRL_BLOCK_START).count(), 1);
+
+        run_omp_mode_at(&agent_dir, InitContext::default()).unwrap();
+        assert_eq!(
+            fs::read_to_string(omp_rules_path(&agent_dir)).unwrap(),
+            rules
+        );
+
+        let removed = uninstall_omp_at(&agent_dir, InitContext::default()).unwrap();
+        assert!(removed.iter().any(|r| r.contains("OMP law")));
+        assert!(removed.iter().any(|r| r.contains("OMP extension")));
+        assert!(removed.iter().any(|r| r.contains("OMP fragment")));
+        assert!(!omp_extension_path(&agent_dir).exists());
+        assert!(!omp_fragment_path(&agent_dir).exists());
+        let after = fs::read_to_string(omp_rules_path(&agent_dir)).unwrap();
+        assert!(after.contains("Keep me."));
+        assert!(!after.contains("GEN-CTXCRL-001"));
     }
 
     #[test]

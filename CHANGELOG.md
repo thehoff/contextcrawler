@@ -6,6 +6,10 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `contextcrawler init --agent omp` installs the OMP extension, the
+  `fragments/CONTEXTCRAWLER.md` law, and the same text as a marked block
+  in `RULES.md`. Native `read`, `find`, `grep`, and `glob` stay native.
+  `proxy grep` and `proxy git` are not the raw escape.
 - `contextcrawler observe` — compact OMP native `grep` and `glob` results,
   and bash output the rewrite did not claim, without replacing those tools
   (#247). `read` and semantic `find` pass through. Timestamps and

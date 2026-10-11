@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Hermes,
     /// Pi coding agent (earendil-works)
     Pidev,
+    /// Oh My Pi (OMP). Installs the extension, the fragment, and the law.
+    Omp,
 }
 
 #[derive(Parser)]
@@ -4006,6 +4008,8 @@ fn run_cli() -> Result<i32> {
             };
             if show {
                 hooks::init::show_config(codex)?;
+            } else if agent == Some(AgentTarget::Omp) && uninstall {
+                hooks::init::uninstall_omp(ctx)?;
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -4046,6 +4050,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else if agent == Some(AgentTarget::Pidev) {
                 hooks::init::run_pidev_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Omp) {
+                hooks::init::run_omp_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 // A cursor-only init must not also install Claude hooks.
@@ -5190,6 +5196,17 @@ mod tests {
             } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
                 assert!(uninstall);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_omp() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "omp"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Omp));
             }
             _ => panic!("Expected Init command"),
         }
