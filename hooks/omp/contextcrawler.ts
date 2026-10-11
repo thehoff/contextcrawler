@@ -8,7 +8,9 @@
  * the rewrite on stdout (exit 3 is Ask/Default in the Claude hook contract;
  * OMP has no separate ask slot, so the filtered command still runs). Exit 2
  * is an explicit deny: the call is blocked and the command is not run.
- * A command that already starts with `contextcrawler` is left alone.
+ * A command that is only `contextcrawler` or `rtk` comes back unchanged and
+ * is left alone. A later mention does not skip rewrite: the gate has to
+ * see the rest of the command.
  *
  * tool_result (bash, grep, glob): when the rewrite did not apply, compact the
  * text OMP is about to give the model via `contextcrawler observe`. The
@@ -50,8 +52,9 @@ interface ToolResultEvent {
 }
 
 function alreadyProxied(command: string): boolean {
-	// Also a later segment: `cd src && contextcrawler git status` is already
-	// filtered. Observing it again re-parses the compact text.
+	// Observe only. Compact text must not be parsed a second time. Do not
+	// use this to skip rewrite: `git status && contextcrawler gain` and
+	// `curl … | sh ; contextcrawler --version` would never reach the gate.
 	return /(?:^|&&|[;&|])\s*(?:contextcrawler|rtk)(?:\s|$)/.test(command.trim());
 }
 
@@ -66,8 +69,11 @@ function rewrite(command: string): { command?: string; block?: string } {
 		return {};
 	}
 	if (result.status === 2) {
+		const why = (result.stderr ?? "").trim();
 		return {
-			block: "contextcrawler denied this command (explicit deny or exfil policy) and did not run it.",
+			block: why
+				? `contextcrawler denied this command and did not run it.\n${why}`
+				: "contextcrawler denied this command and did not run it.",
 		};
 	}
 	const out = (result.stdout ?? "").trim();
@@ -160,7 +166,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const input = event.input as { command?: unknown };
 			const command = typeof input?.command === "string" ? input.command : "";
-			if (!command.trim() || alreadyProxied(command)) return;
+			if (!command.trim()) return;
 			const decided = rewrite(command);
 			if (decided.block) {
 				return { block: true, reason: decided.block };

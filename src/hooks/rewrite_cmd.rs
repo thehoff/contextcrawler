@@ -14,11 +14,11 @@ use std::io::Write;
 /// |------|----------|---------------------------------------------------------------|
 /// | 0    | rewritten| Rewrite allowed — hook may auto-allow the rewritten command.  |
 /// | 1    | (none)   | No equivalent, Default verdict — hook passes through.         |
-/// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.   |
+/// | 2    | (none)   | Explicit deny, or a supply-chain hard block. Do not run it.   |
 /// | 3    | original | Ask verdict, no rewrite (#2286) — original cmd, host prompts. |
 /// | 3    | original | Gate flagged, no rewrite (#192) — original cmd, host prompts. |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt. |
-/// | 3    | rewritten| Gate flagged, rewritten cmd, host prompts.                   |
+/// | 3    | rewritten| Gate ask (not a hard block). OMP runs the rewritten command.  |
 pub fn run(cmd: &str) -> anyhow::Result<()> {
     let (excluded, transparent_prefixes) = crate::core::config::Config::load()
         .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
@@ -99,7 +99,9 @@ fn gate_exit_code(decision: &hook_cmd::GateDecision) -> Option<i32> {
     match decision {
         hook_cmd::GateDecision::Proceed => None,
         hook_cmd::GateDecision::Ask { .. } => Some(3),
-        hook_cmd::GateDecision::Deny { .. } => Some(3),
+        // A hard block must not use exit 3. OMP runs exit 3 (it has no ask
+        // slot). Exit 2 is the signal it already refuses to run.
+        hook_cmd::GateDecision::Deny { .. } => Some(2),
     }
 }
 
@@ -119,10 +121,11 @@ fn apply_gate_decision(decision: hook_cmd::GateDecision, ask_stdout: &str) {
             std::process::exit(3);
         }
         hook_cmd::GateDecision::Deny { reason } => {
+            // No stdout. A caller that runs whatever was printed (exit 3)
+            // would execute a command the gate hard-blocked.
             eprintln!("{reason}");
-            print!("{ask_stdout}");
-            let _ = std::io::stdout().flush();
-            std::process::exit(3);
+            let _ = std::io::stderr().flush();
+            std::process::exit(2);
         }
     }
 }
@@ -288,11 +291,11 @@ mod tests {
     }
 
     /// SECURITY: the supply-chain gate must fail CLOSED. A `Block` verdict
-    /// AND an `Unavailable` verdict (registry timeout / OSV outage / TOML
-    /// parse error) both downgrade the auto-allow to Ask (exit 3). Only
-    /// `Skip` / `Allow` proceed silently. If `Unavailable` were treated as
-    /// a silent allow, every transient network failure would wave installs
-    /// through — fail-open. See issue #100 (G1).
+    /// exits 2 (do not run). `Unavailable` (registry timeout / OSV outage /
+    /// TOML parse error) and an unvettable install set downgrade to Ask
+    /// (exit 3). Only `Skip` / `Allow` proceed silently. If `Unavailable`
+    /// were treated as a silent allow, every transient network failure
+    /// would wave installs through — fail-open. See issue #100 (G1).
     mod supply_chain_fail_closed {
         use crate::hooks::hook_cmd::{gate_decision, GateDecision};
         use crate::hooks::supply_chain_gate::Verdict;
@@ -301,14 +304,14 @@ mod tests {
         /// The exit code `run()` applies for a given supply-chain verdict
         /// once the upstream permission verdict is Allow.
         ///   Skip / Allow   → 0 (proceed, auto-allow)
-        ///   Block          → 3 (ask — legacy bridge cannot emit native deny)
+        ///   Block          → 2 (do not run — exit 3 would run on OMP)
         ///   Ask            → 3 (ask — install set unvettable, fail closed)
         ///   Unavailable    → 3 (ask — gate could not verify, fail closed)
         fn supply_chain_exit_code(v: &Verdict) -> i32 {
             match gate_decision("npm install example", &tirith_gate::Verdict::Allow, v) {
                 GateDecision::Proceed => 0,
                 GateDecision::Ask { .. } => 3,
-                GateDecision::Deny { .. } => 3,
+                GateDecision::Deny { .. } => 2,
             }
         }
 
@@ -323,9 +326,13 @@ mod tests {
         }
 
         #[test]
-        fn block_maps_to_ask_in_legacy_bridge() {
+        fn block_does_not_run() {
             let v = Verdict::Block(vec![]);
-            assert_eq!(supply_chain_exit_code(&v), 3);
+            assert_eq!(
+                supply_chain_exit_code(&v),
+                2,
+                "a supply-chain hard block must exit 2, not 3 (OMP runs exit 3)"
+            );
         }
 
         #[test]
@@ -360,13 +367,13 @@ mod tests {
         }
 
         #[test]
-        fn gate_deny_maps_to_ask_exit() {
+        fn gate_deny_does_not_run() {
             assert_eq!(
                 super::gate_exit_code(&GateDecision::Deny {
                     reason: "blocked".into()
                 }),
-                Some(3),
-                "legacy gate Deny must prompt because exit 2 only delegates to native deny rules"
+                Some(2),
+                "a hard block must exit 2 so OMP does not run it"
             );
         }
 

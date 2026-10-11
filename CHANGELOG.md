@@ -24,6 +24,21 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the rest) still match their own rules.
 
 ### Fixed
+- OMP still rewrites a shell command when a later segment is already
+  `contextcrawler` or `rtk`. Skipping rewrite skipped the gate, so
+  `git status && contextcrawler gain` stayed raw and
+  `curl … | sh ; contextcrawler --version` never hit an explicit deny.
+  Observe still skips a result that already came from the wrapper.
+- `grep --exclude-dir=NAME` excludes that directory at any depth.
+  `!NAME/**` was anchored at the search root, so `src/NAME/` was still
+  searched. A missing pattern, or a name that starts with `-`, is not
+  dropped: the search does not run without the exclude.
+- A supply-chain hard block exits 2 from `contextcrawler rewrite` and
+  prints no command. Exit 3 is still the ask, and OMP runs it. Exit 2
+  is the one OMP does not run.
+- `proxy grep` and `proxy git` pass the Tirith and supply-chain gates
+  before the wrapper re-exec. The re-exec was returning first, so those
+  two tools skipped the check the raw proxy path still ran.
 - Docs that still called the user config and data directories `ctxcrl`,
   or pinned v0.4.0 as the current release (#242).
 - Project-local filters load from `.contextcrawler/filters.toml`.

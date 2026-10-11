@@ -2116,21 +2116,34 @@ fn translate_grep_globs(args: Vec<String>) -> Vec<String> {
     while index < args.len() {
         let arg = &args[index];
         if let Some((kind, value)) = split_include_exclude(arg) {
-            globs.push("--glob".to_string());
-            globs.push(glob_for(kind, value));
+            if let Some(glob) = glob_for(kind, value) {
+                globs.push("--glob".to_string());
+                globs.push(glob);
+            } else {
+                // An empty pattern is not "no exclude". Keep the flag so
+                // the search does not run without it.
+                out.push(arg.clone());
+            }
             index += 1;
             continue;
         }
         if let Some(kind) = include_exclude_kind(arg) {
-            index += 1;
-            if let Some(value) = args.get(index) {
-                if !value.starts_with('-') {
-                    globs.push("--glob".to_string());
-                    globs.push(glob_for(kind, value));
-                    index += 1;
-                    continue;
-                }
-            }
+            let Some(value) = args.get(index + 1) else {
+                out.push(arg.clone());
+                index += 1;
+                continue;
+            };
+            // The next token is the pattern, including one that starts
+            // with `-`. Dropping it used to search the tree anyway.
+            let Some(glob) = glob_for(kind, value) else {
+                out.push(arg.clone());
+                out.push(value.clone());
+                index += 2;
+                continue;
+            };
+            globs.push("--glob".to_string());
+            globs.push(glob);
+            index += 2;
             continue;
         }
         out.push(arg.clone());
@@ -2162,16 +2175,30 @@ fn include_exclude_kind(arg: &str) -> Option<&'static str> {
     }
 }
 
-fn glob_for(kind: &str, value: &str) -> String {
+fn glob_for(kind: &str, value: &str) -> Option<String> {
     let value = unquote_glob(value);
-    match kind {
+    if value.is_empty() {
+        return None;
+    }
+    Some(match kind {
         "exclude" if !value.starts_with('!') => format!("!{value}"),
         "exclude-dir" => {
             let name = value.trim_end_matches('/').trim_end_matches("/**");
-            format!("!{name}/**")
+            if name.is_empty() {
+                return None;
+            }
+            // GNU `--exclude-dir` matches the directory's base name at any
+            // depth. `!name/**` contains a slash, so ripgrep anchors it at
+            // the search root and still searches `src/name/`. A pattern
+            // with no slash matches in every directory.
+            if name.starts_with('!') {
+                name.to_string()
+            } else {
+                format!("!{name}")
+            }
         }
         _ => value.to_string(),
-    }
+    })
 }
 
 fn unquote_glob(value: &str) -> &str {
@@ -2235,9 +2262,10 @@ fn preprocess_grep_args(args: Vec<String>) -> GrepPreprocess {
     }
 
     // Pass 3: detect context flags, the print-filename flag (`-H`), or a
-    // value-taking flag (`-e`/`-f`/`-m`/`--include`/…). If any present, route
+    // value-taking flag (`-e`/`-f`/`-m`/…). Include and exclude were already
+    // translated to `--glob`, so they do not land here. If any remain, route
     // to passthrough — rg honours `-A`/`-B`/`-C`, `-H` and value flags
-    // natively, the ctxcrl-backed line-by-line filter can't reorder them safely.
+    // natively, and the line filter cannot reorder them safely.
     if has_grep_context_flag(&stripped)
         || has_grep_with_filename_flag(&stripped)
         || stripped.iter().any(|a| is_grep_value_flag(a))
@@ -2748,16 +2776,50 @@ mod grep_preprocess_tests {
         assert_eq!(
             out,
             GrepPreprocess::Stripped(v(&[
-                "needle",
-                "src",
-                "--glob",
-                "*.rs",
-                "--glob",
-                "!*.md",
-                "--glob",
-                "!target/**",
-                "-n",
+                "needle", "src", "--glob", "*.rs", "--glob", "!*.md", "--glob", "!target", "-n",
             ]))
+        );
+    }
+
+    #[test]
+    fn test_preprocess_grep_exclude_dir_is_a_basename() {
+        // `!node_modules/**` is anchored at the search root. GNU
+        // `--exclude-dir` also skips `src/node_modules`.
+        let out = preprocess_grep_args(v(&[
+            "needle",
+            ".",
+            "--exclude-dir",
+            "node_modules",
+            "--exclude-dir=target/",
+        ]));
+        assert_eq!(
+            out,
+            GrepPreprocess::Stripped(v(&[
+                "needle",
+                ".",
+                "--glob",
+                "!node_modules",
+                "--glob",
+                "!target",
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_preprocess_grep_exclude_dir_keeps_a_missing_pattern() {
+        let out = preprocess_grep_args(v(&["needle", ".", "--exclude-dir"]));
+        assert_eq!(
+            out,
+            GrepPreprocess::Stripped(v(&["needle", ".", "--exclude-dir"]))
+        );
+    }
+
+    #[test]
+    fn test_preprocess_grep_exclude_dir_keeps_a_dashed_name() {
+        let out = preprocess_grep_args(v(&["needle", ".", "--exclude-dir", "-secret"]));
+        assert_eq!(
+            out,
+            GrepPreprocess::Stripped(v(&["needle", ".", "--glob", "!-secret"]))
         );
     }
 
@@ -3102,8 +3164,11 @@ mod grep_preprocess_tests {
         assert!(is_grep_value_flag("-e"));
         assert!(is_grep_value_flag("-f"));
         assert!(is_grep_value_flag("-m"));
-        assert!(is_grep_value_flag("--include"));
-        assert!(is_grep_value_flag("--include=*.rs"));
+        // `--include` / `--exclude` / `--exclude-dir` are translated to
+        // `--glob` before this check. They must not force passthrough.
+        assert!(!is_grep_value_flag("--include"));
+        assert!(!is_grep_value_flag("--include=*.rs"));
+        assert!(!is_grep_value_flag("--exclude-dir"));
         assert!(!is_grep_value_flag("-i"));
         assert!(!is_grep_value_flag("needle"));
     }
@@ -4569,6 +4634,36 @@ fn run_cli() -> Result<i32> {
                 .map(|s| s.to_string_lossy().into_owned())
                 .collect();
 
+            // SECURITY (council P0-2 / task #2): the proxy path must pass the
+            // same defence-in-depth gates (Tirith + supply-chain) as the hook
+            // path. This runs before the grep/git re-exec below. That return
+            // used to skip the gate, so `proxy git` and `proxy grep` were
+            // unchecked whenever the gates were turned on. Both gates are
+            // opt-in, so with Tirith absent and supply-chain disabled this
+            // is a no-op. CONTEXTCRAWLER_PROXY_ACK cannot override a Deny.
+            {
+                let gate_cmd = if cmd_args_display.is_empty() {
+                    cmd_name_display.clone()
+                } else {
+                    format!("{} {}", cmd_name_display, cmd_args_display.join(" "))
+                };
+                let decision = hooks::hook_cmd::run_gates(&gate_cmd);
+                let ack = std::env::var("CONTEXTCRAWLER_PROXY_ACK").as_deref() == Ok("1");
+                match hooks::hook_cmd::proxy_gate_outcome(decision, ack) {
+                    hooks::hook_cmd::ProxyGateOutcome::Run => {}
+                    hooks::hook_cmd::ProxyGateOutcome::Refuse { reason, exit_code } => {
+                        eprintln!("{}", reason);
+                        timer.track(
+                            &format!("proxy {} (gate refused)", cmd_name_display),
+                            &format!("contextcrawler proxy {}", cmd_name_display),
+                            "",
+                            "",
+                        );
+                        std::process::exit(exit_code);
+                    }
+                }
+            }
+
             // `proxy grep` and `proxy git` were the unfiltered leak in the
             // tracking db: the wrapper exists, and those rows saved nothing.
             // Run the wrapper. CONTEXTCRAWLER_PROXY_RAW=1 keeps the raw hatch.
@@ -4597,36 +4692,6 @@ fn run_cli() -> Result<i32> {
                     cmd_name_display,
                     cmd_args_display.join(" ")
                 );
-            }
-
-            // SECURITY (council P0-2 / task #2): the proxy path must pass the
-            // same defence-in-depth gates (Tirith + supply-chain) as the hook
-            // path. Without this, `contextcrawler proxy <cmd>` was a complete
-            // gate bypass — a hook-rewritten command got gated while the
-            // documented "raw" escape hatch did not. Both gates are opt-in,
-            // so with Tirith absent and supply-chain disabled this is a no-op
-            // and proxy behaviour is unchanged.
-            {
-                let gate_cmd = if cmd_args_display.is_empty() {
-                    cmd_name_display.clone()
-                } else {
-                    format!("{} {}", cmd_name_display, cmd_args_display.join(" "))
-                };
-                let decision = hooks::hook_cmd::run_gates(&gate_cmd);
-                let ack = std::env::var("CONTEXTCRAWLER_PROXY_ACK").as_deref() == Ok("1");
-                match hooks::hook_cmd::proxy_gate_outcome(decision, ack) {
-                    hooks::hook_cmd::ProxyGateOutcome::Run => {}
-                    hooks::hook_cmd::ProxyGateOutcome::Refuse { reason, exit_code } => {
-                        eprintln!("{}", reason);
-                        timer.track(
-                            &format!("proxy {} (gate refused)", cmd_name_display),
-                            &format!("contextcrawler proxy {}", cmd_name_display),
-                            "",
-                            "",
-                        );
-                        std::process::exit(exit_code);
-                    }
-                }
             }
 
             // Nudge: if the proxied tool has a wrapped equivalent, point the
