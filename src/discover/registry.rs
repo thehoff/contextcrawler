@@ -1358,7 +1358,10 @@ fn rewrite_segment_inner(
                 parts.global_segment, parts.run_segment
             )
         };
-        return Some(rewritten);
+        // The redirect was split off before matching. Put it back, or
+        // `golangci-lint run 2>&1` drops the redirect and the output that
+        // was meant for a file reaches the terminal.
+        return Some(format!("{rewritten}{redirect_suffix}"));
     }
 
     // #196: gh with --json/--jq/--template produces structured output that
@@ -3897,6 +3900,18 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("golangci-lint --config=foo.yml run ./...", &[]),
             Some("contextcrawler golangci-lint --config=foo.yml run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_keeps_a_trailing_redirect() {
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint run ./... 2>&1", &[]),
+            Some("contextcrawler golangci-lint run ./... 2>&1".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("golangci-lint --color never run 2>/dev/null", &[]),
+            Some("contextcrawler golangci-lint --color never run 2>/dev/null".into())
         );
     }
 

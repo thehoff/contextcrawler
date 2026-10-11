@@ -866,13 +866,12 @@ fn run_log(
         return Ok(result.exit_code);
     }
 
-    // Patch-producing invocations (`git log -p`, `--patch`, `-u`,
-    // `--patch-with-raw`, `--patch-with-stat`) must not be forced through the
-    // compact pretty-format + `---CTXCRL-END---` injection: the injected
-    // format would swallow the patch hunks entirely. When a patch flag appears
-    // as its own token, run the user's exact invocation and hand git's
-    // stdout/stderr/exit code through untouched.
-    if log_args_have_patch_flag(args) {
+    // Patch output and machine shapes (`--stat`, `--numstat`, `--name-only`,
+    // `--name-status`, `--raw`, `--shortstat`, `--dirstat`, `--summary`)
+    // cannot share the injected pretty-format. The markers swallow a patch
+    // and split a stat block into a fake next commit. Run the user's exact
+    // invocation and hand git's stdout, stderr, and exit code through.
+    if log_args_have_patch_flag(args) || log_args_have_machine_shape(args) {
         let mut cmd = git_cmd(global_args);
         cmd.arg("log");
         cmd.args(args);
@@ -989,7 +988,7 @@ fn log_run_is_passthrough(raw: &str, filtered: &str) -> bool {
 /// (`--oneline` / `--pretty` / `--format`), so CTXCRL must not inject its own
 /// pretty-format.
 fn log_has_format_flag(args: &[String]) -> bool {
-    args.iter().any(|arg| {
+    scan_log_flags(args, |arg| {
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     })
 }
@@ -1001,24 +1000,55 @@ fn log_injects_default_limit(args: &[String]) -> bool {
     parse_user_limit(args).is_none() && !log_has_format_flag(args)
 }
 
+/// A `git log` flag that takes the next argv token as its value.
+///
+/// The following token can look like a flag (`--grep -5`, `--author --pretty`,
+/// `--grep --merges`) and must not be read as one. Attached forms
+/// (`--grep=-5`, `--max-count=3`) are a different token and are not listed.
+fn log_flag_takes_next(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--grep"
+            | "-S"
+            | "-G"
+            | "--author"
+            | "--committer"
+            | "-n"
+            | "--max-count"
+            | "--skip"
+            | "--pretty"
+            | "--format"
+    )
+}
+
+/// Visit each `git log` flag. The value of a flag that takes one is skipped,
+/// and the walk stops at `--` so a pathspec is not a flag.
+fn scan_log_flags(args: &[String], mut visit: impl FnMut(&str) -> bool) -> bool {
+    let mut skip_next = false;
+    for arg in args {
+        if arg == "--" {
+            return false;
+        }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if visit(arg) {
+            return true;
+        }
+        if log_flag_takes_next(arg) {
+            skip_next = true;
+        }
+    }
+    false
+}
+
 /// Args with a patch request removed, for `git show`'s summary and stat
 /// steps. The diff step keeps the original list.
 ///
 /// `-p` as the value of `--grep` / `-n` / `--pretty` stays. Tokens after `--`
 /// stay: they are pathspecs, and a path can be named `-p`.
 fn args_without_patch_flags(args: &[String]) -> Vec<String> {
-    const CONSUMES_NEXT: &[&str] = &[
-        "--grep",
-        "-S",
-        "-G",
-        "--author",
-        "--committer",
-        "-n",
-        "--max-count",
-        "--skip",
-        "--pretty",
-        "--format",
-    ];
     const PATCH_FLAGS: &[&str] = &[
         "-p",
         "-u",
@@ -1045,7 +1075,7 @@ fn args_without_patch_flags(args: &[String]) -> Vec<String> {
             skip_next = false;
             continue;
         }
-        if CONSUMES_NEXT.contains(&arg.as_str()) {
+        if log_flag_takes_next(arg) {
             skip_next = true;
             out.push(arg.clone());
             continue;
@@ -1067,18 +1097,6 @@ fn args_without_patch_flags(args: &[String]) -> Vec<String> {
 /// (`--grep=-p`, `--max-count=-p`) never match because they are not the bare
 /// token — only an exact `-p` / `-u` / `--patch` / … counts.
 fn log_args_have_patch_flag(args: &[String]) -> bool {
-    const CONSUMES_NEXT: &[&str] = &[
-        "--grep",
-        "-S",
-        "-G",
-        "--author",
-        "--committer",
-        "-n",
-        "--max-count",
-        "--skip",
-        "--pretty",
-        "--format",
-    ];
     const PATCH_FLAGS: &[&str] = &[
         "-p",
         "-u",
@@ -1086,20 +1104,27 @@ fn log_args_have_patch_flag(args: &[String]) -> bool {
         "--patch-with-raw",
         "--patch-with-stat",
     ];
+    scan_log_flags(args, |arg| PATCH_FLAGS.contains(&arg))
+}
 
-    let mut skip_next = false;
-    for arg in args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if CONSUMES_NEXT.contains(&arg.as_str()) {
-            skip_next = true;
-        } else if PATCH_FLAGS.contains(&arg.as_str()) {
-            return true;
-        }
-    }
-    false
+/// Stat and name-list shapes. The injected pretty-format cannot sit beside
+/// them: git prints the stat where the next commit header would be, and the
+/// filter reads that block as another commit.
+fn log_args_have_machine_shape(args: &[String]) -> bool {
+    scan_log_flags(args, |arg| {
+        matches!(
+            arg,
+            "--stat"
+                | "--numstat"
+                | "--name-only"
+                | "--name-status"
+                | "--raw"
+                | "--shortstat"
+                | "--dirstat"
+                | "--summary"
+        ) || arg.starts_with("--stat=")
+            || arg.starts_with("--dirstat=")
+    })
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -1108,6 +1133,31 @@ fn log_args_have_patch_flag(args: &[String]) -> bool {
 fn parse_user_limit(args: &[String]) -> Option<usize> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
+        // Pathspecs. `git log -- -5` is a path, not a limit.
+        if arg == "--" {
+            break;
+        }
+        // -n 20 / --max-count 20. These also take a value, so they are
+        // handled before the generic skip.
+        if arg == "-n" || arg == "--max-count" {
+            if let Some(next) = iter.next() {
+                if let Ok(n) = next.parse::<usize>() {
+                    return Some(n);
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--max-count=") {
+            if let Ok(n) = rest.parse::<usize>() {
+                return Some(n);
+            }
+            continue;
+        }
+        // `--grep -5` is a pattern, not a limit.
+        if log_flag_takes_next(arg) {
+            let _ = iter.next();
+            continue;
+        }
         // -20 (combined digit form)
         if arg.starts_with('-')
             && arg.len() > 1
@@ -1115,28 +1165,6 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
         {
             if let Ok(n) = arg[1..].parse::<usize>() {
                 return Some(n);
-            }
-        }
-        // -n 20 (two-token form)
-        if arg == "-n" {
-            if let Some(next) = iter.next() {
-                if let Ok(n) = next.parse::<usize>() {
-                    return Some(n);
-                }
-            }
-        }
-        // --max-count=20
-        if let Some(rest) = arg.strip_prefix("--max-count=") {
-            if let Ok(n) = rest.parse::<usize>() {
-                return Some(n);
-            }
-        }
-        // --max-count 20 (two-token form)
-        if arg == "--max-count" {
-            if let Some(next) = iter.next() {
-                if let Ok(n) = next.parse::<usize>() {
-                    return Some(n);
-                }
             }
         }
     }
@@ -1161,10 +1189,7 @@ fn should_inject_no_merges(args: &[String], user_set_limit: bool) -> bool {
     if user_set_limit {
         return false;
     }
-    let wants_merges = args
-        .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2");
-    !wants_merges
+    !scan_log_flags(args, |arg| arg == "--merges" || arg == "--min-parents=2")
 }
 
 pub(crate) fn filter_log_output(
@@ -4531,6 +4556,50 @@ To https://github.com/foo/bar.git
         assert!(log_has_format_flag(&s(&["--pretty=format:%H"])));
         assert!(log_has_format_flag(&s(&["--format=%H"])));
         assert!(!log_has_format_flag(&s(&["-p"])));
+        // The value of --author is not a format flag.
+        assert!(!log_has_format_flag(&s(&["--author", "--pretty"])));
+        assert!(!log_has_format_flag(&s(&["--", "--oneline"])));
+    }
+
+    #[test]
+    fn log_machine_shape_is_not_an_option_value_or_a_path() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        for flag in [
+            "--stat",
+            "--numstat",
+            "--name-only",
+            "--name-status",
+            "--raw",
+            "--shortstat",
+            "--dirstat",
+            "--summary",
+            "--stat=80",
+            "--dirstat=files",
+        ] {
+            assert!(log_args_have_machine_shape(&s(&[flag])), "{flag}");
+        }
+        assert!(!log_args_have_machine_shape(&s(&["--oneline"])));
+        assert!(!log_args_have_machine_shape(&s(&["--stat-width=40"])));
+        assert!(!log_args_have_machine_shape(&s(&["--grep", "--stat"])));
+        assert!(!log_args_have_machine_shape(&s(&["--", "--stat"])));
+        assert!(!log_args_have_patch_flag(&s(&["--", "-p"])));
+    }
+
+    #[test]
+    fn log_limit_and_merges_ignore_option_values_and_pathspecs() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_user_limit(&s(&["--grep", "-5"])), None);
+        assert_eq!(parse_user_limit(&s(&["--", "-5"])), None);
+        assert_eq!(parse_user_limit(&s(&["-5"])), Some(5));
+        assert_eq!(parse_user_limit(&s(&["--author", "--max-count", "3"])), None);
+        assert_eq!(
+            parse_user_limit(&s(&["--author", "alice", "--max-count", "3"])),
+            Some(3)
+        );
+        // `--merges` as a grep pattern is not a request for merge commits.
+        assert!(should_inject_no_merges(&s(&["--grep", "--merges"]), false));
+        assert!(!should_inject_no_merges(&s(&["--merges"]), false));
+        assert!(should_inject_no_merges(&s(&["--", "--merges"]), false));
     }
 
     /// Integration: `git log -p` must reach git with the patch flag intact

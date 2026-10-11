@@ -112,6 +112,56 @@ fn has_json_flag(args: &[String]) -> bool {
     args.iter().any(|a| a == "--json")
 }
 
+/// A gh flag that takes the next argv token as its value.
+///
+/// The list is the union of the flags on the commands that pull an identifier
+/// out of argv (`pr view`, `pr checks`, `issue view`, `run view`) and the
+/// flags on `pr edit` / `pr comment`, whose confirmation used to treat the
+/// flag's value as the PR number. A missing entry steals that value
+/// (`gh pr checks --interval 30` became `gh pr checks 30 --interval`).
+/// A boolean flag must not be added: its following token is a real positional.
+///
+/// A short cluster takes a value when its last letter does (`-vj 1`). An
+/// attached value (`-j123`, `--job=1`) does not.
+fn gh_flag_takes_separate_value(arg: &str) -> bool {
+    const LONG: &[&str] = &[
+        "--repo",
+        "--jq",
+        "--json",
+        "--template",
+        "--job",
+        "--attempt",
+        "--interval",
+        "--attach",
+        "--body",
+        "--body-file",
+        "--add-assignee",
+        "--add-label",
+        "--add-project",
+        "--add-reviewer",
+        "--base",
+        "--milestone",
+        "--remove-assignee",
+        "--remove-label",
+        "--remove-project",
+        "--remove-reviewer",
+        "--title",
+    ];
+    if LONG.contains(&arg) {
+        return true;
+    }
+    let Some(rest) = arg.strip_prefix('-') else {
+        return false;
+    };
+    if rest.is_empty() || rest.starts_with('-') || arg.contains('=') {
+        return false;
+    }
+    matches!(
+        rest.chars().last(),
+        Some('R' | 'q' | 't' | 'i' | 'j' | 'a' | 'b' | 'F' | 'B' | 'm')
+    )
+}
+
 /// Extract a positional identifier (PR/issue number) from args, returning it
 /// separately from the remaining extra flags (like -R, --repo, etc.).
 /// Handles both `view 123 -R owner/repo` and `view -R owner/repo 123`.
@@ -120,17 +170,6 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
         return None;
     }
 
-    // Known gh flags that take a value — skip these and their values
-    let flags_with_value = [
-        "-R",
-        "--repo",
-        "-q",
-        "--jq",
-        "-t",
-        "--template",
-        "--job",
-        "--attempt",
-    ];
     let mut identifier = None;
     let mut extra = Vec::new();
     let mut skip_next = false;
@@ -141,7 +180,7 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
             skip_next = false;
             continue;
         }
-        if flags_with_value.contains(&arg.as_str()) {
+        if gh_flag_takes_separate_value(arg) {
             extra.push(arg.clone());
             skip_next = true;
             continue;
@@ -979,13 +1018,30 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<i32> {
     )
 }
 
+/// The `#N` in a `pr edit` / `pr comment` confirmation. A value belonging to
+/// a flag is not the PR number: `--add-label bug` is not `#bug`.
+fn pr_number_label(args: &[String]) -> String {
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if gh_flag_takes_separate_value(arg) {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return format!("#{arg}");
+    }
+    String::new()
+}
+
 fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<i32> {
     let subcmd = &args[0];
-    let pr_num = args[1..]
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(|s| format!("#{}", s))
-        .unwrap_or_default();
+    let pr_num = pr_number_label(&args[1..]);
     let mut cmd = secure_gh_command();
     cmd.arg("pr");
     for arg in args {
@@ -1070,6 +1126,41 @@ mod tests {
         let result = ok_confirmation("created", "#42 https://github.com/foo/bar/pull/42");
         assert!(result.contains("ok created"));
         assert!(result.contains("#42"));
+    }
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn identifier_keeps_the_value_of_a_flag() {
+        let (id, extra) = parse_optional_identifier(&s(&["--interval", "30"]));
+        assert_eq!(id, None);
+        assert_eq!(extra, s(&["--interval", "30"]));
+
+        let (id, extra) = parse_optional_identifier(&s(&["-j", "12345"]));
+        assert_eq!(id, None);
+        assert_eq!(extra, s(&["-j", "12345"]));
+
+        let (id, extra) = parse_optional_identifier(&s(&["-vj", "1"]));
+        assert_eq!(id, None);
+        assert_eq!(extra, s(&["-vj", "1"]));
+
+        let (id, extra) = parse_optional_identifier(&s(&["--interval", "30", "42"]));
+        assert_eq!(id.as_deref(), Some("42"));
+        assert_eq!(extra, s(&["--interval", "30"]));
+
+        // An attached value does not swallow the identifier.
+        let (id, extra) = parse_optional_identifier(&s(&["-j12345", "99"]));
+        assert_eq!(id.as_deref(), Some("99"));
+        assert_eq!(extra, s(&["-j12345"]));
+    }
+
+    #[test]
+    fn pr_edit_label_is_not_the_pr_number() {
+        assert_eq!(pr_number_label(&s(&["--add-label", "bug"])), "");
+        assert_eq!(pr_number_label(&s(&["42", "--add-label", "bug"])), "#42");
+        assert_eq!(pr_number_label(&s(&["--remove-milestone", "42"])), "#42");
     }
 
     #[test]

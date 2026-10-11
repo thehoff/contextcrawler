@@ -2759,6 +2759,7 @@ mod grep_preprocess_tests {
         );
     }
 
+    #[test]
     fn test_preprocess_grep_strips_bare_r() {
         let out = preprocess_grep_args(v(&["-r", "needle", "."]));
         assert_eq!(out, GrepPreprocess::Stripped(v(&["needle", "."])));
@@ -3868,8 +3869,14 @@ fn run_cli() -> Result<i32> {
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
                 diff_cmd::run(&file1, &f2, cli.verbose)?
-            } else {
+            } else if file1 == Path::new("-") {
+                // `diff -` is the stdin form: a unified diff already on the pipe.
                 diff_cmd::run_stdin(cli.verbose)?
+            } else {
+                // `diff <file>` is a missing operand. Real diff exits 2 before
+                // opening the file, so a later `&&` step must not run.
+                eprintln!("diff: missing operand after '{}'", file1.display());
+                2
             }
         }
 
@@ -4893,6 +4900,13 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Aws { .. }
+            | Commands::Psql { .. }
+            | Commands::Wc { .. }
+            | Commands::Jest { .. }
+            | Commands::Mypy { .. }
+            | Commands::Gradlew { .. }
+            | Commands::Rg { .. }
     )
 }
 
@@ -4944,6 +4958,28 @@ mod tests {
             "bad args on a known command must NOT be foreign; got {:?}",
             err2.kind()
         );
+    }
+
+    #[test]
+    fn hook_rewritten_commands_are_integrity_checked() {
+        // These are rewritten by the hook. Leaving one off the whitelist
+        // skips the integrity check and fails open.
+        let samples: &[&[&str]] = &[
+            &["contextcrawler", "aws", "s3"],
+            &["contextcrawler", "psql"],
+            &["contextcrawler", "wc"],
+            &["contextcrawler", "jest"],
+            &["contextcrawler", "mypy"],
+            &["contextcrawler", "gradlew"],
+            &["contextcrawler", "rg", "needle"],
+        ];
+        for argv in samples {
+            let cli = Cli::try_parse_from(*argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert!(
+                is_operational_command(&cli.command),
+                "{argv:?} must be integrity-checked"
+            );
+        }
     }
 
     #[test]

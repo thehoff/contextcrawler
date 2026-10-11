@@ -52,6 +52,20 @@ from [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `proxy grep` and `proxy git` now run the wrapper.
   `CONTEXTCRAWLER_PROXY_RAW=1` keeps the raw command. OMP compacts a tool
   result from 400 characters, down from 1,500.
+- `git log --stat` (and `--numstat`, `--name-only`, `--name-status`,
+  `--raw`, `--shortstat`, `--dirstat`, `--summary`) is passed through.
+  The injected pretty-format was splitting the stat block into another
+  commit. A value of `--grep` or `--author` is no longer read as a limit,
+  a format, or `--merges`, and a path after `--` is not a flag.
+- `diff <file>` with one operand exits 2, as `diff` does. `diff -` still
+  reads a unified diff from stdin.
+- `golangci-lint run 2>&1` keeps the redirect. The rewrite was dropping
+  it, so output meant for a file reached the terminal.
+- `gh pr checks --interval 30` and `gh run view -j 12345` keep the flag's
+  value. It was being taken as the PR or run id. `gh pr edit --add-label
+  bug` no longer confirms `#bug`.
+- `aws`, `psql`, `wc`, `jest`, `mypy`, `gradlew`, and `rg` go through the
+  hook integrity check. They were rewritten and then skipped the check.
 - Harvested from rtk, reviewed against the two jobs:
   `case` terminators `;;` / `;&` / `;;&` stay one operator, so a rewrite
   no longer turns a fall-through into a background job (rtk 5e92ea47).
