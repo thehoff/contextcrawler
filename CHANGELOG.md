@@ -51,6 +51,8 @@ Patch on 0.5.0. Observe, the OMP installer, and the gate fixes below.
 - OMP guidance no longer tells the model to replace native `read`, `find`,
   and `grep` with shell proxies (#248). Those tools stay native. A large
   `grep` or `glob` result is compacted after the tool returns (#247).
+- The OMP extension source no longer ends with a stray line. That line
+  was not TypeScript, and it named a home directory.
 - `contextcrawler rg` keeps ripgrep's `.gitignore` and binary skipping (#201).
   `contextcrawler grep` still searches gitignored files, matching `grep -r`.
 - `read -<digits>` is a tail count (`--tail-lines`), including when the

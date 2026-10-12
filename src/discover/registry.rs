@@ -3070,8 +3070,8 @@ mod tests {
     #[test]
     fn test_rewrite_nl_ba_absolute_path() {
         assert_eq!(
-            rewrite_command_no_prefixes("nl -ba /home/thehoff/.codex/MEMORY.md", &[]),
-            Some("contextcrawler read /home/thehoff/.codex/MEMORY.md --line-numbers".into())
+            rewrite_command_no_prefixes("nl -ba /home/user/.codex/MEMORY.md", &[]),
+            Some("contextcrawler read /home/user/.codex/MEMORY.md --line-numbers".into())
         );
     }
 

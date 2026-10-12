@@ -53,7 +53,7 @@ downgrades log regardless of which harness triggered it).
 ls ~/.omp/agent/extensions/contextcrawler*  # empty
 ls ~/.pi/agent/extensions/contextcrawler*    # empty
 ls ~/.omp/agent/extensions/                  # 8 extensions, no contextcrawler
-which contextcrawler                          # /home/thehoff/.cargo/bin/contextcrawler — on PATH
+which contextcrawler                          # ~/.cargo/bin/contextcrawler — on PATH
 ```
 
 ## Check (if re-visiting)

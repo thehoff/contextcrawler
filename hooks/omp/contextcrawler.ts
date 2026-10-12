@@ -196,6 +196,3 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 }
-
-
-[You have received this identical output 3 times. Re-reading '/home/thehoff/.omp/agent/extensions/contextcrawler.ts:raw' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]
